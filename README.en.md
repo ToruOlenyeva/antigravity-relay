@@ -83,9 +83,8 @@ Restart Google Antigravity or enable "Account & Quota Manager" in the Antigravit
 antigravity-relay/
 ├── assets/                      # Brand vector logo and bilingual HD previews
 ├── docs/                        # Deep technical architecture documentation
-├── skills/                      # Domain engineering skill specifications
-│   ├── account-and-hotswap/     # Isolated OAuth, WinCred swap, and proxy routing spec
-│   └── quota-and-ledger/        # Three-pool quota probes and tier filtering spec
+├── lib/
+│   └── proto-scrub.cjs          # Offline Protobuf thoughtSignature scrubbing engine
 ├── sidecars/
 │   └── panel/                   # Native build-free decoupled Sidecar panel
 │       ├── app.js               # Frontend interaction, custom dropdowns, and sync engine

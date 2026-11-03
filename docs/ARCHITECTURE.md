@@ -21,9 +21,8 @@ antigravity-relay/
 ├── docs/
 │   ├── ARCHITECTURE.en.md       # 英文架构设计文档
 │   └── ARCHITECTURE.md          # 中文架构设计文档
-├── skills/
-│   ├── account-and-hotswap/     # 账号池、旁路 OAuth 与透明代理路由规范
-│   └── quota-and-ledger/        # 三大配额池探针与全等级模型过滤规范
+├── lib/
+│   └── proto-scrub.cjs          # Protobuf 跨通道思考签名离线剥离引擎
 ├── sidecars/
 │   └── panel/                   # 原生免构建前后端物理分离 Sidecar 面板
 │       ├── app.js               # 前端核心交互、自定义下拉与状态同步引擎

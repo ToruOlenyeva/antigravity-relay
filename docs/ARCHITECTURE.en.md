@@ -21,9 +21,8 @@ antigravity-relay/
 ├── docs/
 │   ├── ARCHITECTURE.en.md       # English architecture design doc
 │   └── ARCHITECTURE.md          # Chinese architecture design doc
-├── skills/
-│   ├── account-and-hotswap/     # Account pool, isolated OAuth, and proxy routing spec
-│   └── quota-and-ledger/        # Three-pool quota probes and tier filtering spec
+├── lib/
+│   └── proto-scrub.cjs          # Offline Protobuf thoughtSignature scrubbing engine
 ├── sidecars/
 │   └── panel/                   # Native build-free decoupled Sidecar panel
 │       ├── app.js               # Frontend interaction, custom dropdowns, and sync engine
