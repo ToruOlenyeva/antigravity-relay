@@ -1,0 +1,30 @@
+{
+  "antigravity-relay": {
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "node relay-hook.cjs pre-invocation",
+        "timeout": 10
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "invoke_subagent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node relay-hook.cjs pre-tool",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "node relay-hook.cjs stop",
+        "timeout": 10
+      }
+    ]
+  }
+}

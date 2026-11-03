@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" fill="none">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1E1B4B" />
+      <stop offset="50%" stop-color="#0F172A" />
+      <stop offset="100%" stop-color="#090D16" />
+    </linearGradient>
+    <linearGradient id="ringOuterGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38BDF8" />
+      <stop offset="55%" stop-color="#6366F1" />
+      <stop offset="100%" stop-color="#A855F7" />
+    </linearGradient>
+    <linearGradient id="ringInnerGrad" x1="100%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#34D399" />
+      <stop offset="100%" stop-color="#0EA5E9" />
+    </linearGradient>
+    <linearGradient id="boltGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FDE047" />
+      <stop offset="50%" stop-color="#38BDF8" />
+      <stop offset="100%" stop-color="#818CF8" />
+    </linearGradient>
+    <filter id="glowShadow" x="-15%" y="-15%" width="130%" height="130%">
+      <feDropShadow dx="0" dy="6" stdDeviation="8" flood-color="#6366F1" flood-opacity="0.35" />
+    </filter>
+  </defs>
+
+  <!-- 外层圆角深色底座（对齐 plugin-switcher / plan-guard 家族式 256x256 规范） -->
+  <rect x="24" y="24" width="208" height="208" rx="44" fill="url(#bgGrad)" stroke="#334155" stroke-width="3" />
+  <rect x="28" y="28" width="200" height="200" rx="40" stroke="#818CF8" stroke-width="1" stroke-opacity="0.22" />
+
+  <!-- 四角科技感矩阵装饰点 -->
+  <circle cx="52" cy="52" r="3" fill="#475569" />
+  <circle cx="66" cy="52" r="3" fill="#475569" />
+  <circle cx="52" cy="66" r="3" fill="#475569" />
+  <circle cx="204" cy="204" r="3" fill="#475569" />
+  <circle cx="190" cy="204" r="3" fill="#475569" />
+  <circle cx="204" cy="190" r="3" fill="#475569" />
+
+  <!-- 底层轨道暗环 -->
+  <circle cx="128" cy="128" r="68" stroke="#1E293B" stroke-width="10" />
+  <circle cx="128" cy="128" r="50" stroke="#1E293B" stroke-width="8" />
+
+  <!-- 主体视觉：外层周限额/多通道配额圆弧 + 双向接力箭头节点 -->
+  <g filter="url(#glowShadow)">
+    <!-- 外环：代表多账号配额池进度环 -->
+    <path d="M 128 60 A 68 68 0 1 1 63.3 149" stroke="url(#ringOuterGrad)" stroke-width="10" stroke-linecap="round" />
+    <!-- 内环：代表 5 小时动态滑动窗口与免重载路由轨道 -->
+    <path d="M 128 178 A 50 50 0 1 1 175.5 112.5" stroke="url(#ringInnerGrad)" stroke-width="8" stroke-linecap="round" />
+
+    <!-- 轨道接力节点圆点 -->
+    <circle cx="128" cy="60" r="6.5" fill="#38BDF8" stroke="#0F172A" stroke-width="2.5" />
+    <circle cx="63.3" cy="149" r="6.5" fill="#A855F7" stroke="#0F172A" stroke-width="2.5" />
+    <circle cx="175.5" cy="112.5" r="5.5" fill="#34D399" stroke="#0F172A" stroke-width="2" />
+
+    <!-- 中心：算力闪电接力核心 -->
+    <path d="M 134 88 L 104 130 H 127 L 120 168 L 152 124 H 129 L 134 88 Z" fill="url(#boltGrad)" stroke="#F8FAFC" stroke-width="1.5" stroke-linejoin="round" />
+  </g>
+</svg>

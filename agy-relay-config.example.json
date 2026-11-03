@@ -1,0 +1,73 @@
+{
+  "version": 1,
+  "activeAccountId": "alice.dev@gmail.com#personal",
+  "accounts": [
+    {
+      "id": "alice.dev@gmail.com#personal",
+      "email": "alice.dev@gmail.com",
+      "name": "Alice Dev",
+      "channelType": "personal",
+      "tierCode": "Pro",
+      "tierName": "Google AI Pro",
+      "gcpEnabled": false,
+      "gcpProjectId": "",
+      "gcpBillingMode": "agent_platform",
+      "gcpRegion": "global",
+      "isActive": true,
+      "status": "online"
+    },
+    {
+      "id": "bob.ultra@gmail.com#personal",
+      "email": "bob.ultra@gmail.com",
+      "name": "Bob Studio",
+      "channelType": "personal",
+      "tierCode": "Ultra",
+      "tierName": "Google AI Ultra",
+      "gcpEnabled": false,
+      "gcpProjectId": "",
+      "gcpBillingMode": "agent_platform",
+      "gcpRegion": "global",
+      "isActive": false,
+      "status": "standby"
+    },
+    {
+      "id": "charlie.plus@gmail.com#personal",
+      "email": "charlie.plus@gmail.com",
+      "name": "Charlie Plus",
+      "channelType": "personal",
+      "tierCode": "Plus",
+      "tierName": "Google AI Plus",
+      "gcpEnabled": false,
+      "gcpProjectId": "",
+      "gcpBillingMode": "agent_platform",
+      "gcpRegion": "global",
+      "isActive": false,
+      "status": "standby"
+    },
+    {
+      "id": "alice.dev@gmail.com#gcp:acme-cloud-prod-01",
+      "email": "alice.dev@gmail.com",
+      "name": "Alice Dev",
+      "channelType": "gcp",
+      "tierCode": "GCP",
+      "tierName": "Google Cloud Project",
+      "gcpEnabled": true,
+      "gcpProjectId": "acme-cloud-prod-01",
+      "gcpBillingMode": "agent_platform",
+      "gcpRegion": "global",
+      "isActive": false,
+      "status": "standby"
+    }
+  ],
+  "modelRouting": {
+    "Gemini 4 Argon": {
+      "targetChannelId": "auto_poll"
+    },
+    "Gemini 3.8 Flash": {
+      "targetChannelId": "auto_poll"
+    },
+    "Claude Opus 4.6 (Thinking)": {
+      "targetChannelId": "bob.ultra@gmail.com#personal"
+    }
+  }
+}

@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>账号与配额管理</title>
+  <script>
+    (function() {
+      var isDark = true;
+      try {
+        var saved = localStorage.getItem("antigravity_theme_mode");
+        if (saved === "light") isDark = false;
+        else if (saved === "dark") isDark = true;
+        else if (window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches) isDark = false;
+      } catch (e) {}
+      document.documentElement.setAttribute("data-theme", isDark ? "dark" : "light");
+    })();
+  </script>
+  <script src="/preload.js"></script>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+
+  <!-- 顶栏 -->
+  <div class="header">
+    <div class="header-left">
+      <h1 id="uiAppTitle">账号与配额管理</h1>
+      <span class="badge" id="uiLsBadge">在线</span>
+    </div>
+    <div class="header-actions">
+      <button class="secondary small" id="langToggleBtn" onclick="toggleLanguage()">EN</button>
+      <button class="secondary small" id="refreshBtn" onclick="handleManualRefresh()">刷新</button>
+    </div>
+  </div>
+
+  <!-- 1. 会话与使用量（支持下拉选择任意已收录账号/通道查看配额） -->
+  <div class="section-card">
+    <div class="section-header">
+      <span class="section-title" id="secCurrentTitle">会话与使用量</span>
+    </div>
+
+    <div id="sessionChannelSelectorMount"></div>
+
+    <!-- 三大真实配额池（对齐官方双行：周限额 + 5 小时限额） -->
+    <div class="quota-list" id="quotaGroupsContainer"></div>
+  </div>
+
+  <!-- 2. 独立通道池与旁路无打断登录 -->
+  <div class="section-card">
+    <div class="section-header">
+      <span class="section-title" id="secAccountsTitle">独立通道池</span>
+      <div class="btn-group">
+        <button class="secondary small" id="btnCaptureCurrent" onclick="captureCurrentAccount()">收录当前</button>
+        <button class="secondary small" id="btnToggleAddGcp" onclick="toggleAddGcpDrawer()">+ 添加通道</button>
+        <button class="small" id="btnAddOAuthAccount" onclick="startIsolatedBrowserLogin()">+ 添加账号</button>
+      </div>
+    </div>
+
+    <!-- 旁路浏览器登录进行中提示条 -->
+    <div class="oauth-banner" id="oauthPendingBanner" style="display: none;">
+      <span id="oauthBannerText">已在浏览器打开官方登录页</span>
+      <button class="danger small" id="btnCancelOAuth" onclick="cancelBrowserLogin()">取消</button>
+    </div>
+
+    <!-- 独立添加 GCP 通道折叠抽屉（支持复用已登录 Google 账号凭据或拉起浏览器新登录） -->
+    <div class="gcp-drawer" id="addGcpDrawer" style="display: none;"></div>
+
+    <div class="account-list" id="accountListContainer"></div>
+  </div>
+
+  <!-- 3. 可用模型 & 子智能体算力池路由 -->
+  <div class="section-card">
+    <div class="section-header">
+      <span class="section-title" id="secRoutingTitle">模型与子智能体算力路由</span>
+      <span class="section-hint" id="secRoutingHint">推理前自动切池</span>
+    </div>
+
+    <div class="routing-list" id="modelRoutingContainer"></div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script src="/i18n.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
