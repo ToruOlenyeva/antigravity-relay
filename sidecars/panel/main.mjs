@@ -286,14 +286,25 @@ async function requestHandler(req, res) {
     }
   }
 
-  // 5. 切换通道或谷歌账号（同邮箱走 0ms ValidateProject 秒切，跨邮箱写凭据热重载）
+  // 5. 切换通道或谷歌账号（写入凭据并异步调度重启 Language Server，先返回 HTTP 响应防止被宿主重载打断）
   if (req.method === "POST" && pathname === "/api/switch-account") {
     try {
       const { accountId } = await readJsonBody(req);
       const result = await lsBridge.switchActiveGoogleAccount(accountId);
-      const snap = await lsBridge.fetchLiveSystemSnapshot(true);
+      const snap = await lsBridge.fetchLiveSystemSnapshot(false);
       broadcastSnapshot(snap);
       return sendJson(res, 200, { success: true, ...result, snapshot: snap });
+    } catch (err) {
+      return sendJson(res, 500, { success: false, error: err.message });
+    }
+  }
+
+  // 5a. 多开独立 Antigravity 实例（预置目标通道凭据 + 独立 --user-data-dir，满足 GCP 与个人号双开同屏需求）
+  if (req.method === "POST" && pathname === "/api/launch-instance") {
+    try {
+      const { accountId } = await readJsonBody(req);
+      const result = await lsBridge.launchIsolatedAntigravityInstance(accountId || "");
+      return sendJson(res, 200, { success: true, ...result });
     } catch (err) {
       return sendJson(res, 500, { success: false, error: err.message });
     }

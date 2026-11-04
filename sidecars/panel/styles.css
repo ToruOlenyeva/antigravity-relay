@@ -859,3 +859,51 @@ button.danger:hover {
   display: none;
   z-index: 1000;
 }
+
+/* 对话算力遥测统计条 (输出速度 tok/s + 本轮 Token + 当前对话累计 Token) */
+.telemetry-bar {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 2px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--bg-base);
+  border: 1px solid var(--border-subtle);
+}
+
+.telemetry-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.telemetry-metric-label {
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.telemetry-metric-val {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-main);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.telemetry-metric-val.highlight {
+  color: var(--success);
+}
+
+.telemetry-sub-tag {
+  font-size: 9.5px;
+  font-weight: 500;
+  color: var(--text-muted);
+  margin-left: 3px;
+}

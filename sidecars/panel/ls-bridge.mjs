@@ -805,6 +805,7 @@ function buildCleanChannelToken(baseToken, targetProject = "", targetLocation = 
   const cleanPid = String(targetProject || "").trim();
   const cleanLoc = String(targetLocation || "").trim();
   const next = { ...baseToken };
+  delete next.id_token;
   if (next.token && typeof next.token === "object") {
     next.token = {
       access_token: String(next.token.access_token || "").trim(),
@@ -813,8 +814,8 @@ function buildCleanChannelToken(baseToken, targetProject = "", targetLocation = 
       expiry: normalizeIsoExpiry(next.token.expiry)
     };
   }
-  if (!next.writer_id && cachedWinCred?.writer_id) {
-    next.writer_id = cachedWinCred.writer_id;
+  if (!next.writer_id) {
+    next.writer_id = cachedWinCred?.writer_id || "iHdmCYy1qVTj84_gl_aPUA";
   }
   if (cleanPid) {
     next.auth_method = "gcp";
@@ -1466,33 +1467,28 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
 
   const lsEmail = (us.email || "").trim();
   const credEmail = (cred?.id_token_email || "").trim();
-  const activeEmail = lsEmail || credEmail || cfg.__meta__?.activeEmail || "";
+  const activeEmail = credEmail || cfg.__meta__?.activeEmail || lsEmail || "";
   const activeName = us.name || "";
   const rawTierName = us.userTier?.name || planStatus?.planInfo?.planName || "";
   const activeTierId = us.userTier?.id || "";
 
-  // 综合 GetUserStatus.userTier、language_server.log AuthProvider 状态与凭据管理器判定当前是否处于 GCP 模式
+  // 以 Windows 凭据管理器 (gemini:antigravity) 与当前激活通道配置作为判定 GCP 模式的唯一权威事实源，防止刚从 GCP 切回个人号时被旧 LS 日志残留误判回 GCP
   const tierIndicatesGcp = /agent\s*platform|enterprise/i.test(rawTierName);
-  const tierIndicatesPersonal = /google\s*ai\s*(pro|ultra)|free|g1-pro/i.test(rawTierName) || activeTierId === "g1-pro-tier";
   const credPid = String(cred?.project_id || "").trim();
   const logPid = String(logInfo.lastProjectId || "").trim();
   const metaPid = String(cfg.__meta__?.lastAppliedGcpProject || "").trim();
 
   let isLiveGcp = false;
-  if (tierIndicatesGcp) {
-    isLiveGcp = true;
-  } else if (tierIndicatesPersonal) {
-    isLiveGcp = false;
-  } else if (logInfo.enableBusinessLogin === true || logPid) {
-    isLiveGcp = true;
-  } else if (cred?.auth_method === "gcp" || credPid) {
-    isLiveGcp = true;
+  if (cred) {
+    isLiveGcp = Boolean(cred.auth_method === "gcp" || credPid);
   } else if (metaPid) {
+    isLiveGcp = true;
+  } else if (tierIndicatesGcp) {
     isLiveGcp = true;
   }
 
   const activeGcpProject = isLiveGcp
-    ? (logPid || credPid || metaPid || findFirstGcpProjectForEmail(cfg, activeEmail))
+    ? (credPid || metaPid || logPid || findFirstGcpProjectForEmail(cfg, activeEmail))
     : "";
   const activeGcpBillingMode = isLiveGcp
     ? (/enterprise/i.test(rawTierName) || logInfo.lastUserTier === "enterprise" ? "gemini_enterprise" : "agent_platform")
@@ -1810,6 +1806,8 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
       return (a.gcpProjectId || "").localeCompare(b.gcpProjectId || "");
     });
 
+  const telemetry = computeSessionTelemetrySnapshot(cfg);
+
   return {
     lsOnline: Boolean(ls && userStatusResp),
     lsPid: ls?.pid || 0,
@@ -1820,7 +1818,8 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
     accounts: channelList,
     gcpProjects: cfg.gcpProjects || [],
     routing: cfg.routing || {},
-    oauthPending: Boolean(activeOAuthSession)
+    oauthPending: Boolean(activeOAuthSession),
+    telemetry
   };
 }
 
@@ -2254,66 +2253,71 @@ export async function probeAllChannelsQuotaSnapshot() {
   return results;
 }
 
-async function syncLsOAuthTokenAndProject(ls, tokenObj, targetProject = "", targetLocation = "global") {
-  if (!ls) return;
-  const tok = tokenObj?.token;
-  if (tok && tok.access_token) {
-    await callLsRpc(ls, "SaveOAuthTokenInfo", {
-      tokenInfo: {
-        accessToken: String(tok.access_token || ""),
-        tokenType: String(tok.token_type || "Bearer"),
-        refreshToken: String(tok.refresh_token || ""),
-        expiry: normalizeIsoExpiry(tok.expiry),
-        isGcpTos: Boolean(targetProject),
-        enableBusinessLogin: Boolean(targetProject)
-      }
-    }).catch(() => {});
-  }
-  await callLsRpc(ls, "ValidateProject", {
-    projectId: targetProject || "",
-    location: targetProject ? (targetLocation || "global") : ""
-  }).catch(() => {});
-}
-
-async function restartLanguageServerAndWait(targetProject = "", targetLocation = "global", tokenToSync = null) {
+function scheduleDetachedLanguageServerRestart(tokenToLock = null, activeLsHint = null) {
   const oldLogInfo = parseLsLogInfo();
-  const activeLs = discoverLanguageServer(false);
-  if (activeLs && tokenToSync) {
-    await syncLsOAuthTokenAndProject(activeLs, tokenToSync, targetProject, targetLocation);
-  }
+  const activeLs = activeLsHint || discoverLanguageServer(false);
   const oldPid = oldLogInfo.pid || activeLs?.pid || 0;
-  try {
-    const stopCmd = oldPid > 0
-      ? `Stop-Process -Id ${oldPid} -Force -ErrorAction SilentlyContinue`
-      : `Stop-Process -Name "language_server*" -Force -ErrorAction SilentlyContinue`;
-    execFileSync("powershell.exe", ["-NoProfile", "-Command", stopCmd], {
-      timeout: 4000,
-      windowsHide: true
-    });
-  } catch (e) {}
   cachedLsInfo = null;
 
-  for (let i = 0; i < 12; i++) {
-    await new Promise((r) => setTimeout(r, 450));
-    const nowLog = parseLsLogInfo();
-    if (nowLog.pid > 0 && nowLog.pid !== oldPid && (nowLog.httpPort > 0 || nowLog.httpsPort > 0)) {
-      const nextLs = discoverLanguageServer(true);
-      if (nextLs) {
-        try {
-          if (tokenToSync) {
-            await syncLsOAuthTokenAndProject(nextLs, tokenToSync, targetProject, targetLocation);
-          } else if (targetProject) {
-            await callLsRpc(nextLs, "ValidateProject", {
-              projectId: targetProject,
-              location: targetLocation || "global"
-            }).catch(() => {});
-          }
-          await callLsRpc(nextLs, "GetUserStatus", {});
-          break;
-        } catch {}
-      }
+  try {
+    const b64Json = tokenToLock
+      ? Buffer.from(JSON.stringify(tokenToLock), "utf8").toString("base64")
+      : "";
+    const stopClause = oldPid > 0
+      ? `Stop-Process -Id ${oldPid} -Force -ErrorAction SilentlyContinue`
+      : `Stop-Process -Name "language_server*" -Force -ErrorAction SilentlyContinue`;
+    const psScript = `
+Start-Sleep -Milliseconds 260
+${stopClause}
+Start-Sleep -Milliseconds 160
+if ("${b64Json}" -ne "") {
+  $bytes = [Convert]::FromBase64String("${b64Json}")
+  $code = @"
+using System;
+using System.Runtime.InteropServices;
+public class CredLock {
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct CREDENTIAL {
+        public uint Flags;
+        public uint Type;
+        public string TargetName;
+        public string Comment;
+        public System.Runtime.InteropServices.ComTypes.FILETIME LastWritten;
+        public uint CredentialBlobSize;
+        public IntPtr CredentialBlob;
+        public uint Persist;
+        public uint AttributeCount;
+        public IntPtr Attributes;
+        public string TargetAlias;
+        public string UserName;
     }
-  }
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern bool CredWrite([In] ref CREDENTIAL userCredential, [In] uint flags);
+    public static void WriteRaw(string target, byte[] blob) {
+        CREDENTIAL cred = new CREDENTIAL();
+        cred.Flags = 0;
+        cred.Type = 1;
+        cred.TargetName = target;
+        cred.CredentialBlobSize = (uint)blob.Length;
+        cred.CredentialBlob = Marshal.AllocHGlobal(blob.Length);
+        Marshal.Copy(blob, 0, cred.CredentialBlob, blob.Length);
+        cred.Persist = 2;
+        cred.UserName = "antigravity";
+        try { CredWrite(ref cred, 0); }
+        finally { Marshal.FreeHGlobal(cred.CredentialBlob); }
+    }
+}
+"@
+  Add-Type -TypeDefinition $code -ErrorAction SilentlyContinue
+  [CredLock]::WriteRaw("gemini:antigravity", $bytes)
+}
+`;
+    spawn("powershell.exe", ["-NoProfile", "-WindowStyle", "Hidden", "-Command", psScript], {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true
+    }).unref();
+  } catch {}
 }
 
 const THOUGHT_SIG_MAGIC_RAW = Buffer.from([0x01, 0x69, 0x14, 0x7d, 0x13]);
@@ -2459,7 +2463,7 @@ export async function scrubRecentConversationsSignatures(ls = null) {
         return { cascadeId: f.slice(0, -3), fullPath, mtimeMs };
       })
       .sort((a, b) => b.mtimeMs - a.mtimeMs)
-      .slice(0, 12);
+      .slice(0, 30);
 
     for (const item of entries) {
       let modified = false;
@@ -2842,6 +2846,8 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
   }
 
   outHeaders["Content-Length"] = outBodyBuf.length;
+  const reqStartAt = Date.now();
+  const isStreamOrGenerate = /^\/v1internal:(streamGenerateContent|generateContent)\b/i.test(reqUrl);
 
   await new Promise((resolve) => {
     const upReq = https.request(
@@ -2901,12 +2907,56 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
         }
 
         res.writeHead(upRes.statusCode || 200, upRes.headers);
+        let firstChunkAt = 0;
+        const streamSampleChunks = [];
+        let streamSampleLen = 0;
         upRes.on("data", (chunk) => {
+          if (!firstChunkAt) firstChunkAt = Date.now();
+          if (isStreamOrGenerate && !upRes.headers["content-encoding"] && streamSampleLen < 524288) {
+            streamSampleChunks.push(chunk);
+            streamSampleLen += chunk.length;
+          }
           try { res.write(chunk); } catch {}
         });
         upRes.on("end", () => {
           try { res.end(); } catch {}
-          if (routedTargetAcc?.id && /^\/v1internal:(streamGenerateContent|generateContent)\b/i.test(reqUrl)) {
+          if (isStreamOrGenerate && streamSampleChunks.length > 0) {
+            try {
+              const endAt = Date.now();
+              const text = Buffer.concat(streamSampleChunks).toString("utf8");
+              const promptMatches = [...text.matchAll(/"promptTokenCount"\s*:\s*(\d+)/g)];
+              const candMatches = [...text.matchAll(/"candidatesTokenCount"\s*:\s*(\d+)/g)];
+              const thoughtMatches = [...text.matchAll(/"thoughtsTokenCount"\s*:\s*(\d+)/g)];
+              const totalMatches = [...text.matchAll(/"totalTokenCount"\s*:\s*(\d+)/g)];
+              const inTok = promptMatches.length > 0 ? Number(promptMatches[promptMatches.length - 1][1]) : 0;
+              const candTok = candMatches.length > 0 ? Number(candMatches[candMatches.length - 1][1]) : 0;
+              const thTok = thoughtMatches.length > 0 ? Number(thoughtMatches[thoughtMatches.length - 1][1]) : 0;
+              const totTok = totalMatches.length > 0 ? Number(totalMatches[totalMatches.length - 1][1]) : (inTok + candTok + thTok);
+              const outTok = (candTok + thTok) > 0 ? (candTok + thTok) : Math.max(0, Math.round(text.length / 12));
+              const elapsedSec = Math.max(0.25, (endAt - (firstChunkAt || reqStartAt)) / 1000);
+              const speed = Math.round((outTok / elapsedSec) * 10) / 10;
+              if (outTok > 0 && speed > 0) {
+                const freshCfg = readRelayConfig();
+                if (!freshCfg.__meta__) freshCfg.__meta__ = {};
+                const prevTel = freshCfg.__meta__.telemetry || {};
+                const prevSamples = Number(prevTel.proxySampleCount || 0);
+                const prevAvg = Number(prevTel.proxyAvgTokPerSec || speed);
+                const nextAvg = Math.round((((prevAvg * prevSamples) + speed) / (prevSamples + 1)) * 10) / 10;
+                freshCfg.__meta__.telemetry = {
+                  ...prevTel,
+                  lastTokPerSec: speed,
+                  proxyAvgTokPerSec: nextAvg,
+                  proxySampleCount: prevSamples + 1,
+                  lastInputTokens: inTok,
+                  lastOutputTokens: outTok,
+                  lastTotalTokens: totTok || (inTok + outTok),
+                  updatedAt: Date.now()
+                };
+                writeRelayConfig(freshCfg);
+              }
+            } catch {}
+          }
+          if (routedTargetAcc?.id && isStreamOrGenerate) {
             setTimeout(() => {
               probeChannelQuotaSnapshot(routedTargetAcc.id).catch(() => {});
             }, 2000);
@@ -3119,6 +3169,9 @@ export async function switchActiveGoogleAccount(accountId) {
   if (rawId.startsWith("ephemeral:")) {
     return routeChannelEphemeral(rawId.slice(10).trim());
   }
+  if (rawId.startsWith("launch_instance:")) {
+    return launchIsolatedAntigravityInstance(rawId.slice(16).trim());
+  }
   const cfg = readRelayConfig();
   normalizeAccountChannels(cfg);
   const target = cfg.accounts?.[rawId];
@@ -3163,18 +3216,260 @@ export async function switchActiveGoogleAccount(accountId) {
   cfg.__meta__.activeEmail = target.email;
   cfg.__meta__.lastAppliedGcpProject = targetProject;
   cfg.__meta__.lastRoutedChannelId = target.id;
+  cfg.__meta__.convLastChannelMap = {};
   writeRelayConfig(cfg);
 
   // 点击独立通道池「启用」按钮（无论跨账号还是同账号 Pro <-> GCP）：
-  // 先离线剥离最近会话 .db 中的跨通道不兼容思维签名，再通过 SaveOAuthTokenInfo 同步 LS 状态并重启 language_server.exe 触发主界面重载
-  await scrubRecentConversationsSignatures(null).catch(() => {});
-  await restartLanguageServerAndWait(targetProject, targetLocation, tokenToWrite);
+  // 先离线剥离最近 30 个会话 .db 中的跨通道不兼容思维签名，再异步调度重启 language_server.exe 并二次锁定 WinCred 凭据（避免旧 LS 退出回写或 Electron 杀 Sidecar 中断 HTTP 响应）
+  const currentLs = discoverLanguageServer(false);
+  await scrubRecentConversationsSignatures(currentLs).catch(() => {});
+  scheduleDetachedLanguageServerRestart(tokenToWrite, currentLs);
 
   return {
     switchedTo: target.email,
     gcpProjectId: targetProject,
     channelId: target.id,
     instant: false
+  };
+}
+
+function estimateTokensFromString(str) {
+  if (!str) return 0;
+  const s = String(str);
+  let cjk = 0;
+  for (let i = 0; i < s.length; i++) {
+    const code = s.charCodeAt(i);
+    if (code >= 0x4e00 && code <= 0x9fff) cjk++;
+  }
+  const nonCjk = s.length - cjk;
+  return Math.max(1, Math.round(cjk * 1.45 + nonCjk / 3.8));
+}
+
+export function computeSessionTelemetrySnapshot(cfgInput = null) {
+  const cfg = cfgInput || readRelayConfig();
+  const proxyTel = cfg?.__meta__?.telemetry || {};
+  const brainDir = path.join(os.homedir(), ".gemini", "antigravity", "brain");
+
+  let latestConvId = "";
+  let latestLogPath = "";
+  let latestMtime = 0;
+
+  try {
+    if (fs.existsSync(brainDir)) {
+      const dirs = fs.readdirSync(brainDir);
+      for (const d of dirs) {
+        const logP = path.join(brainDir, d, ".system_generated", "logs", "transcript.jsonl");
+        try {
+          if (fs.existsSync(logP)) {
+            const st = fs.statSync(logP);
+            if (st.mtimeMs > latestMtime) {
+              latestMtime = st.mtimeMs;
+              latestConvId = d;
+              latestLogPath = logP;
+            }
+          }
+        } catch {}
+      }
+    }
+  } catch {}
+
+  let sessionInputTokens = 0;
+  let sessionOutputTokens = 0;
+  let lastInputTokens = 0;
+  let lastOutputTokens = 0;
+  let lastTokPerSec = 0;
+  let totalWeightedSpeedTokens = 0;
+  let totalWeightedDurationSec = 0;
+  let turnCount = 0;
+
+  if (latestLogPath && fs.existsSync(latestLogPath)) {
+    try {
+      const rawText = fs.readFileSync(latestLogPath, "utf8");
+      const lines = rawText.split(/\r?\n/).filter(Boolean);
+      let prevTimeMs = 0;
+      let currentTurnIn = 0;
+
+      for (const line of lines) {
+        let row = null;
+        try {
+          row = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        const tsMs = row.created_at ? new Date(row.created_at).getTime() : 0;
+        const stepType = String(row.type || "");
+        const contentStr = typeof row.content === "string" ? row.content : JSON.stringify(row.content || "");
+        const thinkingStr = typeof row.thinking === "string" ? row.thinking : "";
+        const toolsStr = row.tool_calls ? JSON.stringify(row.tool_calls) : "";
+
+        if (stepType === "USER_INPUT") {
+          const inTok = estimateTokensFromString(contentStr);
+          sessionInputTokens += inTok;
+          currentTurnIn = inTok;
+          if (tsMs > 0) prevTimeMs = tsMs;
+        } else if (stepType === "PLANNER_RESPONSE") {
+          const outTok = estimateTokensFromString(contentStr) + estimateTokensFromString(thinkingStr) + estimateTokensFromString(toolsStr);
+          if (outTok > 0) {
+            sessionOutputTokens += outTok;
+            lastOutputTokens = outTok;
+            if (currentTurnIn > 0) lastInputTokens = currentTurnIn;
+            turnCount++;
+            if (tsMs > 0 && prevTimeMs > 0 && tsMs > prevTimeMs) {
+              const deltaSec = (tsMs - prevTimeMs) / 1000;
+              if (deltaSec >= 0.4 && deltaSec <= 180) {
+                const stepSpeed = Math.round((outTok / deltaSec) * 10) / 10;
+                if (stepSpeed >= 2 && stepSpeed <= 350) {
+                  lastTokPerSec = stepSpeed;
+                  totalWeightedSpeedTokens += outTok;
+                  totalWeightedDurationSec += deltaSec;
+                }
+              }
+            }
+          }
+          if (tsMs > 0) prevTimeMs = tsMs;
+        } else {
+          const ctxTok = Math.round(estimateTokensFromString(contentStr) * 0.35);
+          sessionInputTokens += ctxTok;
+          if (tsMs > 0) prevTimeMs = tsMs;
+        }
+      }
+    } catch {}
+  }
+
+  let avgTokPerSec = totalWeightedDurationSec > 0
+    ? Math.round((totalWeightedSpeedTokens / totalWeightedDurationSec) * 10) / 10
+    : 0;
+
+  const proxyRecent = proxyTel.updatedAt && (Date.now() - Number(proxyTel.updatedAt) < 1800000);
+  if (proxyRecent && Number(proxyTel.lastTokPerSec) > 0) {
+    lastTokPerSec = Number(proxyTel.lastTokPerSec);
+    if (Number(proxyTel.proxyAvgTokPerSec) > 0) {
+      avgTokPerSec = avgTokPerSec > 0
+        ? Math.round(((avgTokPerSec + Number(proxyTel.proxyAvgTokPerSec)) / 2) * 10) / 10
+        : Number(proxyTel.proxyAvgTokPerSec);
+    }
+    if (Number(proxyTel.lastInputTokens) > 0) lastInputTokens = Number(proxyTel.lastInputTokens);
+    if (Number(proxyTel.lastOutputTokens) > 0) lastOutputTokens = Number(proxyTel.lastOutputTokens);
+  }
+
+  if (avgTokPerSec <= 0 && lastTokPerSec > 0) {
+    avgTokPerSec = lastTokPerSec;
+  }
+  if (lastTokPerSec <= 0 && avgTokPerSec > 0) {
+    lastTokPerSec = avgTokPerSec;
+  }
+
+  const sessionTotalTokens = sessionInputTokens + sessionOutputTokens;
+
+  return {
+    conversationId: latestConvId ? latestConvId.slice(0, 8) : "",
+    avgTokPerSec: avgTokPerSec || 0,
+    lastTokPerSec: lastTokPerSec || 0,
+    lastInputTokens: lastInputTokens || 0,
+    lastOutputTokens: lastOutputTokens || 0,
+    sessionInputTokens,
+    sessionOutputTokens,
+    sessionTotalTokens,
+    turnCount,
+    source: proxyRecent ? "live_proxy_and_session" : "session_transcript"
+  };
+}
+
+function resolveAntigravityExePath() {
+  const candidates = [
+    path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"), "Programs", "antigravity", "Antigravity.exe"),
+    path.join(os.homedir(), "AppData", "Local", "Programs", "antigravity", "Antigravity.exe"),
+    "C:\\Program Files\\Antigravity\\Antigravity.exe"
+  ];
+  for (const p of candidates) {
+    if (p && fs.existsSync(p)) return p;
+  }
+  return "";
+}
+
+export async function launchIsolatedAntigravityInstance(accountId) {
+  const rawId = String(accountId || "").trim();
+  const cfg = readRelayConfig();
+  normalizeAccountChannels(cfg);
+  const target = cfg.accounts?.[rawId];
+  if (!target) {
+    throw new Error(`未找到通道快照: ${rawId}`);
+  }
+
+  const exePath = resolveAntigravityExePath();
+  if (!exePath) {
+    throw new Error("未找到本机 Antigravity.exe 可执行文件");
+  }
+
+  const targetProject = (target.gcpProjectId || "").trim();
+  const targetBillingMode = targetProject ? (target.gcpBillingMode || "agent_platform") : "";
+  const targetLocation = targetProject
+    ? (targetBillingMode === "agent_platform" ? (target.gcpLocation || "global") : "")
+    : "";
+
+  const baseToken = target.storedToken || findStoredTokenForEmail(cfg, target.email);
+  if (!baseToken) {
+    throw new Error(`未找到账号 ${target.email} 的凭据快照`);
+  }
+
+  if (baseToken.token?.refresh_token) {
+    try {
+      const refreshed = await refreshOAuthAccessToken(baseToken.token.refresh_token);
+      if (refreshed && refreshed.access_token) {
+        const newExpiry = new Date(Date.now() + (refreshed.expires_in || 3599) * 1000).toISOString();
+        baseToken.token.access_token = refreshed.access_token;
+        baseToken.token.expiry = newExpiry;
+        for (const item of Object.values(cfg.accounts || {})) {
+          if (item.email === target.email && item.storedToken?.token) {
+            item.storedToken.token.access_token = refreshed.access_token;
+            item.storedToken.token.expiry = newExpiry;
+          }
+        }
+      }
+    } catch {}
+  }
+
+  const tokenToWrite = buildCleanChannelToken(baseToken, targetProject, targetLocation);
+  target.storedToken = tokenToWrite;
+  writeWinCredToken(tokenToWrite);
+  writeRelayConfig(cfg);
+
+  const safeFolder = rawId.replace(/[^a-zA-Z0-9._-]+/g, "_");
+  const instanceUserDataDir = path.join(os.homedir(), ".gemini", "antigravity-instances", safeFolder);
+  const instanceUserDir = path.join(instanceUserDataDir, "User");
+  const instanceGlobalStorageDir = path.join(instanceUserDir, "globalStorage");
+
+  try {
+    fs.mkdirSync(instanceGlobalStorageDir, { recursive: true });
+    const mainAppDataDir = path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "Antigravity");
+    const mainSettings = path.join(mainAppDataDir, "User", "settings.json");
+    const destSettings = path.join(instanceUserDir, "settings.json");
+    if (fs.existsSync(mainSettings) && !fs.existsSync(destSettings)) {
+      fs.copyFileSync(mainSettings, destSettings);
+    }
+    const mainStorage = path.join(mainAppDataDir, "User", "globalStorage", "storage.json");
+    const destStorage = path.join(instanceGlobalStorageDir, "storage.json");
+    if (fs.existsSync(mainStorage) && !fs.existsSync(destStorage)) {
+      fs.copyFileSync(mainStorage, destStorage);
+    }
+  } catch {}
+
+  await scrubRecentConversationsSignatures(null).catch(() => {});
+
+  const child = spawn(exePath, ["--new-window", "--user-data-dir", instanceUserDataDir], {
+    detached: true,
+    stdio: "ignore",
+    windowsHide: false
+  });
+  child.unref();
+
+  return {
+    launched: true,
+    pid: child.pid || 0,
+    channelId: target.id,
+    email: target.email,
+    gcpProjectId: targetProject,
+    userDataDir: instanceUserDataDir
   };
 }
 

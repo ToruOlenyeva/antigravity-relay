@@ -16,6 +16,9 @@ let state = {
 
 // 顶部「会话与使用量」当前选中的查看通道 ID（空字符串表示跟随当前激活通道）
 let selectedQuotaChannelId = "";
+// 当前处于待二次确认删除状态的通道 ID
+let pendingDeleteAccountId = "";
+let pendingDeleteTimer = null;
 // 当前展开编辑设置的 GCP 通道卡片 ID 集合与顶部添加 GCP 抽屉开关状态
 let expandedGcpConfigIds = new Set();
 let isAddGcpDrawerOpen = false;
@@ -159,10 +162,93 @@ function renderAll() {
   oauthBanner.style.display = state.oauthPending ? "flex" : "none";
 
   renderSessionSelector();
+  renderSessionTelemetry();
   renderQuotaGroups();
   renderAddGcpDrawer();
   renderAccountList();
   renderRoutingList();
+}
+
+function formatCompactTokenCount(num) {
+  const n = Number(num || 0);
+  if (!Number.isFinite(n) || n <= 0) return "0";
+  if (n >= 1000000) return `${(n / 1000000).toFixed(2)}M`;
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
+  return String(Math.round(n));
+}
+
+function renderSessionTelemetry() {
+  const mount = document.getElementById("sessionTelemetryMount");
+  if (!mount) return;
+  mount.innerHTML = "";
+  const t = I18N[currentLang];
+  const tel = state.telemetry || {};
+
+  const bar = document.createElement("div");
+  bar.className = "telemetry-bar";
+
+  const speedVal = Number(tel.avgTokPerSec || tel.lastTokPerSec || 0);
+  const lastTurnTok = Number(tel.lastOutputTokens || 0) + Number(tel.lastInputTokens || 0);
+  const totalTok = Number(tel.sessionTotalTokens || 0);
+
+  // 1. 输出速度 (对话均值 tok/s)
+  const col1 = document.createElement("div");
+  col1.className = "telemetry-metric";
+  const lbl1 = document.createElement("span");
+  lbl1.className = "telemetry-metric-label";
+  lbl1.textContent = t.telemetrySpeedLabel;
+  const val1 = document.createElement("span");
+  val1.className = "telemetry-metric-val" + (speedVal > 0 ? " highlight" : "");
+  if (speedVal > 0) {
+    val1.textContent = `${speedVal} ${t.telemetrySpeedUnit}`;
+    const subTag = document.createElement("span");
+    subTag.className = "telemetry-sub-tag";
+    subTag.textContent = `(${t.telemetryAvgTag})`;
+    val1.appendChild(subTag);
+  } else {
+    val1.textContent = `- ${t.telemetrySpeedUnit}`;
+  }
+  col1.appendChild(lbl1);
+  col1.appendChild(val1);
+
+  // 2. 最近一轮输出 / 输入 Token
+  const col2 = document.createElement("div");
+  col2.className = "telemetry-metric";
+  const lbl2 = document.createElement("span");
+  lbl2.className = "telemetry-metric-label";
+  lbl2.textContent = t.telemetryLastTurnLabel;
+  const val2 = document.createElement("span");
+  val2.className = "telemetry-metric-val";
+  if (Number(tel.lastOutputTokens || 0) > 0) {
+    val2.textContent = `↑${formatCompactTokenCount(tel.lastInputTokens)} ↓${formatCompactTokenCount(tel.lastOutputTokens)}`;
+  } else {
+    val2.textContent = formatCompactTokenCount(lastTurnTok);
+  }
+  col2.appendChild(lbl2);
+  col2.appendChild(val2);
+
+  // 3. 当前对话累计 Token
+  const col3 = document.createElement("div");
+  col3.className = "telemetry-metric";
+  const lbl3 = document.createElement("span");
+  lbl3.className = "telemetry-metric-label";
+  lbl3.textContent = t.telemetrySessionTotalLabel;
+  const val3 = document.createElement("span");
+  val3.className = "telemetry-metric-val";
+  val3.textContent = `${formatCompactTokenCount(totalTok)} tok`;
+  if (Number(tel.turnCount || 0) > 0) {
+    const turnTag = document.createElement("span");
+    turnTag.className = "telemetry-sub-tag";
+    turnTag.textContent = `(${tel.turnCount}T)`;
+    val3.appendChild(turnTag);
+  }
+  col3.appendChild(lbl3);
+  col3.appendChild(val3);
+
+  bar.appendChild(col1);
+  bar.appendChild(col2);
+  bar.appendChild(col3);
+  mount.appendChild(bar);
 }
 
 function renderSessionSelector() {
@@ -860,11 +946,48 @@ function renderAccountList() {
       rightBadges.appendChild(switchBtn);
     }
 
-    const delBtn = document.createElement("button");
-    delBtn.className = "danger small";
-    delBtn.textContent = t.btnDeleteAccount;
-    delBtn.onclick = () => deleteAccountProfile(acc.id);
-    rightBadges.appendChild(delBtn);
+    const multiBtn = document.createElement("button");
+    multiBtn.className = "secondary small";
+    multiBtn.textContent = t.btnMultiInstance;
+    multiBtn.onclick = () => launchIsolatedInstance(acc.id);
+    rightBadges.appendChild(multiBtn);
+
+    if (pendingDeleteAccountId === acc.id) {
+      const confirmBtn = document.createElement("button");
+      confirmBtn.className = "danger small";
+      confirmBtn.textContent = t.btnConfirmDelete;
+      confirmBtn.onclick = () => {
+        pendingDeleteAccountId = "";
+        clearTimeout(pendingDeleteTimer);
+        deleteAccountProfile(acc.id);
+      };
+      const cancelBtn = document.createElement("button");
+      cancelBtn.className = "secondary small";
+      cancelBtn.textContent = t.btnCancelDelete;
+      cancelBtn.onclick = () => {
+        pendingDeleteAccountId = "";
+        clearTimeout(pendingDeleteTimer);
+        renderAccountList();
+      };
+      rightBadges.appendChild(confirmBtn);
+      rightBadges.appendChild(cancelBtn);
+    } else {
+      const delBtn = document.createElement("button");
+      delBtn.className = "danger small";
+      delBtn.textContent = t.btnDeleteAccount;
+      delBtn.onclick = () => {
+        pendingDeleteAccountId = acc.id;
+        clearTimeout(pendingDeleteTimer);
+        pendingDeleteTimer = setTimeout(() => {
+          if (pendingDeleteAccountId === acc.id) {
+            pendingDeleteAccountId = "";
+            renderAccountList();
+          }
+        }, 4000);
+        renderAccountList();
+      };
+      rightBadges.appendChild(delBtn);
+    }
 
     top.appendChild(rightBadges);
     card.appendChild(top);
@@ -1583,6 +1706,30 @@ async function switchGoogleAccount(accountId) {
     } else {
       showToast(I18N[currentLang].toastRefreshed);
       setTimeout(() => loadSystemStatus(true, true), 1200);
+    }
+  } catch (e) {}
+}
+
+async function launchIsolatedInstance(accountId) {
+  try {
+    let res = await fetch("/api/launch-instance", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ accountId })
+    });
+    if (res.status === 404) {
+      res = await fetch("/api/switch-account", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ accountId: `launch_instance:${accountId}` })
+      });
+    }
+    const data = await res.json();
+    if (data && (data.success || data.launched)) {
+      const label = data.gcpProjectId ? `${data.email} (${data.gcpProjectId})` : (data.email || accountId);
+      showToast(`${I18N[currentLang].toastInstanceLaunched}${label}`);
+    } else if (data?.error) {
+      showToast(data.error);
     }
   } catch (e) {}
 }

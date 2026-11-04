@@ -373,6 +373,7 @@ async function main() {
           relayCfg.__meta__.convLastChannelMap[convId] = currentActiveChannel;
           writeJsonSafe(relayConfigPath, relayCfg);
         }
+        await scrubAndReloadCascadeIfNeeded(convId, relayCfg.__meta__?.lsRpcTarget, convDir);
       }
       return reply({});
     }
