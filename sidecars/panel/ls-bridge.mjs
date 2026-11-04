@@ -7,6 +7,7 @@ import os from "node:os";
 import { DatabaseSync } from "node:sqlite";
 import { execFileSync, spawn } from "node:child_process";
 import {
+  HOME_DIR,
   LS_LOG_FILE,
   JETSKI_TOKEN_FILE,
   readRelayConfig,
@@ -2808,9 +2809,7 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
       const routeMap = cfg.routing?.models || {};
       const routeSpec = routeMap[baseFamily] || routeMap[rawModel] || "follow_current";
 
-      // 始终在内存代理层递归剥离请求体中的 thoughtSignature，彻底消除跨账号连续对话 400 签名校验报错
-      strippedSigCount = stripThoughtSignaturesFromJson(bodyJson);
-
+      // 个人通道内部跨账号同属 Google Consumer 通道，思维签名 100% 兼容，不再自动剥离签名以保留隐式前缀缓存 (Prompt Caching)
       if (routeSpec === "auto_poll") {
         routedTargetAcc = selectBestPersonalChannelForModel(baseFamily, cfg);
       } else if (typeof routeSpec === "string" && routeSpec.startsWith("account:")) {
@@ -3132,10 +3131,6 @@ function tryLaunchCloudCodeProxyOnStartup() {
     process.argv.some((a) => /main\.mjs$/i.test(String(a)));
   if (isSidecarDaemon) {
     ensureCloudCodeProxyServer();
-    // Sidecar 启动时自动在后台执行一次全盘 .db 思考签名巡检剥离
-    setTimeout(() => {
-      scrubRecentConversationsSignatures(null).catch(() => {});
-    }, 800);
   }
 }
 
@@ -3173,7 +3168,16 @@ export async function routeChannelEphemeral(accountId) {
   };
 }
 
-export async function switchActiveGoogleAccount(accountId) {
+export async function manualScrubAllSignatures() {
+  const currentLs = discoverLanguageServer(false);
+  const scrubbedIds = await scrubRecentConversationsSignatures(currentLs).catch(() => []);
+  return {
+    scrubbedCount: Array.isArray(scrubbedIds) ? scrubbedIds.length : 0,
+    scrubbedIds: Array.isArray(scrubbedIds) ? scrubbedIds : []
+  };
+}
+
+export async function switchActiveGoogleAccount(accountId, opts = {}) {
   const rawId = String(accountId || "").trim();
   if (rawId.startsWith("ephemeral:")) {
     return routeChannelEphemeral(rawId.slice(10).trim());
@@ -3188,7 +3192,11 @@ export async function switchActiveGoogleAccount(accountId) {
     throw new Error(`未找到通道快照: ${rawId}`);
   }
 
+  const prevIsGcp = Boolean(cfg.__meta__?.lastAppliedGcpProject);
   const targetProject = (target.gcpProjectId || "").trim();
+  const nextIsGcp = Boolean(targetProject);
+  const isCrossChannel = prevIsGcp !== nextIsGcp;
+
   const targetBillingMode = targetProject ? (target.gcpBillingMode || "agent_platform") : "";
   const targetLocation = targetProject
     ? (targetBillingMode === "agent_platform" ? (target.gcpLocation || "global") : "")
@@ -3228,16 +3236,23 @@ export async function switchActiveGoogleAccount(accountId) {
   cfg.__meta__.convLastChannelMap = {};
   writeRelayConfig(cfg);
 
-  // 点击独立通道池「启用」按钮（无论跨账号还是同账号 Pro <-> GCP）：
-  // 先离线剥离最近 30 个会话 .db 中的跨通道不兼容思维签名，再异步调度重启 language_server.exe 并二次锁定 WinCred 凭据（避免旧 LS 退出回写或 Electron 杀 Sidecar 中断 HTTP 响应）
   const currentLs = discoverLanguageServer(false);
-  await scrubRecentConversationsSignatures(currentLs).catch(() => {});
+  // 同通道切换（个人 <-> 个人 或 GCP <-> GCP）默认绝不清除签名；跨通道切换（个人 <-> GCP）仅在用户确认清除时剥离签名
+  const shouldScrub = opts.scrubSignatures === true || (isCrossChannel && opts.scrubSignatures !== false);
+  let scrubbedCount = 0;
+  if (shouldScrub) {
+    const scrubbedIds = await scrubRecentConversationsSignatures(currentLs).catch(() => []);
+    scrubbedCount = Array.isArray(scrubbedIds) ? scrubbedIds.length : 0;
+  }
   scheduleDetachedLanguageServerRestart(tokenToWrite, currentLs);
 
   return {
     switchedTo: target.email,
     gcpProjectId: targetProject,
     channelId: target.id,
+    isCrossChannel,
+    scrubbedSignatures: shouldScrub,
+    scrubbedCount,
     instant: false
   };
 }
@@ -3386,6 +3401,8 @@ export function computeSessionTelemetrySnapshot(cfgInput = null) {
 
 function resolveAntigravityExePath() {
   const candidates = [
+    process.execPath && /antigravity\.exe$/i.test(process.execPath) ? process.execPath : "",
+    path.join(HOME_DIR, "AppData", "Local", "Programs", "antigravity", "Antigravity.exe"),
     path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"), "Programs", "antigravity", "Antigravity.exe"),
     path.join(os.homedir(), "AppData", "Local", "Programs", "antigravity", "Antigravity.exe"),
     "C:\\Program Files\\Antigravity\\Antigravity.exe"
@@ -3409,6 +3426,8 @@ export async function launchIsolatedAntigravityInstance(accountId) {
   if (!exePath) {
     throw new Error("未找到本机 Antigravity.exe 可执行文件");
   }
+
+  const originalMainCred = readWinCredToken(true) || readWinCredToken(false);
 
   const targetProject = (target.gcpProjectId || "").trim();
   const targetBillingMode = targetProject ? (target.gcpBillingMode || "agent_platform") : "";
@@ -3444,13 +3463,16 @@ export async function launchIsolatedAntigravityInstance(accountId) {
   writeRelayConfig(cfg);
 
   const safeFolder = rawId.replace(/[^a-zA-Z0-9._-]+/g, "_");
-  const instanceUserDataDir = path.join(os.homedir(), ".gemini", "antigravity-instances", safeFolder);
+  const instanceUserDataDir = path.join(HOME_DIR, ".gemini", "antigravity-instances", safeFolder);
   const instanceUserDir = path.join(instanceUserDataDir, "User");
   const instanceGlobalStorageDir = path.join(instanceUserDir, "globalStorage");
 
   try {
     fs.mkdirSync(instanceGlobalStorageDir, { recursive: true });
-    const mainAppDataDir = path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "Antigravity");
+    const mainAppDataDir = path.join(
+      process.env.APPDATA || path.join(HOME_DIR, "AppData", "Roaming"),
+      "Antigravity"
+    );
     const mainSettings = path.join(mainAppDataDir, "User", "settings.json");
     const destSettings = path.join(instanceUserDir, "settings.json");
     if (fs.existsSync(mainSettings) && !fs.existsSync(destSettings)) {
@@ -3463,14 +3485,38 @@ export async function launchIsolatedAntigravityInstance(accountId) {
     }
   } catch {}
 
-  await scrubRecentConversationsSignatures(null).catch(() => {});
+  // 关键修复：Sidecar 插件宿主运行在 ELECTRON_RUN_AS_NODE=1 环境下，必须剔除该变量及宿主私有变量，否则拉起的 Antigravity.exe 会退化为无窗口 Node 进程立即退出
+  const cleanEnv = { ...process.env };
+  for (const k of Object.keys(cleanEnv)) {
+    if (
+      k === "ELECTRON_RUN_AS_NODE" ||
+      k === "ELECTRON_NO_ATTACH_CONSOLE" ||
+      k === "NODE_OPTIONS" ||
+      k === "PORT" ||
+      k.startsWith("ANTIGRAVITY_") ||
+      k.startsWith("VSCODE_")
+    ) {
+      delete cleanEnv[k];
+    }
+  }
 
   const child = spawn(exePath, ["--new-window", "--user-data-dir", instanceUserDataDir], {
     detached: true,
     stdio: "ignore",
-    windowsHide: false
+    windowsHide: false,
+    cwd: path.dirname(exePath),
+    env: cleanEnv
   });
   child.unref();
+
+  // 待新实例的 language_server.exe 完成启动读取 WinCred 后（6.5秒），自动还原主实例原本的 WinCred 凭据
+  if (originalMainCred) {
+    setTimeout(() => {
+      try {
+        writeWinCredToken(originalMainCred);
+      } catch {}
+    }, 6500);
+  }
 
   return {
     launched: true,

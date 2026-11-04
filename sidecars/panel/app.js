@@ -19,6 +19,12 @@ let selectedQuotaChannelId = "";
 // 当前处于待二次确认删除状态的通道 ID
 let pendingDeleteAccountId = "";
 let pendingDeleteTimer = null;
+// 当前处于跨通道切换待确认是否清除签名的通道 ID
+let pendingCrossSwitchAccountId = "";
+// 顶部手动清除签名确认抽屉与多开实例抽屉开关状态
+let isScrubSigsDrawerOpen = false;
+let isMultiInstanceDrawerOpen = false;
+let selectedMultiInstanceTargetId = "";
 // 当前展开编辑设置的 GCP 通道卡片 ID 集合与顶部添加 GCP 抽屉开关状态
 let expandedGcpConfigIds = new Set();
 let isAddGcpDrawerOpen = false;
@@ -136,6 +142,10 @@ function applyI18n() {
   document.getElementById("refreshBtn").textContent = t.refreshBtn;
   document.getElementById("secCurrentTitle").textContent = t.secCurrentTitle;
   document.getElementById("secAccountsTitle").textContent = t.secAccountsTitle;
+  const scrubBtn = document.getElementById("btnScrubSignatures");
+  if (scrubBtn) scrubBtn.textContent = t.btnScrubSignatures;
+  const multiDrawerBtn = document.getElementById("btnToggleMultiInstance");
+  if (multiDrawerBtn) multiDrawerBtn.textContent = t.btnOpenMultiDrawer;
   const addGcpBtn = document.getElementById("btnToggleAddGcp");
   if (addGcpBtn) addGcpBtn.textContent = t.btnAddGcpChannel;
   document.getElementById("btnCaptureCurrent").textContent = t.btnCaptureCurrent;
@@ -164,6 +174,8 @@ function renderAll() {
   renderSessionSelector();
   renderSessionTelemetry();
   renderQuotaGroups();
+  renderScrubSignaturesDrawer();
+  renderMultiInstanceDrawer();
   renderAddGcpDrawer();
   renderAccountList();
   renderRoutingList();

@@ -289,8 +289,20 @@ async function requestHandler(req, res) {
   // 5. 切换通道或谷歌账号（写入凭据并异步调度重启 Language Server，先返回 HTTP 响应防止被宿主重载打断）
   if (req.method === "POST" && pathname === "/api/switch-account") {
     try {
-      const { accountId } = await readJsonBody(req);
-      const result = await lsBridge.switchActiveGoogleAccount(accountId);
+      const { accountId, scrubSignatures } = await readJsonBody(req);
+      const result = await lsBridge.switchActiveGoogleAccount(accountId, { scrubSignatures });
+      const snap = await lsBridge.fetchLiveSystemSnapshot(false);
+      broadcastSnapshot(snap);
+      return sendJson(res, 200, { success: true, ...result, snapshot: snap });
+    } catch (err) {
+      return sendJson(res, 500, { success: false, error: err.message });
+    }
+  }
+
+  // 5-0. 手动一键清除全盘历史会话中的思维签名（用于用户按需手动修复跨通道报错）
+  if (req.method === "POST" && pathname === "/api/scrub-signatures") {
+    try {
+      const result = await lsBridge.manualScrubAllSignatures();
       const snap = await lsBridge.fetchLiveSystemSnapshot(false);
       broadcastSnapshot(snap);
       return sendJson(res, 200, { success: true, ...result, snapshot: snap });
@@ -456,16 +468,20 @@ async function requestHandler(req, res) {
     }
   }
 
-  // 8. 保存模型与子智能体算力路由规则
+  // 8. 保存模型与子智能体算力路由规则（支持 personal 与 gcp 两套独立路由表）
   if (req.method === "POST" && pathname === "/api/save-routing") {
     try {
-      const { modelId, variantIds, targetSpec, subagentDefaultTarget, autoRelayOnLowQuota } = await readJsonBody(req);
+      const { modelId, variantIds, targetSpec, routeScope, subagentDefaultTarget, autoRelayOnLowQuota } = await readJsonBody(req);
       const cfg = readRelayConfig();
+      const isGcpScope = routeScope === "gcp";
+      if (!cfg.routing.models || typeof cfg.routing.models !== "object") cfg.routing.models = {};
+      if (!cfg.routing.gcpModels || typeof cfg.routing.gcpModels !== "object") cfg.routing.gcpModels = {};
+      const targetRouteMap = isGcpScope ? cfg.routing.gcpModels : cfg.routing.models;
       if (modelId && targetSpec !== undefined) {
-        cfg.routing.models[modelId] = targetSpec;
+        targetRouteMap[modelId] = targetSpec;
         if (Array.isArray(variantIds)) {
           for (const vid of variantIds) {
-            if (vid) cfg.routing.models[vid] = targetSpec;
+            if (vid) targetRouteMap[vid] = targetSpec;
           }
         }
       }

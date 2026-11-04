@@ -907,3 +907,63 @@ button.danger:hover {
   color: var(--text-muted);
   margin-left: 3px;
 }
+
+/* 个人通道池与 GCP 计费通道池物理分组区块 */
+.channel-group-box {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border-radius: 7px;
+  background: var(--bg-base);
+  border: 1px solid var(--border-subtle);
+}
+
+.channel-group-box + .channel-group-box {
+  margin-top: 4px;
+}
+
+.channel-group-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 6px;
+  padding: 0 2px 2px 2px;
+  border-bottom: 1px dashed var(--border-subtle);
+}
+
+.channel-group-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.channel-group-hint {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+/* 跨通道切换（个人 <-> GCP）内联签名清理确认条 */
+.cross-switch-confirm-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+  padding: 7px 8px;
+  border-radius: 6px;
+  background: rgba(245, 158, 11, 0.08);
+  border: 1px solid rgba(245, 158, 11, 0.32);
+}
+
+.cross-switch-prompt {
+  font-size: 10.5px;
+  line-height: 1.35;
+  color: var(--text-main);
+}
+
+.cross-switch-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 5px;
+  flex-wrap: wrap;
+}

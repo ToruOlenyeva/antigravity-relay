@@ -41,7 +41,8 @@ function createDefaultConfig() {
     routing: {
       autoRelayOnLowQuota: true,
       lowQuotaThresholdPct: 5,
-      models: {}
+      models: {},
+      gcpModels: {}
     },
     __meta__: {
       lsRpcTarget: null,
@@ -96,6 +97,7 @@ function ensureConfigDefaults(cfg) {
   if (cfg.routing.autoRelayOnLowQuota === undefined) cfg.routing.autoRelayOnLowQuota = true;
   if (!cfg.routing.lowQuotaThresholdPct) cfg.routing.lowQuotaThresholdPct = 5;
   if (!cfg.routing.models || typeof cfg.routing.models !== "object") cfg.routing.models = {};
+  if (!cfg.routing.gcpModels || typeof cfg.routing.gcpModels !== "object") cfg.routing.gcpModels = {};
   delete cfg.routing.subagentDefaultTarget;
   if (!cfg.__meta__ || typeof cfg.__meta__ !== "object") cfg.__meta__ = {};
   if (!Array.isArray(cfg.__meta__.recentSidecarPorts)) cfg.__meta__.recentSidecarPorts = [];

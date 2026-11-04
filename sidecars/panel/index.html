@@ -48,11 +48,13 @@
     <div class="quota-list" id="quotaGroupsContainer"></div>
   </div>
 
-  <!-- 2. 独立通道池与旁路无打断登录 -->
+  <!-- 2. 通道与账号管理（个人账号通道与 GCP 计费通道分组展示） -->
   <div class="section-card">
     <div class="section-header">
-      <span class="section-title" id="secAccountsTitle">独立通道池</span>
+      <span class="section-title" id="secAccountsTitle">通道与账号管理</span>
       <div class="btn-group">
+        <button class="secondary small" id="btnScrubSignatures" onclick="toggleScrubSignaturesDrawer()">清除签名</button>
+        <button class="secondary small" id="btnToggleMultiInstance" onclick="toggleMultiInstanceDrawer()">+ 多开实例</button>
         <button class="secondary small" id="btnCaptureCurrent" onclick="captureCurrentAccount()">收录当前</button>
         <button class="secondary small" id="btnToggleAddGcp" onclick="toggleAddGcpDrawer()">+ 添加通道</button>
         <button class="small" id="btnAddOAuthAccount" onclick="startIsolatedBrowserLogin()">+ 添加账号</button>
@@ -64,6 +66,12 @@
       <span id="oauthBannerText">已在浏览器打开官方登录页</span>
       <button class="danger small" id="btnCancelOAuth" onclick="cancelBrowserLogin()">取消</button>
     </div>
+
+    <!-- 手动清除思维签名确认抽屉 -->
+    <div class="gcp-drawer" id="scrubSigsDrawer" style="display: none;"></div>
+
+    <!-- 互补通道多开独立实例抽屉（个人通道下选 GCP 新开，GCP 通道下选个人号新开） -->
+    <div class="gcp-drawer" id="multiInstanceDrawer" style="display: none;"></div>
 
     <!-- 独立添加 GCP 通道折叠抽屉（支持复用已登录 Google 账号凭据或拉起浏览器新登录） -->
     <div class="gcp-drawer" id="addGcpDrawer" style="display: none;"></div>

@@ -283,8 +283,42 @@ async function ensureLocalCloudCodeProxyMounted(lsTarget, relayCfg) {
   );
 }
 
+async function applyGcpTargetRoute(targetSpec, relayCfg, baseModelName = "", rawModelName = "") {
+  if (!relayCfg?.__meta__?.lastAppliedGcpProject) return false;
+  if (!relayCfg.__meta__) relayCfg.__meta__ = {};
+  relayCfg.__meta__.lastRoutedModel = rawModelName || baseModelName || "";
+
+  if (!targetSpec || targetSpec === "follow_current") {
+    writeJsonSafe(relayConfigPath, relayCfg);
+    return false;
+  }
+
+  if (targetSpec.startsWith("account:") || targetSpec.startsWith("channel:")) {
+    const accId = targetSpec.replace(/^(account|channel):/, "").trim();
+    const acc = relayCfg?.accounts?.[accId];
+    const targetPid = String(acc?.gcpProjectId || "").trim();
+    if (!acc || !targetPid) {
+      writeJsonSafe(relayConfigPath, relayCfg);
+      return false;
+    }
+    const lsTarget = relayCfg?.__meta__?.lsRpcTarget;
+    if (lsTarget && targetPid !== relayCfg.__meta__.lastAppliedGcpProject) {
+      await callValidateProjectRpc(lsTarget, targetPid);
+      relayCfg.__meta__.lastAppliedGcpProject = targetPid;
+    }
+    relayCfg.__meta__.lastRoutedChannelId = acc.id;
+    writeJsonSafe(relayConfigPath, relayCfg);
+    return true;
+  }
+
+  writeJsonSafe(relayConfigPath, relayCfg);
+  return false;
+}
+
 async function applyTargetRoute(targetSpec, relayCfg, baseModelName = "", rawModelName = "") {
-  if (relayCfg?.__meta__?.lastAppliedGcpProject) return false;
+  if (relayCfg?.__meta__?.lastAppliedGcpProject) {
+    return applyGcpTargetRoute(targetSpec, relayCfg, baseModelName, rawModelName);
+  }
 
   const lsTarget = relayCfg?.__meta__?.lsRpcTarget;
   if (lsTarget) {
@@ -352,7 +386,10 @@ async function main() {
       const convId = (payload.conversationId || payload.conversation_id || "").trim();
       const modelName = (payload.modelName || "").trim();
       const baseModelName = modelName.replace(/\s*\((Low|Medium|High|Max)\)\s*$/i, "").trim();
-      const routeMap = relayCfg.routing.models || {};
+      const isGcpMode = Boolean(relayCfg.__meta__?.lastAppliedGcpProject);
+      const routeMap = isGcpMode
+        ? (relayCfg.routing.gcpModels || {})
+        : (relayCfg.routing.models || {});
       const targetSpec = routeMap[baseModelName] || routeMap[modelName] || "follow_current";
       if (targetSpec && targetSpec !== "follow_current") {
         await applyTargetRoute(targetSpec, relayCfg, baseModelName, modelName);
@@ -374,7 +411,6 @@ async function main() {
           relayCfg.__meta__.convLastChannelMap[convId] = currentActiveChannel;
           writeJsonSafe(relayConfigPath, relayCfg);
         }
-        await scrubAndReloadCascadeIfNeeded(convId, relayCfg.__meta__?.lsRpcTarget, convDir);
       }
       return reply({});
     }
@@ -384,10 +420,6 @@ async function main() {
     }
 
     if (mode === "stop") {
-      const convId = (payload.conversationId || payload.conversation_id || "").trim();
-      if (convId) {
-        await scrubAndReloadCascadeIfNeeded(convId, relayCfg.__meta__?.lsRpcTarget, convDir);
-      }
       return reply({});
     }
 
