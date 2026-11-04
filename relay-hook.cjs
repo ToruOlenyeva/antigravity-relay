@@ -6,7 +6,8 @@ const https = require("https");
 const os = require("os");
 const {
   sendLsRpcMethod,
-  scrubAndReloadCascadeIfNeeded
+  scrubAndReloadCascadeIfNeeded,
+  scrubAllConversationDbsSync
 } = require("./lib/proto-scrub.cjs");
 
 const homeDir = os.homedir();
@@ -383,6 +384,10 @@ async function main() {
     }
 
     if (mode === "stop") {
+      const convId = (payload.conversationId || payload.conversation_id || "").trim();
+      if (convId) {
+        await scrubAndReloadCascadeIfNeeded(convId, relayCfg.__meta__?.lsRpcTarget, convDir);
+      }
       return reply({});
     }
 
@@ -398,5 +403,6 @@ if (require.main === module) {
 
 module.exports = {
   callValidateProjectRpc,
-  scrubAndReloadCascadeIfNeeded: (cascadeId, lsTarget) => scrubAndReloadCascadeIfNeeded(cascadeId, lsTarget, convDir)
+  scrubAndReloadCascadeIfNeeded: (cascadeId, lsTarget) => scrubAndReloadCascadeIfNeeded(cascadeId, lsTarget, convDir),
+  scrubAllConversationDbsSync: () => scrubAllConversationDbsSync(convDir)
 };

@@ -2320,9 +2320,21 @@ public class CredLock {
   } catch {}
 }
 
-const THOUGHT_SIG_MAGIC_RAW = Buffer.from([0x01, 0x69, 0x14, 0x7d, 0x13]);
-const THOUGHT_SIG_MAGIC_B64_1 = Buffer.from("AWkUfR", "utf8");
-const THOUGHT_SIG_MAGIC_B64_2 = Buffer.from("FpFH0T", "utf8");
+// 完整覆盖所有账号与模型变体的 thought_signature 魔数特征：
+// 1. 01 69 14 7d 13 (Gemini 4 Argon / CloudCode 原始签名)
+// 2. 01 11 4d 32 0f (Gemini 3.x / Pro 原始签名，如 fox-server大体框架 会话中的 661 条签名)
+// 3. 01 8f 3d 6b 5f (Claude / 混合思考原始签名)
+// 4. Base64 编码的 thought_signature 变体 (AWkUfR / FpFH0T / AEFNM / IDxACGAIqQ / CA8QAhgCKk)
+const THOUGHT_SIG_MAGICS = [
+  Buffer.from([0x01, 0x69, 0x14, 0x7d, 0x13]),
+  Buffer.from([0x01, 0x11, 0x4d, 0x32, 0x0f]),
+  Buffer.from([0x01, 0x8f, 0x3d, 0x6b, 0x5f]),
+  Buffer.from("AWkUfR", "utf8"),
+  Buffer.from("FpFH0T", "utf8"),
+  Buffer.from("AEFNM", "utf8"),
+  Buffer.from("IDxACGAIqQ", "utf8"),
+  Buffer.from("CA8QAhgCKk", "utf8")
+];
 
 function readProtoVarint(buf, offset) {
   let res = 0n;
@@ -2350,11 +2362,20 @@ function encodeProtoVarint(val) {
 }
 
 function hasThoughtSignatureMagic(buf) {
-  return (
-    buf.includes(THOUGHT_SIG_MAGIC_RAW) ||
-    buf.includes(THOUGHT_SIG_MAGIC_B64_1) ||
-    buf.includes(THOUGHT_SIG_MAGIC_B64_2)
-  );
+  if (!buf || buf.length < 5) return false;
+  for (let i = 0; i < THOUGHT_SIG_MAGICS.length; i++) {
+    if (buf.includes(THOUGHT_SIG_MAGICS[i])) return true;
+  }
+  return false;
+}
+
+function isDirectThoughtSigLeaf(sub) {
+  if (!sub || sub.length < 5) return false;
+  const head = sub.subarray(0, 28);
+  for (let i = 0; i < THOUGHT_SIG_MAGICS.length; i++) {
+    if (head.includes(THOUGHT_SIG_MAGICS[i])) return true;
+  }
+  return false;
 }
 
 function isValidProtoSubMessage(buf) {
@@ -2416,11 +2437,7 @@ function scrubThoughtSignaturesFromProto(buf) {
       const sub = buf.subarray(valStart, valEnd);
       pos = valEnd;
       if (hasThoughtSignatureMagic(sub)) {
-        const isDirectLeafSig =
-          sub.subarray(0, 14).includes(THOUGHT_SIG_MAGIC_RAW) ||
-          sub.subarray(0, 18).includes(THOUGHT_SIG_MAGIC_B64_1) ||
-          sub.subarray(0, 18).includes(THOUGHT_SIG_MAGIC_B64_2);
-        if (!isDirectLeafSig && isValidProtoSubMessage(sub)) {
+        if (!isDirectThoughtSigLeaf(sub) && isValidProtoSubMessage(sub)) {
           const res = scrubThoughtSignaturesFromProto(sub);
           if (res.changed) {
             changed = true;
@@ -2445,25 +2462,16 @@ function scrubThoughtSignaturesFromProto(buf) {
   return changed ? { buf: Buffer.concat(out), changed: true } : { buf, changed: false };
 }
 
-export async function scrubRecentConversationsSignatures(ls = null) {
+export async function scrubRecentConversationsSignatures(_ls = null) {
   const convDir = path.join(os.homedir(), ".gemini", "antigravity", "conversations");
   if (!fs.existsSync(convDir)) return [];
-  const activeLs = ls || discoverLanguageServer(false);
-  const reloadedIds = [];
+  const scrubbedIds = [];
   try {
+    // 取消前 30 个会话上限，全量扫描 conversations/ 下全部 .db 会话文件（通过 hasThoughtSignatureMagic 极速过滤）
     const entries = fs
       .readdirSync(convDir)
       .filter((f) => f.endsWith(".db"))
-      .map((f) => {
-        const fullPath = path.join(convDir, f);
-        let mtimeMs = 0;
-        try {
-          mtimeMs = fs.statSync(fullPath).mtimeMs;
-        } catch {}
-        return { cascadeId: f.slice(0, -3), fullPath, mtimeMs };
-      })
-      .sort((a, b) => b.mtimeMs - a.mtimeMs)
-      .slice(0, 30);
+      .map((f) => ({ cascadeId: f.slice(0, -3), fullPath: path.join(convDir, f) }));
 
     for (const item of entries) {
       let modified = false;
@@ -2503,15 +2511,12 @@ export async function scrubRecentConversationsSignatures(ls = null) {
         }
       } catch {}
 
-      if (modified && activeLs) {
-        try {
-          await callLsRpc(activeLs, "LoadTrajectory", { cascadeId: item.cascadeId });
-          reloadedIds.push(item.cascadeId);
-        } catch {}
+      if (modified) {
+        scrubbedIds.push(item.cascadeId);
       }
     }
   } catch {}
-  return reloadedIds;
+  return scrubbedIds;
 }
 
 export async function switchBillingProjectInstant(projectId, opts = {}) {
@@ -3127,6 +3132,10 @@ function tryLaunchCloudCodeProxyOnStartup() {
     process.argv.some((a) => /main\.mjs$/i.test(String(a)));
   if (isSidecarDaemon) {
     ensureCloudCodeProxyServer();
+    // Sidecar 启动时自动在后台执行一次全盘 .db 思考签名巡检剥离
+    setTimeout(() => {
+      scrubRecentConversationsSignatures(null).catch(() => {});
+    }, 800);
   }
 }
 
