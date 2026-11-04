@@ -84,42 +84,57 @@ function isRelayEnabledForPayload(payload) {
   return true;
 }
 
-function ensureSidecarServerRunning() {
-  return new Promise((resolve) => {
-    try {
-      const net = require("net");
-      const sock = net.connect({ host: "127.0.0.1", port: 8089 });
-      let settled = false;
-      const done = (running) => {
-        if (settled) return;
-        settled = true;
-        try { sock.destroy(); } catch (e) {}
-        if (!running) {
-          try {
-            const { spawn } = require("child_process");
-            const mainScript = path.join(__dirname, "sidecars", "panel", "main.mjs");
-            if (fs.existsSync(mainScript)) {
-              const child = spawn(process.execPath, [mainScript], {
-                detached: true,
-                stdio: "ignore",
-                windowsHide: true
-              });
-              child.unref();
-            }
-          } catch (e) {}
-          setTimeout(resolve, 40);
-        } else {
-          resolve();
-        }
-      };
-      sock.setTimeout(150);
-      sock.on("connect", () => done(true));
-      sock.on("error", () => done(false));
-      sock.on("timeout", () => done(false));
-    } catch (e) {
-      resolve();
+const WEEK_PENALTY_MS = 7 * 24 * 3600 * 1000;
+
+function extractModelDualQuotaForHook(acc, matched, baseModelName) {
+  const now = Date.now();
+  const defaultWeeklyMs = now + WEEK_PENALTY_MS;
+  const groups = acc?.cachedQuota?.quotaGroups || [];
+  const clean = String(baseModelName || matched?.label || matched?.modelId || "").toLowerCase();
+
+  let grp = null;
+  for (const g of groups) {
+    const desc = String(g.description || "").toLowerCase();
+    const gName = String(g.displayName || g.id || "").toLowerCase();
+    if ((clean && desc.includes(clean)) || (clean && gName === clean)) {
+      grp = g;
+      break;
     }
-  });
+  }
+  if (!grp) {
+    if (/argon/i.test(clean)) {
+      grp = groups.find((g) => /argon/i.test(g.id || g.displayName || ""));
+    } else if (/gemini/i.test(clean)) {
+      grp = groups.find((g) => /gemini\s*models/i.test(g.id || g.displayName || ""));
+    } else if (/claude|gpt/i.test(clean)) {
+      grp = groups.find((g) => /claude|gpt/i.test(g.id || g.displayName || ""));
+    }
+  }
+
+  const bks = grp?.buckets || [];
+  const bWk = bks.find((b) => /weekly|7d/i.test(b.window || b.bucketId || ""));
+  const b5h = bks.find((b) => /5h/i.test(b.window || b.bucketId || ""));
+
+  const weeklyPct = Number(
+    matched?.weeklyPct ?? bWk?.remainingPct ?? matched?.remainingPct ?? 100
+  );
+  const weeklyResetStr = matched?.weeklyResetTime || bWk?.resetTime || matched?.resetTime || "";
+  const parsedWkMs = weeklyResetStr ? new Date(weeklyResetStr).getTime() : defaultWeeklyMs;
+  const weeklyResetMs = Number.isFinite(parsedWkMs) && parsedWkMs > 0 ? parsedWkMs : defaultWeeklyMs;
+
+  const fiveHourPct = Number(
+    matched?.fiveHourPct ?? b5h?.remainingPct ?? weeklyPct
+  );
+  const fiveHourResetStr = matched?.fiveHourResetTime || b5h?.resetTime || weeklyResetStr;
+  const parsed5hMs = fiveHourResetStr ? new Date(fiveHourResetStr).getTime() : weeklyResetMs;
+  const fiveHourResetMs = Number.isFinite(parsed5hMs) && parsed5hMs > 0 ? parsed5hMs : weeklyResetMs;
+
+  return {
+    weeklyPct,
+    weeklyResetMs,
+    fiveHourPct,
+    fiveHourResetMs
+  };
 }
 
 function sendValidateRpc({ hostname, port, protocol, csrf }, payload) {
@@ -202,14 +217,20 @@ function resolveBestAvailableChannelSpec(baseModelName, relayCfg) {
       return Array.isArray(m.variantIds) && m.variantIds.some((v) => String(v).toLowerCase() === targetLower);
     });
     if (!matched && targetLower) continue;
-    const pct = Number(matched ? (matched.remainingPct ?? 100) : 100);
-    if (pct <= 0) continue;
-    const resetMs = matched?.resetTime ? new Date(matched.resetTime).getTime() : Number.MAX_SAFE_INTEGER;
+    const dual = extractModelDualQuotaForHook(acc, matched, baseModelName);
+    if (dual.weeklyPct <= 0 || dual.fiveHourPct <= 0) continue;
+
+    const weeklyLow = dual.weeklyPct < thresholdPct;
+    const effectiveWeeklyResetMs = dual.weeklyResetMs + (weeklyLow ? WEEK_PENALTY_MS : 0);
+    const fiveHourAboveThreshold = dual.fiveHourPct > thresholdPct;
+
     candidates.push({
       acc,
-      pct,
-      aboveThreshold: pct > thresholdPct,
-      resetMs: Number.isFinite(resetMs) && resetMs > 0 ? resetMs : Number.MAX_SAFE_INTEGER,
+      weeklyPct: dual.weeklyPct,
+      fiveHourPct: dual.fiveHourPct,
+      fiveHourAboveThreshold,
+      effectiveWeeklyResetMs,
+      fiveHourResetMs: dual.fiveHourResetMs,
       isCurrent: acc.id === activeChannelId,
       sameEmail: acc.email === activeEmail
     });
@@ -218,13 +239,21 @@ function resolveBestAvailableChannelSpec(baseModelName, relayCfg) {
   if (candidates.length === 0) return null;
 
   candidates.sort((a, b) => {
-    if (a.aboveThreshold !== b.aboveThreshold) return a.aboveThreshold ? -1 : 1;
-    if (Math.abs(a.resetMs - b.resetMs) > 120000) {
-      return a.resetMs - b.resetMs;
+    // 1. 5小时限额门控：优先选 5小时限额 > 5% 的通道；当 A 达到 5小时限额 (<=5%) 时顺位切下一通道，重置后自动切回 A
+    if (a.fiveHourAboveThreshold !== b.fiveHourAboveThreshold) {
+      return a.fiveHourAboveThreshold ? -1 : 1;
+    }
+    // 2. 第一层排序：按周重置时间升序（若周限额 < 5%，重置时间 +7天 进入队尾）
+    if (Math.abs(a.effectiveWeeklyResetMs - b.effectiveWeeklyResetMs) > 120000) {
+      return a.effectiveWeeklyResetMs - b.effectiveWeeklyResetMs;
+    }
+    // 3. 第二层排序：周重置时间相近时，按 5小时重置时间升序
+    if (Math.abs(a.fiveHourResetMs - b.fiveHourResetMs) > 60000) {
+      return a.fiveHourResetMs - b.fiveHourResetMs;
     }
     if (a.isCurrent !== b.isCurrent) return a.isCurrent ? -1 : 1;
     if (a.sameEmail !== b.sameEmail) return a.sameEmail ? -1 : 1;
-    return b.pct - a.pct;
+    return b.weeklyPct - a.weeklyPct;
   });
 
   return `account:${candidates[0].acc.id}`;
@@ -299,7 +328,6 @@ async function main() {
   const defaultReply = mode === "pre-tool" ? { decision: "allow" } : {};
 
   try {
-    await ensureSidecarServerRunning();
     const raw = await readStdin();
     let payload = {};
     if (raw && raw.trim()) {

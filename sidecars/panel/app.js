@@ -114,14 +114,14 @@ function getChannelBadgeInfo(ch) {
   if (/^ultra$/i.test(code) || /ultra/i.test(tName)) {
     return { badgeType: "ultra", badgeText: "Ultra" };
   }
+  if (/^pro$/i.test(code) || /\bpro\b/i.test(tName)) {
+    return { badgeType: "personal", badgeText: t.channelPersonalBadge };
+  }
   if (/^plus$/i.test(code) || /plus/i.test(tName)) {
     return { badgeType: "plus", badgeText: "Plus" };
   }
   if (/^free$/i.test(code) || /free|standard/i.test(tName)) {
     return { badgeType: "free", badgeText: "Free" };
-  }
-  if (ch.cachedQuota && ch.cachedQuota.isPaidProOrUltra === false) {
-    return { badgeType: "plus", badgeText: "Plus" };
   }
   return { badgeType: "personal", badgeText: t.channelPersonalBadge };
 }
@@ -1147,6 +1147,62 @@ function findModelInChannel(acc, modelObj) {
   return null;
 }
 
+const WEEK_PENALTY_MS = 7 * 24 * 3600 * 1000;
+
+function extractModelDualQuotaUi(acc, matched, m) {
+  const now = Date.now();
+  const defaultWeeklyMs = now + WEEK_PENALTY_MS;
+  const groups = acc?.cachedQuota?.quotaGroups || [];
+  const clean = String(m?.label || m?.modelId || matched?.label || matched?.modelId || "").toLowerCase();
+
+  let grp = null;
+  for (const g of groups) {
+    const desc = String(g.description || "").toLowerCase();
+    const gName = String(g.displayName || g.id || "").toLowerCase();
+    if ((clean && desc.includes(clean)) || (clean && gName === clean)) {
+      grp = g;
+      break;
+    }
+  }
+  if (!grp) {
+    if (/argon/i.test(clean)) {
+      grp = groups.find((g) => /argon/i.test(g.id || g.displayName || ""));
+    } else if (/gemini/i.test(clean)) {
+      grp = groups.find((g) => /gemini\s*models/i.test(g.id || g.displayName || ""));
+    } else if (/claude|gpt/i.test(clean)) {
+      grp = groups.find((g) => /claude|gpt/i.test(g.id || g.displayName || ""));
+    }
+  }
+
+  const bks = grp?.buckets || [];
+  const bWk = bks.find((b) => /weekly|7d/i.test(b.window || b.bucketId || ""));
+  const b5h = bks.find((b) => /5h/i.test(b.window || b.bucketId || ""));
+
+  const weeklyPct = Number(
+    matched?.weeklyPct ?? bWk?.remainingPct ?? matched?.remainingPct ?? 100
+  );
+  const weeklyResetTime = matched?.weeklyResetTime || bWk?.resetTime || matched?.resetTime || "";
+  const parsedWkMs = weeklyResetTime ? new Date(weeklyResetTime).getTime() : defaultWeeklyMs;
+  const weeklyResetMs = Number.isFinite(parsedWkMs) && parsedWkMs > 0 ? parsedWkMs : defaultWeeklyMs;
+
+  const fiveHourPct = Number(
+    matched?.fiveHourPct ?? b5h?.remainingPct ?? weeklyPct
+  );
+  const fiveHourResetTime = matched?.fiveHourResetTime || b5h?.resetTime || weeklyResetTime;
+  const parsed5hMs = fiveHourResetTime ? new Date(fiveHourResetTime).getTime() : weeklyResetMs;
+  const fiveHourResetMs = Number.isFinite(parsed5hMs) && parsed5hMs > 0 ? parsed5hMs : weeklyResetMs;
+
+  return {
+    weeklyPct,
+    weeklyResetTime,
+    weeklyResetMs,
+    fiveHourPct,
+    fiveHourResetTime,
+    fiveHourResetMs,
+    hasDistinct5h: Boolean(b5h || (matched?.fiveHourResetTime && matched.fiveHourResetTime !== matched.weeklyResetTime))
+  };
+}
+
 function selectAutoPollChannel(accounts, m, activeChannelId, thresholdPct = 5) {
   const candidates = [];
   for (const acc of accounts) {
@@ -1154,31 +1210,43 @@ function selectAutoPollChannel(accounts, m, activeChannelId, thresholdPct = 5) {
     if (isGcp) continue;
     const matched = findModelInChannel(acc, m);
     if (!matched) continue;
-    const pct = Number(matched.remainingPct ?? 100);
-    if (pct <= 0) continue;
-    const resetMs = matched.resetTime ? new Date(matched.resetTime).getTime() : Number.MAX_SAFE_INTEGER;
+    const dual = extractModelDualQuotaUi(acc, matched, m);
+    if (dual.weeklyPct <= 0 || dual.fiveHourPct <= 0) continue;
+
+    const weeklyLow = dual.weeklyPct < thresholdPct;
+    const effectiveWeeklyResetMs = dual.weeklyResetMs + (weeklyLow ? WEEK_PENALTY_MS : 0);
+    const fiveHourAboveThreshold = dual.fiveHourPct > thresholdPct;
+
     candidates.push({
       acc,
       matched,
+      dual,
       isGcp: false,
-      pct,
-      aboveThreshold: pct > thresholdPct,
-      resetMs: Number.isFinite(resetMs) && resetMs > 0 ? resetMs : Number.MAX_SAFE_INTEGER,
+      weeklyPct: dual.weeklyPct,
+      fiveHourPct: dual.fiveHourPct,
+      fiveHourAboveThreshold,
+      effectiveWeeklyResetMs,
+      fiveHourResetMs: dual.fiveHourResetMs,
       isCurrent: acc.id === activeChannelId
     });
   }
   if (candidates.length === 0) return null;
 
   candidates.sort((a, b) => {
-    // 1. 优先选剩余额度高于阈值 (>5%) 的个人通道
-    if (a.aboveThreshold !== b.aboveThreshold) return a.aboveThreshold ? -1 : 1;
-    // 2. 按最快重置时间优先（resetMs 越小越先重置，优先把即将重置的额度用完，避免从高到低用一点就来回切号）
-    if (Math.abs(a.resetMs - b.resetMs) > 120000) {
-      return a.resetMs - b.resetMs;
+    // 1. 5小时限额门控：优先选 5小时限额 > 5% 的通道；当 A 达到 5小时限额 (<=5%) 时顺位切下一通道，重置后切回 A
+    if (a.fiveHourAboveThreshold !== b.fiveHourAboveThreshold) {
+      return a.fiveHourAboveThreshold ? -1 : 1;
     }
-    // 3. 若重置时间相近（例如均为未启用满额窗口），保持当前活跃通道稳定不跳变
+    // 2. 第一层排序：按周重置时间升序（若周限额 < 5%，重置时间 +7天 进入队尾）
+    if (Math.abs(a.effectiveWeeklyResetMs - b.effectiveWeeklyResetMs) > 120000) {
+      return a.effectiveWeeklyResetMs - b.effectiveWeeklyResetMs;
+    }
+    // 3. 第二层排序：周重置时间相近时，按 5小时重置时间升序
+    if (Math.abs(a.fiveHourResetMs - b.fiveHourResetMs) > 60000) {
+      return a.fiveHourResetMs - b.fiveHourResetMs;
+    }
     if (a.isCurrent !== b.isCurrent) return a.isCurrent ? -1 : 1;
-    return b.pct - a.pct;
+    return b.weeklyPct - a.weeklyPct;
   });
 
   return candidates[0];
@@ -1190,19 +1258,25 @@ function formatModelQuotaSubText(m, selectedRoute) {
   const activeChannelId = state.activeAccount?.channelId || "";
   const thresholdPct = Number(state.routing?.lowQuotaThresholdPct ?? 5);
 
-  // 1. 自动轮询有余额通道：按最快重置时间优先选出可用通道并持续用尽再切
+  // 1. 自动轮询有余额通道：按双层重置时间（第一层周限额重置，第二层5小时限额重置）优先选出可用通道
   if (selectedRoute === "auto_poll") {
     const picked = selectAutoPollChannel(accounts, m, activeChannelId, thresholdPct);
     if (picked) {
-      const { acc: bestAcc, matched: bestModel, isGcp } = picked;
+      const { acc: bestAcc, matched: bestModel, dual, isGcp } = picked;
       const shortName = isGcp ? `${t.channelGcpBadge}·${bestAcc.gcpProjectId.slice(0, 12)}` : bestAcc.email.split("@")[0];
       if (isGcp) {
         return `${t.autoPollSubPrefix}${shortName} · ${t.gcpRouteSubUnlimited}`;
       }
-      const countdown = formatResetCountdown(bestModel.resetTime);
-      return countdown
-        ? `${t.autoPollSubPrefix}${shortName} · ${t.remainingLabel} ${bestModel.remainingPct}% · ${t.resetsInPrefix}${countdown}${t.resetsInSuffix}`
-        : `${t.autoPollSubPrefix}${shortName} · ${t.remainingLabel} ${bestModel.remainingPct}%`;
+      const wkCountdown = formatResetCountdown(dual?.weeklyResetTime || bestModel.resetTime);
+      if (dual?.hasDistinct5h) {
+        const wkLabel = currentLang === "zh" ? "周" : "Wk";
+        return wkCountdown
+          ? `${t.autoPollSubPrefix}${shortName} · ${wkLabel} ${dual.weeklyPct}% (${wkCountdown}) · 5h ${dual.fiveHourPct}%`
+          : `${t.autoPollSubPrefix}${shortName} · ${wkLabel} ${dual.weeklyPct}% · 5h ${dual.fiveHourPct}%`;
+      }
+      return wkCountdown
+        ? `${t.autoPollSubPrefix}${shortName} · ${t.remainingLabel} ${dual ? dual.weeklyPct : bestModel.remainingPct}% · ${t.resetsInPrefix}${wkCountdown}${t.resetsInSuffix}`
+        : `${t.autoPollSubPrefix}${shortName} · ${t.remainingLabel} ${dual ? dual.weeklyPct : bestModel.remainingPct}%`;
     }
   }
 

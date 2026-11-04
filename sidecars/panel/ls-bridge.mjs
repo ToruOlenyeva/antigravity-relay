@@ -584,122 +584,124 @@ function isModelEntryRestrictedOrSunset(m) {
   return false;
 }
 
-function detectPaidProOrUltraFromModels(rawModelsListOrMap) {
-  const entries = Array.isArray(rawModelsListOrMap)
-    ? rawModelsListOrMap
-    : Object.values(rawModelsListOrMap || {});
-  if (entries.length === 0) return false;
+function detectArgonAccessFromModels(rawModelsListOrMap, tierCode = "Pro", prevHasArgon = undefined) {
+  if (tierCode === "Free" || tierCode === "Plus") return false;
   if (!Array.isArray(rawModelsListOrMap) && rawModelsListOrMap && typeof rawModelsListOrMap === "object") {
     if (Object.prototype.hasOwnProperty.call(rawModelsListOrMap, "gemini-4-argon-disabled")) {
       return false;
     }
   }
-  let hasClaude55 = false;
-  let hasPromotionalRestriction = false;
+  const entries = Array.isArray(rawModelsListOrMap)
+    ? rawModelsListOrMap
+    : Object.values(rawModelsListOrMap || {});
+  if (entries.length === 0) {
+    return prevHasArgon !== undefined ? Boolean(prevHasArgon) : (tierCode === "Ultra" || tierCode === "Pro");
+  }
+  let sawArgonEnabled = false;
+  let sawArgonRestricted = false;
   for (const m of entries) {
     if (!m || typeof m !== "object") continue;
     const lbl = String(m.displayName || m.label || m.modelId || "").trim();
     const id = String(m.modelOrAlias?.model || m.modelOrAlias?.alias || m.model || "").trim();
     const tagDesc = String(m.tagDescription || m.notice || "").trim();
-    if (/now available on paid Pro and Ultra|no longer be available on your current plan|available to Ultra and paid Pro/i.test(tagDesc)) {
-      hasPromotionalRestriction = true;
-    }
-    if (/4[-_.\s]*6/i.test(lbl) || /4[-_.\s]*6/i.test(id)) {
-      hasPromotionalRestriction = true;
-    }
-    if (/claude\s*(opus|sonnet)\s*5\.5/i.test(lbl) || /claude-(opus|sonnet)-5-5/i.test(id)) {
-      if (!isModelEntryRestrictedOrSunset(m)) {
-        hasClaude55 = true;
+    if (/argon|m417|m418|m419/i.test(lbl) || /argon|m417|m418|m419/i.test(id)) {
+      if (isModelEntryRestrictedOrSunset(m) || /now available on paid Pro and Ultra|available to Ultra and paid Pro/i.test(tagDesc)) {
+        sawArgonRestricted = true;
+      } else {
+        sawArgonEnabled = true;
       }
     }
   }
-  return hasClaude55 && !hasPromotionalRestriction;
+  if (sawArgonRestricted) return false;
+  if (sawArgonEnabled) return true;
+  if (prevHasArgon !== undefined) return Boolean(prevHasArgon);
+  return false;
 }
 
-export function detectPersonalAccountTier(rawModelsListOrMap, rawTierName = "", rawTierId = "", prevIsPaid = undefined) {
+export function detectPersonalAccountTier(
+  rawModelsListOrMap,
+  rawTierName = "",
+  rawTierId = "",
+  prevHasArgon = undefined,
+  prevTierCode = ""
+) {
   const combinedTier = `${rawTierName || ""} ${rawTierId || ""}`.trim();
-  if (/ultra/i.test(combinedTier)) {
-    return { tierCode: "Ultra", tierName: "Google AI Ultra", isPaidProOrUltra: true };
-  }
-  const entries = Array.isArray(rawModelsListOrMap)
-    ? rawModelsListOrMap
-    : Object.values(rawModelsListOrMap || {});
-  const hasModelsInput = entries.length > 0;
-  const isPaidPro = hasModelsInput
-    ? detectPaidProOrUltraFromModels(rawModelsListOrMap)
-    : (prevIsPaid !== undefined ? Boolean(prevIsPaid) : !/free|standard|plus/i.test(combinedTier));
+  let tierCode = "";
+  let tierName = "";
 
-  if (isPaidPro) {
-    return { tierCode: "Pro", tierName: "Google AI Pro", isPaidProOrUltra: true };
-  }
-
-  let hasPromoOrPlusSignal = /plus|pro|g1-pro|g1-plus/i.test(combinedTier);
-  if (!Array.isArray(rawModelsListOrMap) && rawModelsListOrMap && typeof rawModelsListOrMap === "object") {
-    if (Object.prototype.hasOwnProperty.call(rawModelsListOrMap, "gemini-4-argon-disabled")) {
-      hasPromoOrPlusSignal = true;
-    }
-  }
-  for (const m of entries) {
-    if (!m || typeof m !== "object") continue;
-    const tagDesc = String(m.tagDescription || m.notice || "").trim();
-    if (/now available on paid Pro and Ultra|no longer be available on your current plan|available to Ultra and paid Pro/i.test(tagDesc)) {
-      hasPromoOrPlusSignal = true;
-    }
+  // 严格按照 Google 官方返回的 userTier (paidTier / currentTier) 判定会员等级徽章 (Ultra / Pro / Plus / Free)
+  if (/ultra|g1-ultra/i.test(combinedTier)) {
+    tierCode = "Ultra";
+    tierName = "Google AI Ultra";
+  } else if (/\bpro\b|g1-pro/i.test(combinedTier)) {
+    tierCode = "Pro";
+    tierName = "Google AI Pro";
+  } else if (/\bplus\b|g1-plus/i.test(combinedTier)) {
+    tierCode = "Plus";
+    tierName = "Google AI Plus";
+  } else if (/\bfree\b|standard-tier|free-tier/i.test(combinedTier)) {
+    tierCode = "Free";
+    tierName = "Google AI Free";
+  } else if (prevTierCode && /^(Ultra|Pro|Plus|Free)$/i.test(prevTierCode)) {
+    const norm = prevTierCode.charAt(0).toUpperCase() + prevTierCode.slice(1).toLowerCase();
+    tierCode = norm;
+    tierName = `Google AI ${norm}`;
+  } else {
+    tierCode = "Pro";
+    tierName = "Google AI Pro";
   }
 
-  if (/free|standard/i.test(combinedTier) && !/plus|pro/i.test(combinedTier) && !hasPromoOrPlusSignal) {
-    return { tierCode: "Free", tierName: "Google AI Free", isPaidProOrUltra: false };
-  }
-  if (hasPromoOrPlusSignal) {
-    return { tierCode: "Plus", tierName: "Google AI Plus", isPaidProOrUltra: false };
-  }
-  return { tierCode: "Free", tierName: "Google AI Free", isPaidProOrUltra: false };
+  const hasArgonAccess = detectArgonAccessFromModels(rawModelsListOrMap, tierCode, prevHasArgon);
+  return {
+    tierCode,
+    tierName,
+    hasArgonAccess,
+    isPaidProOrUltra: tierCode === "Ultra" || tierCode === "Pro"
+  };
 }
 
 function buildProModelsFromQuotaGroups(
   quotaGroups,
   prevModels = [],
   dynamicApiModels = [],
-  liveTierTemplate = []
+  liveTierTemplate = [],
+  hasArgonAccess = true
 ) {
   const groups = Array.isArray(quotaGroups) ? quotaGroups : [];
   const geminiGroup = groups.find((g) => /gemini\s*models/i.test(g.id || g.displayName || ""));
   const claudeGroup = groups.find((g) => /claude|gpt/i.test(g.id || g.displayName || ""));
   const argonGroup = groups.find((g) => /argon/i.test(g.id || g.displayName || ""));
 
-  const pickBucket = (grp) => {
+  const extractGroupDualBuckets = (grp) => {
     const bks = grp?.buckets || [];
     const b5h = bks.find((b) => /5h/i.test(b.window || b.bucketId || ""));
-    const bWk = bks.find((b) => /weekly/i.test(b.window || b.bucketId || ""));
-    if (b5h && bWk) {
-      return (bWk.remainingPct ?? 100) < (b5h.remainingPct ?? 100) ? bWk : b5h;
-    }
-    return b5h || bWk || bks[0] || null;
+    const bWk = bks.find((b) => /weekly|7d/i.test(b.window || b.bucketId || ""));
+    const primary = (b5h && bWk)
+      ? ((bWk.remainingPct ?? 100) <= 5 ? bWk : b5h)
+      : (b5h || bWk || bks[0] || null);
+    return {
+      primary,
+      weeklyBucket: bWk || primary,
+      fiveHourBucket: b5h || bWk || primary
+    };
   };
 
-  const matchGroupForModel = (label) => {
+  const matchGroupInfoForModel = (label) => {
     const clean = String(label || "").trim().toLowerCase();
     if (!clean) return null;
-    // 1. 优先精确匹配 RetrieveUserQuotaSummary.groups[].description 中显式列出的模型名
     for (const g of groups) {
       const desc = String(g.description || "").toLowerCase();
       const gName = String(g.displayName || g.id || "").toLowerCase();
       if (desc.includes(clean) || gName === clean) {
-        return pickBucket(g);
+        return extractGroupDualBuckets(g);
       }
     }
-    // 2. 家族兜底匹配（Gemini 4 Argon 拥有独立周限额桶位 gemini-argon-wtu-weekly，不回退混用 Gemini 3.8 Flash 配额桶）
-    if (/argon/i.test(clean)) return pickBucket(argonGroup);
-    if (/gemini/i.test(clean)) return pickBucket(geminiGroup);
-    if (/claude|gpt/i.test(clean)) return pickBucket(claudeGroup);
+    if (/argon/i.test(clean)) return extractGroupDualBuckets(argonGroup);
+    if (/gemini/i.test(clean)) return extractGroupDualBuckets(geminiGroup);
+    if (/claude|gpt/i.test(clean)) return extractGroupDualBuckets(claudeGroup);
     return null;
   };
 
-  // 动态合并模型源：
-  // ① 远端 v1internal:fetchAvailableModels 动态返回的真实模型与配额 (dynamicApiModels)
-  // ② language_server.exe GetUserStatus 实时沉淀的最新客户端原生模型模板 (liveTierTemplate)
-  // ③ Google AI Pro 基准模型兜底 (GOOGLE_AI_PRO_DEFAULT_MODELS)
-  // ④ 该通道之前通过 LS RPC 探测到的非废弃模型 (prevModels)
   const mergedTemplateMap = new Map();
   const upsertCandidate = (item) => {
     if (!item) return;
@@ -707,6 +709,7 @@ function buildProModelsFromQuotaGroups(
     if (!rawLabel) return;
     const baseLabel = rawLabel.replace(/\s*\((Low|Medium|High|Max)\)\s*$/i, "").trim();
     if (!baseLabel || isLegacyDeprecatedModel(baseLabel) || isLegacyDeprecatedModel(rawLabel)) return;
+    if (!hasArgonAccess && /argon/i.test(baseLabel)) return;
     const vars = (Array.isArray(item.variantIds) ? item.variantIds : [baseLabel, rawLabel]).filter(
       (v) => v && !isLegacyDeprecatedModel(v)
     );
@@ -716,7 +719,11 @@ function buildProModelsFromQuotaGroups(
         modelId: baseLabel,
         variantIds: Array.from(new Set([baseLabel, ...vars])),
         remainingPct: item.remainingPct,
-        resetTime: item.resetTime || ""
+        resetTime: item.resetTime || "",
+        weeklyPct: item.weeklyPct,
+        weeklyResetTime: item.weeklyResetTime || "",
+        fiveHourPct: item.fiveHourPct,
+        fiveHourResetTime: item.fiveHourResetTime || ""
       });
     } else {
       const existing = mergedTemplateMap.get(baseLabel);
@@ -738,18 +745,30 @@ function buildProModelsFromQuotaGroups(
   for (const m of (Array.isArray(prevModels) ? prevModels : [])) upsertCandidate(m);
 
   return Array.from(mergedTemplateMap.values()).map((tpl) => {
-    const matchedBk = matchGroupForModel(tpl.label);
+    const grpInfo = matchGroupInfoForModel(tpl.label);
+    const matchedBk = grpInfo?.primary || null;
+    const wkBk = grpInfo?.weeklyBucket || null;
+    const fhBk = grpInfo?.fiveHourBucket || null;
     const prevMatch = (prevModels || []).find(
       (p) => String(p.label || p.modelId || "").toLowerCase() === tpl.label.toLowerCase()
     );
     const pct = matchedBk?.remainingPct ?? tpl.remainingPct ?? prevMatch?.remainingPct ?? 100;
     const rst = matchedBk?.resetTime || tpl.resetTime || prevMatch?.resetTime || "";
+    const weeklyPct = wkBk?.remainingPct ?? tpl.weeklyPct ?? prevMatch?.weeklyPct ?? pct;
+    const weeklyResetTime = wkBk?.resetTime || tpl.weeklyResetTime || prevMatch?.weeklyResetTime || rst;
+    const fiveHourPct = fhBk?.remainingPct ?? tpl.fiveHourPct ?? prevMatch?.fiveHourPct ?? pct;
+    const fiveHourResetTime = fhBk?.resetTime || tpl.fiveHourResetTime || prevMatch?.fiveHourResetTime || rst;
+
     return {
       label: tpl.label,
       modelId: tpl.modelId,
       variantIds: [...tpl.variantIds],
       remainingPct: pct,
       resetTime: rst,
+      weeklyPct,
+      weeklyResetTime,
+      fiveHourPct,
+      fiveHourResetTime,
       unlimited: false
     };
   });
@@ -765,11 +784,38 @@ function isValidOfficialQuotaGroup(g) {
   return true;
 }
 
+function normalizeIsoExpiry(rawExpiry) {
+  if (!rawExpiry) {
+    return new Date(Date.now() + 3500 * 1000).toISOString();
+  }
+  const str = String(rawExpiry).trim();
+  // 若原本已是合法 RFC3339 / ISO 格式则直接保留
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(str)) {
+    return str;
+  }
+  const parsed = new Date(str);
+  if (!Number.isNaN(parsed.getTime()) && parsed.getTime() > 0) {
+    return parsed.toISOString();
+  }
+  return new Date(Date.now() + 3500 * 1000).toISOString();
+}
+
 function buildCleanChannelToken(baseToken, targetProject = "", targetLocation = "") {
   if (!baseToken || typeof baseToken !== "object") return null;
   const cleanPid = String(targetProject || "").trim();
   const cleanLoc = String(targetLocation || "").trim();
   const next = { ...baseToken };
+  if (next.token && typeof next.token === "object") {
+    next.token = {
+      access_token: String(next.token.access_token || "").trim(),
+      token_type: String(next.token.token_type || "Bearer").trim(),
+      refresh_token: String(next.token.refresh_token || "").trim(),
+      expiry: normalizeIsoExpiry(next.token.expiry)
+    };
+  }
+  if (!next.writer_id && cachedWinCred?.writer_id) {
+    next.writer_id = cachedWinCred.writer_id;
+  }
   if (cleanPid) {
     next.auth_method = "gcp";
     next.project_id = cleanPid;
@@ -786,13 +832,15 @@ function sanitizeCachedQuotaModels(cachedQuota, isGcp, liveTierTemplate = [], hi
   if (!cachedQuota || typeof cachedQuota !== "object") return cachedQuota;
   const rawList = Array.isArray(cachedQuota.availableModels) ? cachedQuota.availableModels : [];
   const tierInfo = isGcp
-    ? { tierCode: "GCP", tierName: hintTierName || "Agent Platform", isPaidProOrUltra: false }
+    ? { tierCode: "GCP", tierName: hintTierName || "Agent Platform", hasArgonAccess: true, isPaidProOrUltra: false }
     : detectPersonalAccountTier(
         rawList,
-        cachedQuota.tierCode || hintTierName || "",
-        hintTierId || "",
-        cachedQuota.isPaidProOrUltra
+        cachedQuota.tierName || hintTierName || "",
+        hintTierId || cachedQuota.tierCode || "",
+        cachedQuota.hasArgonAccess,
+        cachedQuota.tierCode || hintTierId || ""
       );
+  const hasArgonAccess = tierInfo.hasArgonAccess;
   const isPaidProOrUltra = tierInfo.isPaidProOrUltra;
   const merged = new Map();
   for (const m of rawList) {
@@ -802,7 +850,7 @@ function sanitizeCachedQuotaModels(cachedQuota, isGcp, liveTierTemplate = [], hi
     if (isLegacyDeprecatedModel(baseLabel) || isLegacyDeprecatedModel(rawLabel)) {
       continue;
     }
-    if (!isGcp && !isPaidProOrUltra && /argon|claude|gpt/i.test(baseLabel)) {
+    if (!isGcp && !hasArgonAccess && /argon/i.test(baseLabel)) {
       continue;
     }
     const vars = (Array.isArray(m.variantIds) ? m.variantIds : [baseLabel, rawLabel]).filter(
@@ -830,18 +878,18 @@ function sanitizeCachedQuotaModels(cachedQuota, isGcp, liveTierTemplate = [], hi
   let availableModels = Array.from(merged.values());
 
   if (!isGcp) {
-    // 始终清理历史缓存中人工合成的无重置时间 argon-weekly 虚假桶位或 All Models 异常兜底组，严格对齐官方返回的两大配额池（Gemini Models 与 Claude and GPT models）
     quotaGroups = quotaGroups.filter(
       (g) =>
         isValidOfficialQuotaGroup(g) &&
-        (isPaidProOrUltra || !/argon/i.test(g.id || g.displayName || ""))
+        (hasArgonAccess || !/argon/i.test(g.id || g.displayName || ""))
     );
-    if (isPaidProOrUltra && quotaGroups.length > 0) {
+    if (quotaGroups.length > 0 && tierInfo.tierCode !== "Free") {
       availableModels = buildProModelsFromQuotaGroups(
         quotaGroups,
         availableModels,
         availableModels,
-        liveTierTemplate
+        liveTierTemplate,
+        hasArgonAccess
       );
     }
   }
@@ -850,6 +898,7 @@ function sanitizeCachedQuotaModels(cachedQuota, isGcp, liveTierTemplate = [], hi
     ...cachedQuota,
     tierCode: tierInfo.tierCode,
     tierName: tierInfo.tierName,
+    hasArgonAccess,
     isPaidProOrUltra,
     isGcpUnlimited: isGcp ? true : Boolean(cachedQuota.isGcpUnlimited),
     quotaGroups,
@@ -925,6 +974,10 @@ function normalizeAccountChannels(cfg) {
             updatedAt: cachedQuota?.updatedAt || Date.now()
           };
         }
+      }
+
+      if (item.storedToken && typeof item.storedToken === "object" && item.storedToken.token && item.storedToken.token.expiry) {
+        item.storedToken.token.expiry = normalizeIsoExpiry(item.storedToken.token.expiry);
       }
 
       nextAccounts[normKey] = {
@@ -1559,14 +1612,16 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
     }
   }
 
-  // 检测当前个人账号真实会员等级（Free / Plus / Pro / Ultra，排除 Jio 等渠道赠送版上的 Unavailable Gemini 4 Argon 与已下线 4.6/GPT-OSS）
+  // 检测当前个人账号真实会员等级（严格按 Google 官方 userTier 判定 Free / Plus / Pro / Ultra，并将等级徽章与 Gemini 4 Argon 权限解耦）
   const liveChannelKey = activeEmail
     ? (activeGcpProject ? `${activeEmail}#gcp:${activeGcpProject}` : `${activeEmail}#personal`)
     : "";
-  const cachedPaidFlag = liveChannelKey ? cfg.accounts?.[liveChannelKey]?.cachedQuota?.isPaidProOrUltra : undefined;
+  const cachedHasArgon = liveChannelKey ? cfg.accounts?.[liveChannelKey]?.cachedQuota?.hasArgonAccess : undefined;
+  const cachedTierCode = liveChannelKey ? (cfg.accounts?.[liveChannelKey]?.tierCode || cfg.accounts?.[liveChannelKey]?.cachedQuota?.tierCode || "") : "";
   const liveTierInfo = activeGcpProject
-    ? { tierCode: "GCP", tierName: activeTierName, isPaidProOrUltra: false }
-    : detectPersonalAccountTier(clientModelConfigs, rawTierName, activeTierId, cachedPaidFlag);
+    ? { tierCode: "GCP", tierName: activeTierName, hasArgonAccess: true, isPaidProOrUltra: false }
+    : detectPersonalAccountTier(clientModelConfigs, rawTierName, activeTierId, cachedHasArgon, cachedTierCode);
+  const hasLiveArgonAccess = liveTierInfo.hasArgonAccess;
   const isLivePaidProOrUltra = liveTierInfo.isPaidProOrUltra;
   if (!activeGcpProject && liveChannelKey && cfg.accounts[liveChannelKey]) {
     cfg.accounts[liveChannelKey].tierCode = liveTierInfo.tierCode;
@@ -1584,7 +1639,7 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
       if (isLegacyDeprecatedModel(baseLabel) || isLegacyDeprecatedModel(rawLabel) || isModelEntryRestrictedOrSunset(m)) {
         continue;
       }
-      if (!isLivePaidProOrUltra && /argon|claude|gpt/i.test(baseLabel)) {
+      if (!hasLiveArgonAccess && /argon/i.test(baseLabel)) {
         continue;
       }
     }
@@ -1615,7 +1670,7 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
     availableModels = AGENT_PLATFORM_DEFAULT_MODELS.map((m) => ({ ...m, variantIds: [...m.variantIds] }));
   }
 
-  // 三大配额池汇总（GCP 通道不显示剩余额度百分比桶；个人 Pro 通道保留完整周限额与 5h limit 独立桶位，非付费 Pro 剔除 Argon 组，并过滤 All Models 兜底组）
+  // 三大配额池汇总（GCP 通道不显示剩余额度百分比桶；个人 Pro 通道保留完整周限额与 5h limit 独立桶位，无 Argon 权限时剔除 Argon 组，并过滤 All Models 兜底组）
   const rawQuotaGroups = activeGcpProject
     ? []
     : (quotaSummaryResp?.response?.groups || [])
@@ -1633,9 +1688,20 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
           }))
         }))
         .filter((g) => isValidOfficialQuotaGroup(g));
-  let quotaGroups = (!activeGcpProject && !isLivePaidProOrUltra)
+  let quotaGroups = (!activeGcpProject && !hasLiveArgonAccess)
     ? rawQuotaGroups.filter((g) => !/argon/i.test(g.id || g.displayName || ""))
     : rawQuotaGroups;
+
+  if (!activeGcpProject && quotaGroups.length > 0 && liveTierInfo.tierCode !== "Free") {
+    const liveTierTpl = cfg.__meta__?.liveTierModels?.personal || [];
+    availableModels = buildProModelsFromQuotaGroups(
+      quotaGroups,
+      cfg.accounts?.[liveChannelKey]?.cachedQuota?.availableModels || [],
+      availableModels,
+      liveTierTpl,
+      hasLiveArgonAccess
+    );
+  }
 
   // 若用户在前端显式固定了前台主会话通道（activeChannelId），背景模型路由不会篡改前台使用中状态
   const detectedChannelId = activeEmail
@@ -1667,7 +1733,7 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
     }
   }
 
-  if (availableModels.length > 0 && clientModelConfigs.length > 0 && (activeGcpProject || isLivePaidProOrUltra)) {
+  if (availableModels.length > 0 && clientModelConfigs.length > 0 && (activeGcpProject || hasLiveArgonAccess)) {
     if (!cfg.__meta__.liveTierModels || typeof cfg.__meta__.liveTierModels !== "object") {
       cfg.__meta__.liveTierModels = {};
     }
@@ -1683,6 +1749,7 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
     cfg.accounts[detectedChannelId].cachedQuota = {
       tierCode: liveTierInfo.tierCode,
       tierName: liveTierInfo.tierName,
+      hasArgonAccess: hasLiveArgonAccess,
       isPaidProOrUltra: isLivePaidProOrUltra,
       isGcpUnlimited: Boolean(activeGcpProject),
       quotaGroups,
@@ -1798,8 +1865,15 @@ function parseCloudCodeModelsAndQuota(
   }
 
   const tierInfo = isGcpChannel
-    ? { tierCode: "GCP", tierName: "Agent Platform", isPaidProOrUltra: false }
-    : detectPersonalAccountTier(modelsObj, userTier, userTier, prevCachedQuota?.isPaidProOrUltra);
+    ? { tierCode: "GCP", tierName: "Agent Platform", hasArgonAccess: true, isPaidProOrUltra: false }
+    : detectPersonalAccountTier(
+        modelsObj,
+        userTier,
+        userTier,
+        prevCachedQuota?.hasArgonAccess,
+        prevCachedQuota?.tierCode || ""
+      );
+  const hasArgonAccess = tierInfo.hasArgonAccess;
   const isPaidProOrUltra = tierInfo.isPaidProOrUltra;
   const groupedModelMap = new Map();
 
@@ -1814,11 +1888,10 @@ function parseCloudCodeModelsAndQuota(
       if (isLegacyDeprecatedModel(baseLabel) || isLegacyDeprecatedModel(rawLabel) || isLegacyDeprecatedModel(modelId)) {
         continue;
       }
-      if (!isPaidProOrUltra && /argon|claude|gpt/i.test(baseLabel)) {
+      if (!hasArgonAccess && /argon/i.test(baseLabel)) {
         continue;
       }
     }
-    // GCP 通道走项目赠金/按量计费，屏蔽接口回显的个人消费者 quotaInfo 百分比与刷新时间；proto3 中 remainingFraction 为 0 时省略字段但保留 resetTime
     const remainingPct = isGcpChannel
       ? 100
       : (m.quotaInfo?.remainingFraction !== undefined
@@ -1842,15 +1915,13 @@ function parseCloudCodeModelsAndQuota(
     }
   }
 
-  // GCP 通道不展示个人配额桶；个人 Pro 通道优先使用 v1internal:retrieveUserQuotaSummary 返回的官方配额数据
   const quotaGroups = [];
   if (!isGcpChannel) {
     const rawGroups = rawQuotaSummaryResp?.groups || rawQuotaSummaryResp?.response?.groups || [];
     if (Array.isArray(rawGroups) && rawGroups.length > 0) {
       for (const g of rawGroups) {
         const gId = g.groupId || g.displayName || "";
-        // 非付费 Pro 套餐（如 Jio 渠道赠送 Pro）不支持 Gemini 4 Argon，过滤掉 Argon 配额组
-        if (!isPaidProOrUltra && /argon/i.test(gId)) continue;
+        if (!hasArgonAccess && /argon/i.test(gId)) continue;
         const candidateGroup = {
           id: gId,
           displayName: g.displayName || "",
@@ -1871,9 +1942,8 @@ function parseCloudCodeModelsAndQuota(
     }
   }
 
-  // 仅针对真实付费 Google AI Pro / Ultra 个人通道（isPaidProOrUltra === true）：
-  // 合并 Gemini 4 Argon 与官方返回的有效模型并绑定真实配额桶；非付费/渠道赠送版严格仅返回其真实支持的模型（如 Gemini 3.8 Flash）
-  if (!isGcpChannel && isPaidProOrUltra) {
+  // 所有具备官方配额池的会员个人通道（Ultra / Pro / Jio Pro / Plus）统一合并真实支持的模型并绑定双层（周 + 5h）配额桶；若无 Argon 权限则仅剔除 Gemini 4 Argon，保留 Gemini 3.8 Flash 与 Claude 5.5
+  if (!isGcpChannel && quotaGroups.length > 0 && tierInfo.tierCode !== "Free") {
     const dynamicApiModels = Array.from(groupedModelMap.values()).filter(
       (m) => !isLegacyDeprecatedModel(m.label) && !isLegacyDeprecatedModel(m.modelId)
     );
@@ -1881,12 +1951,14 @@ function parseCloudCodeModelsAndQuota(
       quotaGroups,
       prevCachedQuota?.availableModels || [],
       dynamicApiModels,
-      liveTierTemplate
+      liveTierTemplate,
+      hasArgonAccess
     );
     return {
       tierCode: tierInfo.tierCode,
       tierName: tierInfo.tierName,
-      isPaidProOrUltra: true,
+      hasArgonAccess,
+      isPaidProOrUltra,
       isGcpUnlimited: false,
       quotaGroups,
       availableModels: proModels,
@@ -1901,6 +1973,7 @@ function parseCloudCodeModelsAndQuota(
   return {
     tierCode: tierInfo.tierCode,
     tierName: tierInfo.tierName,
+    hasArgonAccess,
     isPaidProOrUltra,
     isGcpUnlimited: isGcpChannel,
     quotaGroups,
@@ -1937,8 +2010,15 @@ export async function probeChannelQuotaSnapshot(channelId) {
       const usTierId = usResp?.userStatus?.userTier?.id || "";
       if (clientModels.length > 0 || rawGroups.length > 0) {
         const tierInfo = isGcp
-          ? { tierCode: "GCP", tierName: acc.tierName || "Agent Platform", isPaidProOrUltra: false }
-          : detectPersonalAccountTier(clientModels, usTierName, usTierId, acc.cachedQuota?.isPaidProOrUltra);
+          ? { tierCode: "GCP", tierName: acc.tierName || "Agent Platform", hasArgonAccess: true, isPaidProOrUltra: false }
+          : detectPersonalAccountTier(
+              clientModels,
+              usTierName,
+              usTierId,
+              acc.cachedQuota?.hasArgonAccess,
+              acc.tierCode || acc.cachedQuota?.tierCode || ""
+            );
+        const hasArgonAccess = tierInfo.hasArgonAccess;
         const isPaidProOrUltra = tierInfo.isPaidProOrUltra;
         const groupedMap = new Map();
         for (const m of clientModels) {
@@ -1950,7 +2030,7 @@ export async function probeChannelQuotaSnapshot(channelId) {
             if (isLegacyDeprecatedModel(baseLabel) || isLegacyDeprecatedModel(rawLabel) || isModelEntryRestrictedOrSunset(m)) {
               continue;
             }
-            if (!isPaidProOrUltra && /argon|claude|gpt/i.test(baseLabel)) {
+            if (!hasArgonAccess && /argon/i.test(baseLabel)) {
               continue;
             }
           }
@@ -1977,7 +2057,7 @@ export async function probeChannelQuotaSnapshot(channelId) {
         const quotaGroups = isGcp
           ? []
           : rawGroups
-              .filter((g) => isPaidProOrUltra || !/argon/i.test(g.groupId || g.displayName || ""))
+              .filter((g) => hasArgonAccess || !/argon/i.test(g.groupId || g.displayName || ""))
               .map((g) => ({
                 id: g.groupId || g.displayName || "",
                 displayName: g.displayName || "",
@@ -1993,8 +2073,17 @@ export async function probeChannelQuotaSnapshot(channelId) {
               }))
               .filter((g) => isValidOfficialQuotaGroup(g));
 
-        const liveModels = Array.from(groupedMap.values());
-        if (liveModels.length > 0 && clientModels.length > 0 && (isGcp || isPaidProOrUltra)) {
+        let liveModels = Array.from(groupedMap.values());
+        if (!isGcp && quotaGroups.length > 0 && tierInfo.tierCode !== "Free") {
+          liveModels = buildProModelsFromQuotaGroups(
+            quotaGroups,
+            acc.cachedQuota?.availableModels || [],
+            liveModels,
+            cfg.__meta__?.liveTierModels?.personal || [],
+            hasArgonAccess
+          );
+        }
+        if (liveModels.length > 0 && clientModels.length > 0 && (isGcp || hasArgonAccess)) {
           if (!cfg.__meta__.liveTierModels || typeof cfg.__meta__.liveTierModels !== "object") {
             cfg.__meta__.liveTierModels = {};
           }
@@ -2005,7 +2094,6 @@ export async function probeChannelQuotaSnapshot(channelId) {
           }));
         }
 
-        // 仅当 GCP 通道有模型或个人 Pro 通道拿到了有效的官方双组配额时才直接采信 LS RPC；若 LS 返回了 All Models 兜底数据则继续走下方 Cloud Code API 直连探测
         if ((isGcp && liveModels.length > 0) || (!isGcp && quotaGroups.length > 0 && liveModels.length > 0)) {
           if (!isGcp) {
             acc.tierCode = tierInfo.tierCode;
@@ -2014,6 +2102,7 @@ export async function probeChannelQuotaSnapshot(channelId) {
           acc.cachedQuota = {
             tierCode: tierInfo.tierCode,
             tierName: tierInfo.tierName,
+            hasArgonAccess,
             isPaidProOrUltra,
             isGcpUnlimited: isGcp,
             quotaGroups,
@@ -2084,10 +2173,11 @@ export async function probeChannelQuotaSnapshot(channelId) {
           ""
         ).trim();
       }
+      const pTier = loadResp.data.paidTier || loadResp.data.currentTier || {};
       userTier = String(
         isGcp
           ? (loadResp.data.currentTier?.id || "standard-tier")
-          : (loadResp.data.paidTier?.id || loadResp.data.currentTier?.id || "")
+          : `${pTier.id || ""} ${pTier.name || ""}`
       ).trim();
     }
 
@@ -2164,9 +2254,33 @@ export async function probeAllChannelsQuotaSnapshot() {
   return results;
 }
 
-async function restartLanguageServerAndWait(targetProject = "", targetLocation = "global") {
+async function syncLsOAuthTokenAndProject(ls, tokenObj, targetProject = "", targetLocation = "global") {
+  if (!ls) return;
+  const tok = tokenObj?.token;
+  if (tok && tok.access_token) {
+    await callLsRpc(ls, "SaveOAuthTokenInfo", {
+      tokenInfo: {
+        accessToken: String(tok.access_token || ""),
+        tokenType: String(tok.token_type || "Bearer"),
+        refreshToken: String(tok.refresh_token || ""),
+        expiry: normalizeIsoExpiry(tok.expiry),
+        isGcpTos: Boolean(targetProject),
+        enableBusinessLogin: Boolean(targetProject)
+      }
+    }).catch(() => {});
+  }
+  await callLsRpc(ls, "ValidateProject", {
+    projectId: targetProject || "",
+    location: targetProject ? (targetLocation || "global") : ""
+  }).catch(() => {});
+}
+
+async function restartLanguageServerAndWait(targetProject = "", targetLocation = "global", tokenToSync = null) {
   const oldLogInfo = parseLsLogInfo();
   const activeLs = discoverLanguageServer(false);
+  if (activeLs && tokenToSync) {
+    await syncLsOAuthTokenAndProject(activeLs, tokenToSync, targetProject, targetLocation);
+  }
   const oldPid = oldLogInfo.pid || activeLs?.pid || 0;
   try {
     const stopCmd = oldPid > 0
@@ -2186,13 +2300,15 @@ async function restartLanguageServerAndWait(targetProject = "", targetLocation =
       const nextLs = discoverLanguageServer(true);
       if (nextLs) {
         try {
-          await callLsRpc(nextLs, "GetUserStatus", {});
-          if (targetProject) {
+          if (tokenToSync) {
+            await syncLsOAuthTokenAndProject(nextLs, tokenToSync, targetProject, targetLocation);
+          } else if (targetProject) {
             await callLsRpc(nextLs, "ValidateProject", {
               projectId: targetProject,
               location: targetLocation || "global"
             }).catch(() => {});
           }
+          await callLsRpc(nextLs, "GetUserStatus", {});
           break;
         } catch {}
       }
@@ -2504,7 +2620,60 @@ function resolveBaseModelFamilyFromId(rawModelStr, cfg) {
   return s.replace(/\s*\((Low|Medium|High|Max)\)\s*$/i, "").trim();
 }
 
-function selectBestPersonalChannelForModel(baseFamily, cfg) {
+const WEEK_PENALTY_MS = 7 * 24 * 3600 * 1000;
+
+function extractModelDualQuota(acc, matched, baseFamily) {
+  const now = Date.now();
+  const defaultWeeklyMs = now + WEEK_PENALTY_MS;
+  const groups = acc?.cachedQuota?.quotaGroups || [];
+  const clean = String(baseFamily || matched?.label || matched?.modelId || "").toLowerCase();
+
+  let grp = null;
+  for (const g of groups) {
+    const desc = String(g.description || "").toLowerCase();
+    const gName = String(g.displayName || g.id || "").toLowerCase();
+    if ((clean && desc.includes(clean)) || (clean && gName === clean)) {
+      grp = g;
+      break;
+    }
+  }
+  if (!grp) {
+    if (/argon/i.test(clean)) {
+      grp = groups.find((g) => /argon/i.test(g.id || g.displayName || ""));
+    } else if (/gemini/i.test(clean)) {
+      grp = groups.find((g) => /gemini\s*models/i.test(g.id || g.displayName || ""));
+    } else if (/claude|gpt/i.test(clean)) {
+      grp = groups.find((g) => /claude|gpt/i.test(g.id || g.displayName || ""));
+    }
+  }
+
+  const bks = grp?.buckets || [];
+  const bWk = bks.find((b) => /weekly|7d/i.test(b.window || b.bucketId || ""));
+  const b5h = bks.find((b) => /5h/i.test(b.window || b.bucketId || ""));
+
+  const weeklyPct = Number(
+    matched?.weeklyPct ?? bWk?.remainingPct ?? matched?.remainingPct ?? 100
+  );
+  const weeklyResetStr = matched?.weeklyResetTime || bWk?.resetTime || matched?.resetTime || "";
+  const parsedWkMs = weeklyResetStr ? new Date(weeklyResetStr).getTime() : defaultWeeklyMs;
+  const weeklyResetMs = Number.isFinite(parsedWkMs) && parsedWkMs > 0 ? parsedWkMs : defaultWeeklyMs;
+
+  const fiveHourPct = Number(
+    matched?.fiveHourPct ?? b5h?.remainingPct ?? weeklyPct
+  );
+  const fiveHourResetStr = matched?.fiveHourResetTime || b5h?.resetTime || weeklyResetStr;
+  const parsed5hMs = fiveHourResetStr ? new Date(fiveHourResetStr).getTime() : weeklyResetMs;
+  const fiveHourResetMs = Number.isFinite(parsed5hMs) && parsed5hMs > 0 ? parsed5hMs : weeklyResetMs;
+
+  return {
+    weeklyPct,
+    weeklyResetMs,
+    fiveHourPct,
+    fiveHourResetMs
+  };
+}
+
+export function selectBestPersonalChannelForModel(baseFamily, cfg) {
   const accounts = Object.values(cfg?.accounts || {});
   const activeEmail = (cfg?.__meta__?.activeEmail || "").trim();
   const activeChannelId = activeEmail ? `${activeEmail}#personal` : "";
@@ -2522,25 +2691,41 @@ function selectBestPersonalChannelForModel(baseFamily, cfg) {
       return Array.isArray(m.variantIds) && m.variantIds.some((v) => String(v).toLowerCase() === targetLower);
     });
     if (!matched && targetLower) continue;
-    const pct = Number(matched ? (matched.remainingPct ?? 100) : 100);
-    if (pct <= 0) continue;
-    const resetMs = matched?.resetTime ? new Date(matched.resetTime).getTime() : Number.MAX_SAFE_INTEGER;
+    const dual = extractModelDualQuota(acc, matched, baseFamily);
+    if (dual.weeklyPct <= 0 || dual.fiveHourPct <= 0) continue;
+
+    const weeklyLow = dual.weeklyPct < thresholdPct;
+    const effectiveWeeklyResetMs = dual.weeklyResetMs + (weeklyLow ? WEEK_PENALTY_MS : 0);
+    const fiveHourAboveThreshold = dual.fiveHourPct > thresholdPct;
+
     candidates.push({
       acc,
       matched,
-      pct,
-      aboveThreshold: pct > thresholdPct,
-      resetMs: Number.isFinite(resetMs) && resetMs > 0 ? resetMs : Number.MAX_SAFE_INTEGER,
+      weeklyPct: dual.weeklyPct,
+      fiveHourPct: dual.fiveHourPct,
+      fiveHourAboveThreshold,
+      effectiveWeeklyResetMs,
+      fiveHourResetMs: dual.fiveHourResetMs,
       isCurrent: acc.id === activeChannelId
     });
   }
 
   if (candidates.length === 0) return null;
   candidates.sort((a, b) => {
-    if (a.aboveThreshold !== b.aboveThreshold) return a.aboveThreshold ? -1 : 1;
-    if (Math.abs(a.resetMs - b.resetMs) > 120000) return a.resetMs - b.resetMs;
+    // 1. 5小时限额门控：优先选 5小时限额 > 5% 的通道；达到 5小时限额 (<=5%) 时顺位切换，重置后自动切回
+    if (a.fiveHourAboveThreshold !== b.fiveHourAboveThreshold) {
+      return a.fiveHourAboveThreshold ? -1 : 1;
+    }
+    // 2. 第一层排序：按周重置时间升序（若周限额 < 5%，重置时间 +7天 进入队尾）
+    if (Math.abs(a.effectiveWeeklyResetMs - b.effectiveWeeklyResetMs) > 120000) {
+      return a.effectiveWeeklyResetMs - b.effectiveWeeklyResetMs;
+    }
+    // 3. 第二层排序：周重置时间相近时，按 5小时重置时间升序
+    if (Math.abs(a.fiveHourResetMs - b.fiveHourResetMs) > 60000) {
+      return a.fiveHourResetMs - b.fiveHourResetMs;
+    }
     if (a.isCurrent !== b.isCurrent) return a.isCurrent ? -1 : 1;
-    return b.pct - a.pct;
+    return b.weeklyPct - a.weeklyPct;
   });
   return candidates[0].acc;
 }
@@ -2884,7 +3069,18 @@ export function ensureCloudCodeProxyServer() {
   return globalThis.__agyCloudCodeProxyServer || null;
 }
 
-ensureCloudCodeProxyServer();
+function tryLaunchCloudCodeProxyOnStartup() {
+  // 仅当当前进程作为正式 Sidecar Web Server 启动时才自动监听本地反向代理端口，防止一次性 CLI 探测脚本因绑定监听句柄而挂起
+  const isSidecarDaemon =
+    Boolean(process.env.ANTIGRAVITY_SIDECAR_WEB_PORT) ||
+    Boolean(process.env.PORT) ||
+    process.argv.some((a) => /main\.mjs$/i.test(String(a)));
+  if (isSidecarDaemon) {
+    ensureCloudCodeProxyServer();
+  }
+}
+
+tryLaunchCloudCodeProxyOnStartup();
 
 export async function routeChannelEphemeral(accountId) {
   const cfg = readRelayConfig();
@@ -2941,7 +3137,26 @@ export async function switchActiveGoogleAccount(accountId) {
     throw new Error(`未找到账号 ${target.email} 的凭据快照`);
   }
 
+  // 切换通道前强制刷新或校验 OAuth AccessToken 与 RFC3339 标准 ISO Expiry（防止非 RFC3339 时间格式导致 Go time.Time 解析失败报错 You are not logged into Antigravity）
+  if (baseToken.token?.refresh_token) {
+    try {
+      const refreshed = await refreshOAuthAccessToken(baseToken.token.refresh_token);
+      if (refreshed && refreshed.access_token) {
+        const newExpiry = new Date(Date.now() + (refreshed.expires_in || 3599) * 1000).toISOString();
+        baseToken.token.access_token = refreshed.access_token;
+        baseToken.token.expiry = newExpiry;
+        for (const item of Object.values(cfg.accounts || {})) {
+          if (item.email === target.email && item.storedToken?.token) {
+            item.storedToken.token.access_token = refreshed.access_token;
+            item.storedToken.token.expiry = newExpiry;
+          }
+        }
+      }
+    } catch {}
+  }
+
   const tokenToWrite = buildCleanChannelToken(baseToken, targetProject, targetLocation);
+  target.storedToken = tokenToWrite;
   writeWinCredToken(tokenToWrite);
 
   cfg.__meta__.activeChannelId = target.id;
@@ -2951,9 +3166,9 @@ export async function switchActiveGoogleAccount(accountId) {
   writeRelayConfig(cfg);
 
   // 点击独立通道池「启用」按钮（无论跨账号还是同账号 Pro <-> GCP）：
-  // 先离线剥离最近会话 .db 中的跨通道不兼容思维签名（不向旧 LS 发 LoadTrajectory），然后重启 language_server.exe 触发主界面重载
+  // 先离线剥离最近会话 .db 中的跨通道不兼容思维签名，再通过 SaveOAuthTokenInfo 同步 LS 状态并重启 language_server.exe 触发主界面重载
   await scrubRecentConversationsSignatures(null).catch(() => {});
-  await restartLanguageServerAndWait(targetProject, targetLocation);
+  await restartLanguageServerAndWait(targetProject, targetLocation, tokenToWrite);
 
   return {
     switchedTo: target.email,
