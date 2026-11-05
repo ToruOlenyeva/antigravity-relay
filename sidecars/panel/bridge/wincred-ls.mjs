@@ -36,10 +36,7 @@ export const DEFAULT_AGY_OAUTH_CLIENTS = [
   }
 ];
 
-export function getOAuthClientForChannel(channelType = "personal") {
-  if (channelType === "gcp" && DEFAULT_AGY_OAUTH_CLIENTS[1]) {
-    return DEFAULT_AGY_OAUTH_CLIENTS[1];
-  }
+export function getOAuthClientForChannel() {
   return DEFAULT_AGY_OAUTH_CLIENTS[0];
 }
 

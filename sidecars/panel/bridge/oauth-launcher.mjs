@@ -590,6 +590,7 @@ export async function launchIsolatedAntigravityInstance(accountId) {
   isoMeta.lastAppliedGcpProject = targetProject;
   isoMeta.seededLaunchAt = launchedAt;
   isoMeta.switchedAt = launchedAt;
+  isoMeta.switchedViaPanel = true;
   writeRelayConfig(cfg);
 
   const instanceLsLogPath = path.join(instanceLogsDir, "language_server.log");
@@ -673,7 +674,7 @@ export async function launchIsolatedAntigravityInstance(accountId) {
               const buf = Buffer.alloc(len);
               fs.readSync(fd, buf, 0, len, prevLsLogSize);
               const tailText = buf.toString("utf8");
-              if (/Auth succeeded|Starting language server process with pid/i.test(tailText) && elapsed >= 3200) {
+              if (/Auth succeeded|Starting language server process with pid/i.test(tailText) && elapsed >= 600) {
                 authReady = true;
               }
             } finally {
@@ -682,7 +683,7 @@ export async function launchIsolatedAntigravityInstance(accountId) {
           }
         }
       } catch {}
-      if (authReady || elapsed >= 9000) {
+      if (authReady || elapsed >= 5000) {
         clearInterval(pollTimer);
         restoreOriginalCred();
       }

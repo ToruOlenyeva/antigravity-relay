@@ -683,12 +683,6 @@ async function handleDiscoverGcpProjects(targetEmail = "") {
         addGcpDraft.projectId = "";
       }
       renderAddGcpDrawer();
-      if (data.reason === "scope_insufficient" || data.reason === "api_disabled") {
-        showToast(t.toastGcpScopeRestricted || t.toastGcpNoneFound);
-        startIsolatedBrowserLogin({ channelType: "gcp", loginHint: email });
-      } else {
-        showToast(t.toastGcpNoneFound);
-      }
     }
   } catch (e) {}
 }
@@ -851,6 +845,27 @@ async function handleManualScrubSignatures() {
 async function switchGoogleAccount(accountId, scrubSignatures = false) {
   try {
     selectedQuotaChannelId = "";
+    const targetAcc = (state.accounts || []).find((a) => a.id === accountId);
+    if (targetAcc) {
+      const isGcp = targetAcc.channelType === "gcp" || Boolean(targetAcc.gcpProjectId);
+      state.activeAccount = {
+        ...(state.activeAccount || {}),
+        channelId: targetAcc.id,
+        email: targetAcc.email,
+        gcpProjectId: isGcp ? (targetAcc.gcpProjectId || "") : "",
+        gcpBillingMode: isGcp ? (targetAcc.gcpBillingMode || "agent_platform") : "",
+        gcpLocation: isGcp ? (targetAcc.gcpLocation || "global") : "",
+        tierCode: targetAcc.tierCode || (isGcp ? "GCP" : "Pro"),
+        tierName: targetAcc.tierName || (isGcp ? "Agent Platform" : "Google AI Pro")
+      };
+      if (Array.isArray(targetAcc.cachedQuota?.availableModels) && targetAcc.cachedQuota.availableModels.length > 0) {
+        state.availableModels = targetAcc.cachedQuota.availableModels;
+      }
+      if (Array.isArray(targetAcc.cachedQuota?.quotaGroups)) {
+        state.quotaGroups = targetAcc.cachedQuota.quotaGroups;
+      }
+      renderAll();
+    }
     showToast(I18N[currentLang].toastAccountSwitching);
     const res = await fetch("/api/switch-account", {
       method: "POST",
@@ -871,8 +886,8 @@ async function switchGoogleAccount(accountId, scrubSignatures = false) {
       renderAll();
     }
     showToast(I18N[currentLang].toastRefreshed);
-    setTimeout(() => loadSystemStatus(true, true), 1000);
-    setTimeout(() => loadSystemStatus(false, true), 2600);
+    setTimeout(() => loadSystemStatus(true, true), 900);
+    setTimeout(() => loadSystemStatus(false, true), 2400);
   } catch (e) {}
 }
 
@@ -962,8 +977,7 @@ function connectSse() {
               addGcpDraft.channelType = "gcp";
               addGcpDraft.scannedProjects = [];
               renderAll();
-              showToast(`${I18N[currentLang].toastOAuthGcpScanReady || I18N[currentLang].toastOAuthSuccess}${prevOAuthEvent.email}`);
-              handleDiscoverGcpProjects(prevOAuthEvent.email);
+              showToast(`${I18N[currentLang].toastOAuthSuccess}${prevOAuthEvent.email}`);
               return;
             }
             renderAll();

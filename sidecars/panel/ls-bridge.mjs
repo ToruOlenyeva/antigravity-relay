@@ -286,25 +286,18 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
         : "";
     }
   } else {
-    // 主窗口：若刚刚在插件面板内执行了切换或已固定 instPinnedAcc，优先遵循当前实例状态；当用户在官方设置页切换账号时同步跟随 lsEmail
+    // 主窗口：只要用户在插件面板内明确启用固定了通道（instPinnedAcc + switchedViaPanel），严格以面板所选通道为唯一权威事实源，彻底杜绝多开实例或滞后 lsEmail 反向篡改主窗口通道
     const lsActuallyGcp = Boolean(logPid || tierIndicatesGcp);
-    if (instPinnedAcc && (recentlySwitched || !lsEmail || (lsEmail === instPinnedAcc.email && lsActuallyGcp === Boolean(instPinnedAcc.gcpProjectId)))) {
+    if (instPinnedAcc && (instMeta.switchedViaPanel || recentlySwitched || !lsEmail || (lsEmail === instPinnedAcc.email && lsActuallyGcp === Boolean(instPinnedAcc.gcpProjectId)))) {
       activeEmail = instPinnedAcc.email;
       isLiveGcp = instPinnedAcc.channelType === "gcp" || Boolean(instPinnedAcc.gcpProjectId);
       activeGcpProject = isLiveGcp ? (instPinnedAcc.gcpProjectId || logPid || credPid) : "";
     } else if (lsEmail) {
-      // 若主窗口处于个人通道且用户通过面板启用了另一个个人号（代理接管或双开并存），保持面板选中的个人号
-      if (!lsActuallyGcp && instPinnedAcc && !instPinnedAcc.gcpProjectId && instMeta.switchedViaPanel) {
-        activeEmail = instPinnedAcc.email;
-        isLiveGcp = false;
-        activeGcpProject = "";
-      } else {
-        activeEmail = lsEmail;
-        isLiveGcp = lsActuallyGcp;
-        activeGcpProject = isLiveGcp
-          ? (logPid || instMeta.lastAppliedGcpProject || credPid || findFirstGcpProjectForEmail(cfg, activeEmail))
-          : "";
-      }
+      activeEmail = lsEmail;
+      isLiveGcp = lsActuallyGcp;
+      activeGcpProject = isLiveGcp
+        ? (logPid || instMeta.lastAppliedGcpProject || credPid || findFirstGcpProjectForEmail(cfg, activeEmail))
+        : "";
     } else {
       activeEmail = credEmail || instMeta.activeEmail || cfg.__meta__?.activeEmail || "";
       if (cred) {
@@ -321,6 +314,12 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
   // 若当前窗口属于个人通道但底层 LS 曾误读全局 WinCred 的 GCP ProjectID，主动清空其 ProjectID 退出 Vertex 模式
   if (!isLiveGcp && ls && (logPid || tierIndicatesGcp)) {
     callLsRpc(ls, "ValidateProject", { projectId: "", location: "" }).catch(() => {});
+  } else if (isLiveGcp && activeGcpProject && ls && logPid !== activeGcpProject) {
+    // 若当前窗口固定为 GCP 通道但底层 LS 的 ProjectID 曾被外部冲掉，自动调用 ValidateProject 自愈恢复
+    const healLoc = (instPinnedAcc?.gcpBillingMode || "agent_platform") === "agent_platform"
+      ? (instPinnedAcc?.gcpLocation || "global")
+      : "";
+    callLsRpc(ls, "ValidateProject", { projectId: activeGcpProject, location: healLoc }).catch(() => {});
   }
 
   const activeGcpBillingMode = isLiveGcp
@@ -844,14 +843,15 @@ export async function switchActiveGoogleAccount(accountId, opts = {}) {
     } catch {}
   }
 
-  const runningLsProcs = listRunningLanguageServerProcesses();
-  const hasMultipleLsInstances = runningLsProcs.length > 1;
-  const otherInstanceHasGcp = hasMultipleLsInstances && Object.entries(cfg.__meta__?.instances || {}).some(
-    ([instKey, m]) => instKey !== ctx.instanceId && Boolean(m?.lastAppliedGcpProject)
+  const anyOtherInstanceHasGcp = Boolean(
+    fieldStatus.otherGcpInstance ||
+    Object.entries(cfg.__meta__?.instances || {}).some(
+      ([instKey, m]) => instKey !== ctx.instanceId && Boolean(m?.lastAppliedGcpProject)
+    )
   );
 
-  // 当多实例并存且另一窗口正在运行 GCP 通道时，个人窗口切换个人号保持原 WinCred 的 writer_id 不去踢掉 GCP 窗口的 LS，而是由当前窗口专属 CloudCode 代理全权热切换；单实例或跨通道时写入新 writer_id 驱动 LS 重载凭据
-  const shouldKeepWinCredForOtherInstance = Boolean(!isCrossChannel && !nextIsGcp && (ctx.isIsolatedInstance || otherInstanceHasGcp) && hasMultipleLsInstances);
+  // 当处于多开独立窗口或另一窗口正在运行 GCP 通道时，切换到个人通道绝不修改全局 WinCred（避免踢掉 GCP 主窗口的 LS），全权由本窗口专属 CloudCode 代理热切换
+  const shouldKeepWinCredForOtherInstance = Boolean(!nextIsGcp && (ctx.isIsolatedInstance || anyOtherInstanceHasGcp));
   const tokenToWrite = buildCleanChannelToken(baseToken, targetProject, targetLocation, !shouldKeepWinCredForOtherInstance);
   target.storedToken = tokenToWrite;
   if (!shouldKeepWinCredForOtherInstance) {

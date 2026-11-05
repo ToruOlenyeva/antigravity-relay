@@ -330,7 +330,12 @@ function renderAddGcpDrawer() {
   titleSpan.textContent = t.gcpDrawerTitle;
   const headerBtns = document.createElement("div");
   headerBtns.className = "btn-group";
-  if (!isNewOAuthMode && addGcpDraft.channelType !== "personal" && addGcpDraft.email) {
+  const hasExistingGcpForDraft = !isNewOAuthMode && addGcpDraft.email
+    ? (state.accounts || []).some(
+        (a) => a.email === addGcpDraft.email && (a.channelType === "gcp" || Boolean(a.gcpProjectId))
+      )
+    : false;
+  if (!isNewOAuthMode && addGcpDraft.channelType !== "personal" && addGcpDraft.email && hasExistingGcpForDraft) {
     const scanBtn = document.createElement("button");
     scanBtn.className = "secondary small";
     scanBtn.textContent = t.btnDiscoverGcp;
@@ -439,13 +444,6 @@ function renderAddGcpDrawer() {
     }
     drawer.appendChild(modeLocRow);
 
-    const hintEl = document.createElement("div");
-    hintEl.className = "section-hint";
-    hintEl.style.padding = "2px 2px";
-    hintEl.style.lineHeight = "1.4";
-    hintEl.textContent = t.newOAuthGcpHint;
-    drawer.appendChild(hintEl);
-
     const pidRow = document.createElement("div");
     pidRow.className = "gcp-config-row";
     const pidInput = document.createElement("input");
@@ -455,14 +453,9 @@ function renderAddGcpDrawer() {
     pidInput.value = addGcpDraft.projectId || "";
     const loginGcpBtn = document.createElement("button");
     loginGcpBtn.className = "small";
-    const updateLoginBtnLabel = () => {
-      const hasPid = Boolean((pidInput.value || "").trim());
-      loginGcpBtn.textContent = hasPid ? t.btnStartNewOAuthGcpDirect : t.btnStartNewOAuthGcpScan;
-    };
-    updateLoginBtnLabel();
+    loginGcpBtn.textContent = t.btnStartNewOAuthGcpDirect;
     pidInput.oninput = () => {
       addGcpDraft.projectId = pidInput.value;
-      updateLoginBtnLabel();
     };
     loginGcpBtn.onclick = () => {
       const cleanPid = (pidInput.value || "").trim();
@@ -596,10 +589,13 @@ function buildAccountCardElement(acc, activeEmail, activeGcp) {
   const t = I18N[currentLang];
   const isGcpChannel = acc.channelType === "gcp" || Boolean(acc.gcpProjectId);
   const accPid = (acc.gcpProjectId || "").trim();
-  const isCurrent = Boolean(
-    acc.email === activeEmail &&
-    ((isGcpChannel && accPid === activeGcp && activeGcp !== "") || (!isGcpChannel && activeGcp === ""))
-  );
+  const activeChannelId = String(state.activeAccount?.channelId || "").trim();
+  const isCurrent = activeChannelId
+    ? acc.id === activeChannelId
+    : Boolean(
+        acc.email === activeEmail &&
+        ((isGcpChannel && accPid === activeGcp && activeGcp !== "") || (!isGcpChannel && activeGcp === ""))
+      );
   const currentIsGcp = Boolean(activeGcp);
   const isCrossChannelSwitch = currentIsGcp !== isGcpChannel;
   const inst = state.instance || {};

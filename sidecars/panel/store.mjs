@@ -79,6 +79,9 @@ export function writeInstanceDescriptor(userDataDir, data) {
 
 export function resolveCurrentInstanceContext(force = false) {
   if (cachedInstanceCtx && cachedInstanceCtxConfirmed) {
+    if (cachedInstanceCtx.isIsolatedInstance && cachedInstanceCtx.userDataDir) {
+      cachedInstanceCtx.descriptor = readInstanceDescriptor(cachedInstanceCtx.userDataDir);
+    }
     return cachedInstanceCtx;
   }
   if (!force && cachedInstanceCtx && Date.now() - cachedInstanceCtxAt < 1500) {
@@ -91,7 +94,7 @@ export function resolveCurrentInstanceContext(force = false) {
 
   const envInstanceDir = String(process.env.AGY_RELAY_INSTANCE_USER_DATA_DIR || "").trim();
   const envInstanceId = String(process.env.AGY_RELAY_INSTANCE_ID || "").trim();
-  if (envInstanceDir && fs.existsSync(envInstanceDir) && sidecarPort <= 0) {
+  if (envInstanceDir && fs.existsSync(envInstanceDir)) {
     const id = envInstanceId || path.basename(envInstanceDir);
     cachedInstanceCtx = {
       instanceId: id,
