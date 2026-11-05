@@ -444,10 +444,12 @@ export function sanitizeCachedQuotaModels(cachedQuota, isGcp, _liveTierTemplate 
 export function normalizeAccountChannels(cfg) {
   if (!cfg.accounts || typeof cfg.accounts !== "object") cfg.accounts = {};
   if (!Array.isArray(cfg.gcpProjects)) cfg.gcpProjects = [];
+  const deletedSet = new Set(Array.isArray(cfg.__meta__?.deletedChannelIds) ? cfg.__meta__.deletedChannelIds : []);
   const nextAccounts = {};
 
   for (const [key, item] of Object.entries(cfg.accounts)) {
     if (!item || typeof item !== "object") continue;
+    if (deletedSet.has(key)) continue;
     const email = (item.email || item.storedToken?.id_token_email || key.split("#")[0] || "").trim();
     if (!email) continue;
 
@@ -585,6 +587,9 @@ export function normalizeAccountChannels(cfg) {
 
 export function findStoredTokenForEmail(cfg, email, preferGcp = null) {
   if (!email) return null;
+  if (preferGcp === true && cfg?.__meta__?.gcpOAuthTokensByEmail?.[email]?.token) {
+    return cfg.__meta__.gcpOAuthTokensByEmail[email];
+  }
   if (preferGcp !== null) {
     for (const acc of Object.values(cfg.accounts || {})) {
       const accIsGcp = Boolean(acc.gcpProjectId || acc.channelType === "gcp");
@@ -592,6 +597,9 @@ export function findStoredTokenForEmail(cfg, email, preferGcp = null) {
         return acc.storedToken;
       }
     }
+  }
+  if (cfg?.__meta__?.gcpOAuthTokensByEmail?.[email]?.token) {
+    return cfg.__meta__.gcpOAuthTokensByEmail[email];
   }
   for (const acc of Object.values(cfg.accounts || {})) {
     if (acc.email === email && acc.storedToken?.token) {

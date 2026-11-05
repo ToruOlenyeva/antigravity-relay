@@ -24,17 +24,24 @@ export const DEFAULT_AGY_OAUTH_CLIENTS = [
   },
   {
     clientId: `${["884354919052", "36trc1jjb3tguiac32ov6cod268c5blh"].join("-")}.${_G_HOST}`,
-    clientSecret: `${_G_PREF}-${["v56p0e33N4837H6O", "-p6sF5xV212D"].join("")}`
+    clientSecret: `${_G_PREF}-${["9YQWpF7RWDC0QTdj", "-YxKMwR0ZtsX"].join("")}`
   },
   {
     clientId: `${["1098991175725", "mdu1oe5cbbe1ckggsebobh94toiap657"].join("-")}.${_G_HOST}`,
-    clientSecret: `${_G_PREF}-${["b56p0e33N4837H6O", "-p6sF5xV212D"].join("")}`
+    clientSecret: `${_G_PREF}-${["j7Rn4pvpwI9-bk-J", "0bgEy70PW4-5"].join("")}`
   },
   {
     clientId: `${["71006060591", "tmhssin2h21lcre235vtolojh4g403ep"].join("-")}.${_G_HOST}`,
     clientSecret: `${_G_PREF}-${["K58FWR486LdLJ1m", "LB8sXC4z6qDAf"].join("")}`
   }
 ];
+
+export function getOAuthClientForChannel(channelType = "personal") {
+  if (channelType === "gcp" && DEFAULT_AGY_OAUTH_CLIENTS[1]) {
+    return DEFAULT_AGY_OAUTH_CLIENTS[1];
+  }
+  return DEFAULT_AGY_OAUTH_CLIENTS[0];
+}
 
 export function loadOAuthClients() {
   const merged = [];

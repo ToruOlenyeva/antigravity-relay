@@ -685,6 +685,7 @@ async function handleDiscoverGcpProjects(targetEmail = "") {
       renderAddGcpDrawer();
       if (data.reason === "scope_insufficient" || data.reason === "api_disabled") {
         showToast(t.toastGcpScopeRestricted || t.toastGcpNoneFound);
+        startIsolatedBrowserLogin({ channelType: "gcp", loginHint: email });
       } else {
         showToast(t.toastGcpNoneFound);
       }

@@ -96,6 +96,9 @@ export function addOrUpdatePersonalChannelCard(email) {
   normalizeAccountChannels(cfg);
   const baseToken = findStoredTokenForEmail(cfg, cleanEmail, false) || readWinCredToken(false);
   const personalKey = `${cleanEmail}#personal`;
+  if (Array.isArray(cfg.__meta__?.deletedChannelIds)) {
+    cfg.__meta__.deletedChannelIds = cfg.__meta__.deletedChannelIds.filter((id) => id !== personalKey);
+  }
   const existing = cfg.accounts[personalKey];
   cfg.accounts[personalKey] = {
     ...existing,
@@ -146,6 +149,9 @@ export function addOrUpdateGcpChannelCard(email, projectId, opts = {}) {
     cfg.gcpProjects.push(cleanPid);
   }
   const gcpKey = `${cleanEmail}#gcp:${cleanPid}`;
+  if (Array.isArray(cfg.__meta__?.deletedChannelIds)) {
+    cfg.__meta__.deletedChannelIds = cfg.__meta__.deletedChannelIds.filter((id) => id !== gcpKey);
+  }
   const oldKey = oldPidFromStr && oldPidFromStr !== cleanPid ? `${cleanEmail}#gcp:${oldPidFromStr}` : "";
   const existing = cfg.accounts[gcpKey] || (oldKey ? cfg.accounts[oldKey] : null);
   const gcpBillingMode = options.gcpBillingMode || modeFromStr || existing?.gcpBillingMode || "agent_platform";
@@ -348,22 +354,32 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
     }
   }
 
+  const deletedSet = new Set(Array.isArray(cfg.__meta__?.deletedChannelIds) ? cfg.__meta__.deletedChannelIds : []);
+
   if (cred && credEmail && !isLiveGcp && cred.auth_method !== "gcp" && !credPid) {
+    if (!cfg.__meta__.oauthTokensByEmail || typeof cfg.__meta__.oauthTokensByEmail !== "object") {
+      cfg.__meta__.oauthTokensByEmail = {};
+    }
+    if (!cfg.__meta__.oauthTokensByEmail[credEmail]) {
+      cfg.__meta__.oauthTokensByEmail[credEmail] = buildCleanChannelToken(cred, "", "");
+    }
     const credPersonalKey = `${credEmail}#personal`;
     const existingCredPersonal = cfg.accounts[credPersonalKey];
-    cfg.accounts[credPersonalKey] = {
-      ...existingCredPersonal,
-      id: credPersonalKey,
-      alias: existingCredPersonal?.alias || credEmail,
-      email: credEmail,
-      channelType: "personal",
-      tierName: "Google AI Pro",
-      gcpProjectId: "",
-      gcpBillingMode: "",
-      gcpLocation: "",
-      savedAt: existingCredPersonal?.savedAt || new Date().toISOString(),
-      storedToken: buildCleanChannelToken(cred, "", "")
-    };
+    if (!deletedSet.has(credPersonalKey) && (existingCredPersonal || credEmail === activeEmail)) {
+      cfg.accounts[credPersonalKey] = {
+        ...existingCredPersonal,
+        id: credPersonalKey,
+        alias: existingCredPersonal?.alias || credEmail,
+        email: credEmail,
+        channelType: "personal",
+        tierName: existingCredPersonal?.tierName || "Google AI Pro",
+        gcpProjectId: "",
+        gcpBillingMode: "",
+        gcpLocation: "",
+        savedAt: existingCredPersonal?.savedAt || new Date().toISOString(),
+        storedToken: buildCleanChannelToken(cred, "", "")
+      };
+    }
   }
 
   if (activeEmail) {
@@ -374,50 +390,54 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
 
     if (!isLiveGcp) {
       const personalKey = `${activeEmail}#personal`;
-      const existingPersonal = cfg.accounts[personalKey];
-      cfg.accounts[personalKey] = {
-        ...existingPersonal,
-        id: personalKey,
-        alias: existingPersonal?.alias || activeEmail,
-        email: activeEmail,
-        channelType: "personal",
-        tierName: existingPersonal?.tierName || "Google AI Pro",
-        gcpProjectId: "",
-        gcpBillingMode: "",
-        gcpLocation: "",
-        savedAt: existingPersonal?.savedAt || new Date().toISOString(),
-        storedToken: existingPersonal?.storedToken?.token?.refresh_token
-          ? existingPersonal.storedToken
-          : (matchingCred ? buildCleanChannelToken(matchingCred, "", "") : null)
-      };
+      if (!deletedSet.has(personalKey)) {
+        const existingPersonal = cfg.accounts[personalKey];
+        cfg.accounts[personalKey] = {
+          ...existingPersonal,
+          id: personalKey,
+          alias: existingPersonal?.alias || activeEmail,
+          email: activeEmail,
+          channelType: "personal",
+          tierName: existingPersonal?.tierName || "Google AI Pro",
+          gcpProjectId: "",
+          gcpBillingMode: "",
+          gcpLocation: "",
+          savedAt: existingPersonal?.savedAt || new Date().toISOString(),
+          storedToken: existingPersonal?.storedToken?.token?.refresh_token
+            ? existingPersonal.storedToken
+            : (matchingCred ? buildCleanChannelToken(matchingCred, "", "") : null)
+        };
+      }
     } else if (activeGcpProject) {
       const gcpKey = `${activeEmail}#gcp:${activeGcpProject}`;
-      const existingGcp = cfg.accounts[gcpKey];
-      const resolvedMode = activeGcpBillingMode || existingGcp?.gcpBillingMode || "agent_platform";
-      const resolvedLoc = activeGcpLocation || existingGcp?.gcpLocation || "global";
-      cfg.accounts[gcpKey] = {
-        ...existingGcp,
-        id: gcpKey,
-        alias: existingGcp?.alias || `${activeEmail} (${activeGcpProject})`,
-        email: activeEmail,
-        channelType: "gcp",
-        tierName: resolvedMode === "gemini_enterprise" ? "Gemini Enterprise" : "Agent Platform",
-        gcpProjectId: activeGcpProject,
-        gcpBillingMode: resolvedMode,
-        gcpLocation: resolvedLoc,
-        projectName: existingGcp?.projectName || activeGcpProject,
-        savedAt: existingGcp?.savedAt || new Date().toISOString(),
-        storedToken: existingGcp?.storedToken?.token?.refresh_token
-          ? existingGcp.storedToken
-          : (matchingCred
-              ? {
-                  ...matchingCred,
-                  auth_method: "gcp",
-                  project_id: activeGcpProject,
-                  region: resolvedMode === "agent_platform" ? resolvedLoc : ""
-                }
-              : null)
-      };
+      if (!deletedSet.has(gcpKey)) {
+        const existingGcp = cfg.accounts[gcpKey];
+        const resolvedMode = activeGcpBillingMode || existingGcp?.gcpBillingMode || "agent_platform";
+        const resolvedLoc = activeGcpLocation || existingGcp?.gcpLocation || "global";
+        cfg.accounts[gcpKey] = {
+          ...existingGcp,
+          id: gcpKey,
+          alias: existingGcp?.alias || `${activeEmail} (${activeGcpProject})`,
+          email: activeEmail,
+          channelType: "gcp",
+          tierName: resolvedMode === "gemini_enterprise" ? "Gemini Enterprise" : "Agent Platform",
+          gcpProjectId: activeGcpProject,
+          gcpBillingMode: resolvedMode,
+          gcpLocation: resolvedLoc,
+          projectName: existingGcp?.projectName || activeGcpProject,
+          savedAt: existingGcp?.savedAt || new Date().toISOString(),
+          storedToken: existingGcp?.storedToken?.token?.refresh_token
+            ? existingGcp.storedToken
+            : (matchingCred
+                ? {
+                    ...matchingCred,
+                    auth_method: "gcp",
+                    project_id: activeGcpProject,
+                    region: resolvedMode === "agent_platform" ? resolvedLoc : ""
+                  }
+                : null)
+        };
+      }
       if (!cfg.gcpProjects.includes(activeGcpProject)) {
         cfg.gcpProjects.push(activeGcpProject);
       }

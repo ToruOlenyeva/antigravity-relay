@@ -249,7 +249,7 @@ async function requestHandler(req, res) {
     try {
       let snap = await lsBridge.fetchLiveSystemSnapshot(true);
       const email = snap.activeAccount?.email || "";
-      if (email && snap.activeAccount?.gcpProjectId) {
+      if (email) {
         const hasPersonal = (snap.accounts || []).some((a) => a.id === `${email}#personal`);
         if (!hasPersonal) {
           lsBridge.addOrUpdatePersonalChannelCard(email);
@@ -496,10 +496,25 @@ async function requestHandler(req, res) {
     try {
       const { accountId } = await readJsonBody(req);
       const cfg = readRelayConfig();
-      if (cfg.accounts?.[accountId]) {
+      const targetAcc = cfg.accounts?.[accountId];
+      if (targetAcc) {
+        if (targetAcc.email && targetAcc.storedToken?.token) {
+          if (!cfg.__meta__.oauthTokensByEmail || typeof cfg.__meta__.oauthTokensByEmail !== "object") {
+            cfg.__meta__.oauthTokensByEmail = {};
+          }
+          if (!cfg.__meta__.oauthTokensByEmail[targetAcc.email]) {
+            cfg.__meta__.oauthTokensByEmail[targetAcc.email] = targetAcc.storedToken;
+          }
+        }
         delete cfg.accounts[accountId];
-        writeRelayConfig(cfg);
       }
+      if (!Array.isArray(cfg.__meta__.deletedChannelIds)) {
+        cfg.__meta__.deletedChannelIds = [];
+      }
+      if (accountId && !cfg.__meta__.deletedChannelIds.includes(accountId)) {
+        cfg.__meta__.deletedChannelIds.push(accountId);
+      }
+      writeRelayConfig(cfg);
       const snap = await lsBridge.fetchLiveSystemSnapshot(false);
       broadcastSnapshot(snap);
       return sendJson(res, 200, { success: true, snapshot: snap });

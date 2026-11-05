@@ -401,19 +401,23 @@ function ensureConfigDefaults(cfg) {
   if (!cfg.__meta__ || typeof cfg.__meta__ !== "object") cfg.__meta__ = {};
   if (!cfg.__meta__.instances || typeof cfg.__meta__.instances !== "object") cfg.__meta__.instances = {};
   if (!Array.isArray(cfg.__meta__.recentSidecarPorts)) cfg.__meta__.recentSidecarPorts = [];
-  migrateLegacyProfilesIfNeeded(cfg);
+  if (!Array.isArray(cfg.__meta__.deletedChannelIds)) cfg.__meta__.deletedChannelIds = [];
+  if (!cfg.__meta__.legacyProfilesMigrated) {
+    migrateLegacyProfilesIfNeeded(cfg);
+  }
   return cfg;
 }
 
 function migrateLegacyProfilesIfNeeded(cfg) {
   try {
     let changed = false;
+    const deletedSet = new Set(Array.isArray(cfg.__meta__?.deletedChannelIds) ? cfg.__meta__.deletedChannelIds : []);
     if (fs.existsSync(OLD_RELAY_CONFIG_FILE)) {
       try {
         const oldCfg = JSON.parse(fs.readFileSync(OLD_RELAY_CONFIG_FILE, "utf-8"));
         if (oldCfg?.accounts && typeof oldCfg.accounts === "object") {
           for (const [k, v] of Object.entries(oldCfg.accounts)) {
-            if (!cfg.accounts[k]) {
+            if (!cfg.accounts[k] && !deletedSet.has(k)) {
               cfg.accounts[k] = v;
               changed = true;
             }
@@ -431,7 +435,7 @@ function migrateLegacyProfilesIfNeeded(cfg) {
           const email = (item?.email || tok?.id_token_email || "").trim();
           if (email && tok) {
             const key = `${email}#personal`;
-            if (!cfg.accounts[key]) {
+            if (!cfg.accounts[key] && !deletedSet.has(key)) {
               cfg.accounts[key] = {
                 id: key,
                 alias: item.alias || item.name || email,
@@ -450,6 +454,8 @@ function migrateLegacyProfilesIfNeeded(cfg) {
         }
       } catch (e) {}
     }
+    if (!cfg.__meta__ || typeof cfg.__meta__ !== "object") cfg.__meta__ = {};
+    cfg.__meta__.legacyProfilesMigrated = true;
     if (changed) {
       writeRelayConfig(cfg);
     }

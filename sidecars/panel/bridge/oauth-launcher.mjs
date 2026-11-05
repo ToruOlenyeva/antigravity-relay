@@ -18,6 +18,7 @@ import {
   AGY_OAUTH_CLIENT_SECRET,
   AGY_OAUTH_SCOPES,
   AGY_AUTH_SUCCESS_URL,
+  getOAuthClientForChannel,
   readWinCredToken,
   writeWinCredToken,
   buildCleanChannelToken,
@@ -705,11 +706,11 @@ export function hasActiveOAuthSession() {
   return Boolean(activeOAuthSession);
 }
 
-function exchangeOAuthCodeForTokens({ code, redirectUri, codeVerifier }) {
+function exchangeOAuthCodeForTokens({ code, redirectUri, codeVerifier, clientId, clientSecret }) {
   return new Promise((resolve, reject) => {
     const params = new URLSearchParams({
-      client_id: AGY_OAUTH_CLIENT_ID,
-      client_secret: AGY_OAUTH_CLIENT_SECRET,
+      client_id: clientId || AGY_OAUTH_CLIENT_ID,
+      client_secret: clientSecret || AGY_OAUTH_CLIENT_SECRET,
       code,
       code_verifier: codeVerifier,
       grant_type: "authorization_code",
@@ -776,6 +777,8 @@ export function startIsolatedOAuthFlow(optionsOrCallback = {}, maybeCallback = n
   const targetGcpProjectId = String(opts.gcpProjectId || "").trim();
   const targetGcpBillingMode = opts.gcpBillingMode === "gemini_enterprise" ? "gemini_enterprise" : "agent_platform";
   const targetGcpLocation = ["global", "us", "eu"].includes(opts.gcpLocation) ? opts.gcpLocation : "global";
+  const loginHint = String(opts.loginHint || opts.email || "").trim();
+  const oauthClient = getOAuthClientForChannel(targetChannelType);
 
   const codeVerifier = crypto.randomBytes(32).toString("base64url");
   const codeChallenge = crypto.createHash("sha256").update(codeVerifier).digest("base64url");
@@ -810,7 +813,13 @@ export function startIsolatedOAuthFlow(optionsOrCallback = {}, maybeCallback = n
         const redirectUri = `http://localhost:${port}/auth/callback`;
         cancelIsolatedOAuthFlow();
 
-        const tokenResp = await exchangeOAuthCodeForTokens({ code, redirectUri, codeVerifier });
+        const tokenResp = await exchangeOAuthCodeForTokens({
+          code,
+          redirectUri,
+          codeVerifier,
+          clientId: oauthClient.clientId,
+          clientSecret: oauthClient.clientSecret
+        });
         const email = decodeJwtEmail(tokenResp.id_token) || `account_${Date.now()}`;
         const expiryDate = new Date(Date.now() + (tokenResp.expires_in || 3599) * 1000).toISOString();
 
@@ -832,11 +841,20 @@ export function startIsolatedOAuthFlow(optionsOrCallback = {}, maybeCallback = n
           cfg.__meta__.oauthTokensByEmail = {};
         }
         cfg.__meta__.oauthTokensByEmail[email] = storedToken;
+        if (targetChannelType === "gcp") {
+          if (!cfg.__meta__.gcpOAuthTokensByEmail || typeof cfg.__meta__.gcpOAuthTokensByEmail !== "object") {
+            cfg.__meta__.gcpOAuthTokensByEmail = {};
+          }
+          cfg.__meta__.gcpOAuthTokensByEmail[email] = storedToken;
+        }
 
         for (const existingAcc of Object.values(cfg.accounts || {})) {
           if (existingAcc.email === email) {
             const existingIsGcp = Boolean(existingAcc.gcpProjectId || existingAcc.channelType === "gcp");
             if (targetChannelType === "personal" && existingIsGcp && existingAcc.storedToken?.token?.refresh_token) {
+              continue;
+            }
+            if (targetChannelType === "gcp" && !existingIsGcp && existingAcc.storedToken?.token?.refresh_token) {
               continue;
             }
             existingAcc.storedToken = existingAcc.gcpProjectId
@@ -853,6 +871,9 @@ export function startIsolatedOAuthFlow(optionsOrCallback = {}, maybeCallback = n
         if (targetChannelType === "gcp") {
           if (targetGcpProjectId) {
             const gcpKey = `${email}#gcp:${targetGcpProjectId}`;
+            if (Array.isArray(cfg.__meta__.deletedChannelIds)) {
+              cfg.__meta__.deletedChannelIds = cfg.__meta__.deletedChannelIds.filter((id) => id !== gcpKey);
+            }
             const tierName = targetGcpBillingMode === "gemini_enterprise" ? "Gemini Enterprise" : "Agent Platform";
             if (!cfg.gcpProjects.includes(targetGcpProjectId)) {
               cfg.gcpProjects.push(targetGcpProjectId);
@@ -908,6 +929,9 @@ export function startIsolatedOAuthFlow(optionsOrCallback = {}, maybeCallback = n
         }
 
         const personalKey = `${email}#personal`;
+        if (Array.isArray(cfg.__meta__.deletedChannelIds)) {
+          cfg.__meta__.deletedChannelIds = cfg.__meta__.deletedChannelIds.filter((id) => id !== personalKey);
+        }
         cfg.accounts[personalKey] = {
           id: personalKey,
           alias: email,
@@ -935,12 +959,15 @@ export function startIsolatedOAuthFlow(optionsOrCallback = {}, maybeCallback = n
       const port = server.address().port;
       const redirectUri = `http://localhost:${port}/auth/callback`;
       const authUrl = new URL("https://accounts.google.com/o/oauth2/v2/auth");
-      authUrl.searchParams.set("client_id", AGY_OAUTH_CLIENT_ID);
+      authUrl.searchParams.set("client_id", oauthClient.clientId || AGY_OAUTH_CLIENT_ID);
       authUrl.searchParams.set("redirect_uri", redirectUri);
       authUrl.searchParams.set("response_type", "code");
       authUrl.searchParams.set("scope", AGY_OAUTH_SCOPES.join(" "));
       authUrl.searchParams.set("access_type", "offline");
       authUrl.searchParams.set("prompt", "consent");
+      if (loginHint) {
+        authUrl.searchParams.set("login_hint", loginHint);
+      }
       authUrl.searchParams.set("code_challenge", codeChallenge);
       authUrl.searchParams.set("code_challenge_method", "S256");
       authUrl.searchParams.set("state", state);
