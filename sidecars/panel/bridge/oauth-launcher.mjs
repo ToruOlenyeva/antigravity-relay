@@ -835,6 +835,10 @@ export function startIsolatedOAuthFlow(optionsOrCallback = {}, maybeCallback = n
 
         for (const existingAcc of Object.values(cfg.accounts || {})) {
           if (existingAcc.email === email) {
+            const existingIsGcp = Boolean(existingAcc.gcpProjectId || existingAcc.channelType === "gcp");
+            if (targetChannelType === "personal" && existingIsGcp && existingAcc.storedToken?.token?.refresh_token) {
+              continue;
+            }
             existingAcc.storedToken = existingAcc.gcpProjectId
               ? {
                   ...storedToken,

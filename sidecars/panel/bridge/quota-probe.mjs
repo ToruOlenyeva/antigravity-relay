@@ -622,19 +622,23 @@ function isInternalConsumerPoolProject(projectId) {
   return /^(aicode-consumers|rising-fact-[a-z0-9-]+|gen-lang-client-[a-z0-9-]+|cloud-ai-companion-[a-z0-9-]+)$/i.test(pid);
 }
 
-function fetchCloudResourceProjects(accessToken) {
+function fetchCloudResourceProjects(accessToken, quotaProjectId = "") {
   return new Promise((resolve) => {
     if (!accessToken) return resolve({ projects: [], status: 0, reason: "" });
+    const headers = {
+      Authorization: `Bearer ${accessToken}`,
+      Accept: "application/json"
+    };
+    if (quotaProjectId) {
+      headers["X-Goog-User-Project"] = quotaProjectId;
+    }
     const req = https.request(
       {
         hostname: "cloudresourcemanager.googleapis.com",
         port: 443,
         path: "/v1/projects?pageSize=100",
         method: "GET",
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          Accept: "application/json"
-        },
+        headers,
         timeout: 4500
       },
       (res) => {
@@ -808,7 +812,7 @@ export async function discoverGcpProjectsForAccount(targetEmail = "") {
   const email = (targetEmail || cred?.id_token_email || cfg.__meta__?.activeEmail || "").trim();
   if (!email) return { email: "", discovered: [], reason: "" };
 
-  const storedToken = findStoredTokenForEmail(cfg, email) || cred;
+  const storedToken = findStoredTokenForEmail(cfg, email, true) || findStoredTokenForEmail(cfg, email) || cred;
   if (!storedToken || !storedToken.token) return { email, discovered: [], reason: "" };
 
   let accessToken = storedToken.token.access_token || "";
@@ -838,11 +842,24 @@ export async function discoverGcpProjectsForAccount(targetEmail = "") {
     return Array.from(map.values());
   };
 
-  const [crmV1Res, crmV3List, ccProjects] = await Promise.all([
+  let [crmV1Res, crmV3List, ccProjects] = await Promise.all([
     fetchCloudResourceProjects(accessToken),
     fetchCloudResourceV3Projects(accessToken),
     fetchCloudCodeCompanionProject(accessToken)
   ]);
+
+  if (crmV1Res.projects.length === 0 && crmV1Res.reason === "api_disabled") {
+    const quotaProjCandidates = [
+      findFirstGcpProjectForEmail(cfg, email),
+      ...(Array.isArray(cfg.gcpProjects) ? cfg.gcpProjects : [])
+    ].filter((pid) => pid && !isInternalConsumerPoolProject(pid));
+    if (quotaProjCandidates.length > 0) {
+      const retryRes = await fetchCloudResourceProjects(accessToken, quotaProjCandidates[0]);
+      if (retryRes.projects.length > 0) {
+        crmV1Res = retryRes;
+      }
+    }
+  }
   const gcloudProjects = readLocalGcloudProjectsForEmail(email);
   let projects = mergeDiscovered(crmV1Res.projects, crmV3List, ccProjects, gcloudProjects);
 
