@@ -21,6 +21,7 @@ import {
   getOAuthClientForChannel,
   readWinCredToken,
   writeWinCredToken,
+  syncInstanceAppStorage,
   buildCleanChannelToken,
   refreshOAuthAccessToken,
   inspectActiveFieldInstances
@@ -158,48 +159,93 @@ function discoverInstanceCdpPort(ctx) {
   return 0;
 }
 
-function fetchWindowActiveConvIdViaCdp(port) {
+function sendCdpCommandOverWebSocket(wsUrl, method, params = {}) {
   return new Promise((resolve) => {
-    if (!port || port <= 1024) return resolve("");
-    const req = http.get(
-      {
-        hostname: "127.0.0.1",
-        port,
-        path: "/json",
-        timeout: 260
-      },
-      (res) => {
-        if (res.statusCode !== 200) {
-          res.resume();
-          return resolve("");
+    try {
+      const parsed = new URL(wsUrl);
+      const key = crypto.randomBytes(16).toString("base64");
+      const req = http.request({
+        hostname: parsed.hostname || "127.0.0.1",
+        port: Number(parsed.port),
+        path: parsed.pathname + (parsed.search || ""),
+        method: "GET",
+        headers: { Connection: "Upgrade", Upgrade: "websocket", "Sec-WebSocket-Version": "13", "Sec-WebSocket-Key": key },
+        timeout: 1200
+      });
+      let settled = false;
+      const finish = (ok) => { if (!settled) { settled = true; resolve(Boolean(ok)); } };
+      req.on("upgrade", (_res, socket) => {
+        try {
+          const payload = Buffer.from(JSON.stringify({ id: 1, method, params }), "utf8");
+          const mask = crypto.randomBytes(4);
+          let header;
+          if (payload.length < 126) {
+            header = Buffer.alloc(6);
+            header[0] = 0x81; header[1] = 0x80 | payload.length;
+            mask.copy(header, 2);
+          } else {
+            header = Buffer.alloc(8);
+            header[0] = 0x81; header[1] = 0x80 | 126;
+            header.writeUInt16BE(payload.length, 2);
+            mask.copy(header, 4);
+          }
+          const masked = Buffer.alloc(payload.length);
+          for (let i = 0; i < payload.length; i++) masked[i] = payload[i] ^ mask[i & 3];
+          socket.write(Buffer.concat([header, masked]));
+          setTimeout(() => { try { socket.end(); socket.destroy(); } catch {} finish(true); }, 120);
+        } catch {
+          try { socket.destroy(); } catch {}
+          finish(false);
         }
-        let body = "";
-        res.setEncoding("utf8");
-        res.on("data", (chunk) => {
-          body += chunk;
-        });
-        res.on("end", () => {
-          try {
-            const targets = JSON.parse(body);
-            if (Array.isArray(targets)) {
-              for (const t of targets) {
-                if (t && t.type === "page" && typeof t.url === "string") {
-                  const m = t.url.match(/\/(?:c|cascade)\/([0-9a-f-]{36})/i);
-                  if (m && m[1]) return resolve(m[1]);
-                }
-              }
-            }
-          } catch {}
-          resolve("");
-        });
-      }
-    );
-    req.on("timeout", () => {
-      req.destroy();
-      resolve("");
-    });
-    req.on("error", () => resolve(""));
+      });
+      req.on("error", () => finish(false));
+      req.on("timeout", () => { try { req.destroy(); } catch {} finish(false); });
+      req.end();
+    } catch { resolve(false); }
   });
+}
+
+function fetchCdpTargetsList(port, timeout = 320) {
+  return new Promise((resolve) => {
+    if (!port || port <= 1024) return resolve([]);
+    const req = http.get({ hostname: "127.0.0.1", port, path: "/json", timeout }, (res) => {
+      if (res.statusCode !== 200) { res.resume(); return resolve([]); }
+      let body = "";
+      res.setEncoding("utf8");
+      res.on("data", (chunk) => { body += chunk; });
+      res.on("end", () => {
+        try {
+          const parsed = JSON.parse(body);
+          resolve(Array.isArray(parsed) ? parsed : []);
+        } catch { resolve([]); }
+      });
+    });
+    req.on("error", () => resolve([]));
+    req.on("timeout", () => { try { req.destroy(); } catch {} resolve([]); });
+  });
+}
+
+export async function reloadInstanceWorkbenchViaCdp(ctx = null) {
+  const activeCtx = ctx || resolveCurrentInstanceContext();
+  const port = discoverInstanceCdpPort(activeCtx);
+  const targets = await fetchCdpTargetsList(port, 600);
+  const pageTargets = targets.filter(
+    (t) => t && t.type === "page" && typeof t.webSocketDebuggerUrl === "string" && !/sidecar|devtools/i.test(String(t.url || ""))
+  );
+  const mainTarget = pageTargets.find((t) => /workbench|cascade|vscode-file|jetski/i.test(String(t.url || ""))) || pageTargets[0];
+  if (!mainTarget?.webSocketDebuggerUrl) return false;
+  return sendCdpCommandOverWebSocket(mainTarget.webSocketDebuggerUrl, "Page.reload", { ignoreCache: false });
+}
+
+async function fetchWindowActiveConvIdViaCdp(port) {
+  const targets = await fetchCdpTargetsList(port, 260);
+  for (const t of targets) {
+    if (t && t.type === "page" && typeof t.url === "string") {
+      const m = t.url.match(/\/(?:c|cascade)\/([0-9a-f-]{36})/i);
+      if (m && m[1]) return m[1];
+    }
+  }
+  return "";
 }
 
 function extractFallbackConvAndModelFromLsLog(lsLogFile, knownDict) {
@@ -412,40 +458,22 @@ export async function computeSessionTelemetrySnapshot(cfgInput = null, instanceC
     : 0;
 
   const byModel = Array.from(modelMap.values())
-    .map((m) => {
-      const mTotal = m.inputTokens + m.outputTokens;
-      const mCacheHitPct = (m.inputTokens + m.cacheTokens) > 0
-        ? Math.round((m.cacheTokens / (m.inputTokens + m.cacheTokens)) * 100)
-        : 0;
-      return {
-        modelName: m.modelName,
-        turns: m.turns,
-        inputTokens: m.inputTokens,
-        cacheTokens: m.cacheTokens,
-        outputTokens: m.outputTokens,
-        totalTokens: mTotal,
-        cacheHitPct: mCacheHitPct,
-        lastUsedIndex: m.lastUsedIndex
-      };
-    })
+    .map((m) => ({
+      modelName: m.modelName, turns: m.turns, inputTokens: m.inputTokens,
+      cacheTokens: m.cacheTokens, outputTokens: m.outputTokens,
+      totalTokens: m.inputTokens + m.outputTokens,
+      cacheHitPct: (m.inputTokens + m.cacheTokens) > 0 ? Math.round((m.cacheTokens / (m.inputTokens + m.cacheTokens)) * 100) : 0,
+      lastUsedIndex: m.lastUsedIndex
+    }))
     .sort((a, b) => b.lastUsedIndex - a.lastUsedIndex)
     .map(({ lastUsedIndex, ...rest }) => rest);
 
   return {
     conversationId: targetConvId ? targetConvId.slice(0, 8) : "",
-    lastInputTokens: lastInputTokens || 0,
-    lastCacheTokens: lastCacheTokens || 0,
-    lastContextTokens,
-    lastOutputTokens: lastOutputTokens || 0,
-    sessionInputTokens,
-    sessionCacheTokens,
-    sessionOutputTokens,
-    sessionTotalTokens,
-    cacheHitPct,
-    turnCount,
-    checkpointCount,
-    checkpointTokens,
-    byModel,
+    lastInputTokens: lastInputTokens || 0, lastCacheTokens: lastCacheTokens || 0,
+    lastContextTokens, lastOutputTokens: lastOutputTokens || 0,
+    sessionInputTokens, sessionCacheTokens, sessionOutputTokens, sessionTotalTokens,
+    cacheHitPct, turnCount, checkpointCount, checkpointTokens, byModel,
     source: "official_transcript"
   };
 }
@@ -490,7 +518,29 @@ export async function launchIsolatedAntigravityInstance(accountId) {
     throw new Error("未找到本机 Antigravity.exe 可执行文件");
   }
 
-  const originalMainCred = readWinCredToken(true) || readWinCredToken(false);
+  const rawWinCred = readWinCredToken(true) || readWinCredToken(false);
+  const curCtx = resolveCurrentInstanceContext();
+  const curMeta = getInstanceMeta(cfg, curCtx);
+  const curActiveId =
+    curMeta?.activeChannelId ||
+    curCtx?.descriptor?.activeChannelId ||
+    (!curCtx?.isIsolatedInstance ? cfg.__meta__?.activeChannelId : "") ||
+    "";
+  const curActiveAcc = curActiveId ? cfg.accounts?.[curActiveId] : null;
+  let originalMainCred = rawWinCred;
+  if (curActiveAcc) {
+    const curProj = (curActiveAcc.gcpProjectId || "").trim();
+    const curMode = curProj ? (curActiveAcc.gcpBillingMode || "agent_platform") : "";
+    const curLoc = curProj ? (curMode === "agent_platform" ? (curActiveAcc.gcpLocation || "global") : "") : "";
+    const curBase = curActiveAcc.storedToken || findStoredTokenForEmail(cfg, curActiveAcc.email, Boolean(curProj));
+    if (curBase) {
+      const builtCur = buildCleanChannelToken(curBase, curProj, curLoc, false);
+      if (builtCur) {
+        if (rawWinCred?.writer_id) builtCur.writer_id = rawWinCred.writer_id;
+        originalMainCred = builtCur;
+      }
+    }
+  }
 
   const targetProject = (target.gcpProjectId || "").trim();
   const targetBillingMode = targetProject ? (target.gcpBillingMode || "agent_platform") : "";
@@ -550,25 +600,13 @@ export async function launchIsolatedAntigravityInstance(accountId) {
     if (fs.existsSync(mainSettings) && !fs.existsSync(destSettings)) {
       fs.copyFileSync(mainSettings, destSettings);
     }
-    // 同步主实例的 app_storage.json 与 window_state.json，跳过首次引导向导 ([IDE Wizard] Already shown, skipping) 并直达 Hub 主界面，同时剥离主实例旧 Sidecar 端口缓存防止多开窗口面板串流
-    for (const rootFile of ["app_storage.json", "window_state.json"]) {
-      const srcPath = path.join(mainAppDataDir, rootFile);
-      const dstPath = path.join(instanceUserDataDir, rootFile);
-      if (fs.existsSync(srcPath) && !fs.existsSync(dstPath)) {
-        fs.copyFileSync(srcPath, dstPath);
-      }
+    // 仅同步主实例的 window_state.json，并为多开实例生成完全独立干净的 app_storage.json（绝不拷贝主窗口历史会话布局或旧登录状态）
+    const srcWinState = path.join(mainAppDataDir, "window_state.json");
+    const dstWinState = path.join(instanceUserDataDir, "window_state.json");
+    if (fs.existsSync(srcWinState) && !fs.existsSync(dstWinState)) {
+      fs.copyFileSync(srcWinState, dstWinState);
     }
-    const isoAppStoragePath = path.join(instanceUserDataDir, "app_storage.json");
-    if (fs.existsSync(isoAppStoragePath)) {
-      try {
-        const storageObj = JSON.parse(fs.readFileSync(isoAppStoragePath, "utf8"));
-        if (storageObj && typeof storageObj === "object") {
-          delete storageObj["aux-pane-v2-session"];
-          delete storageObj["aux-pane-session"];
-          fs.writeFileSync(isoAppStoragePath, JSON.stringify(storageObj, null, 2), "utf8");
-        }
-      } catch {}
-    }
+    syncInstanceAppStorage(instanceUserDataDir, target.email, Boolean(targetProject), true);
   } catch {}
 
   const launchedAt = Date.now();
@@ -653,29 +691,30 @@ export async function launchIsolatedAntigravityInstance(accountId) {
     launchedPid = child.pid || 0;
   }
 
-  // 轮询新实例 logs/language_server.log 确认 Auth succeeded（或最长 9 秒超时）后，无感还原主实例原本的 WinCred 凭据（保持相同 writer_id，新旧实例双端零互扰）
+  // 轮询新实例 logs/language_server.log 确认 initialized server successfully 且度过 +2.6s 二次 ApplyToken 窗口（或最长 8.5 秒超时）后，无感还原主实例原本的 WinCred 凭据（保持相同 writer_id，新旧实例双端零互扰）
   if (originalMainCred) {
     const startWait = Date.now();
+    let initializedAt = 0;
     const restoreOriginalCred = () => {
       try {
         writeWinCredToken(originalMainCred);
       } catch {}
     };
     const pollTimer = setInterval(() => {
-      const elapsed = Date.now() - startWait;
-      let authReady = false;
+      const now = Date.now();
+      const elapsed = now - startWait;
       try {
         if (fs.existsSync(instanceLsLogPath)) {
           const st = fs.statSync(instanceLsLogPath);
           if (st.size > prevLsLogSize) {
             const fd = fs.openSync(instanceLsLogPath, "r");
             try {
-              const len = st.size - prevLsLogSize;
+              const len = Math.min(65536, st.size - prevLsLogSize);
               const buf = Buffer.alloc(len);
               fs.readSync(fd, buf, 0, len, prevLsLogSize);
               const tailText = buf.toString("utf8");
-              if (/Auth succeeded|Starting language server process with pid/i.test(tailText) && elapsed >= 600) {
-                authReady = true;
+              if (/initialized server successfully/i.test(tailText)) {
+                if (!initializedAt) initializedAt = now;
               }
             } finally {
               fs.closeSync(fd);
@@ -683,11 +722,12 @@ export async function launchIsolatedAntigravityInstance(accountId) {
           }
         }
       } catch {}
-      if (authReady || elapsed >= 5000) {
+      const readyAfterInit = initializedAt > 0 && now - initializedAt >= 1600;
+      if (readyAfterInit || elapsed >= 8500) {
         clearInterval(pollTimer);
         restoreOriginalCred();
       }
-    }, 500);
+    }, 350);
     if (typeof pollTimer.unref === "function") pollTimer.unref();
   }
 
@@ -826,45 +866,28 @@ export function startIsolatedOAuthFlow(optionsOrCallback = {}, maybeCallback = n
 
         const storedToken = buildCleanChannelToken({
           token: {
-            access_token: tokenResp.access_token,
-            token_type: tokenResp.token_type || "Bearer",
-            refresh_token: tokenResp.refresh_token,
-            expiry: expiryDate,
-            expires_in: tokenResp.expires_in || 3599
+            access_token: tokenResp.access_token, token_type: tokenResp.token_type || "Bearer",
+            refresh_token: tokenResp.refresh_token, expiry: expiryDate, expires_in: tokenResp.expires_in || 3599
           },
-          id_token: tokenResp.id_token || "",
-          id_token_email: email
+          id_token: tokenResp.id_token || "", id_token_email: email
         }, "", "");
 
         const cfg = readRelayConfig();
         normalizeAccountChannels(cfg);
-        if (!cfg.__meta__.oauthTokensByEmail || typeof cfg.__meta__.oauthTokensByEmail !== "object") {
-          cfg.__meta__.oauthTokensByEmail = {};
-        }
+        if (!cfg.__meta__.oauthTokensByEmail || typeof cfg.__meta__.oauthTokensByEmail !== "object") cfg.__meta__.oauthTokensByEmail = {};
         cfg.__meta__.oauthTokensByEmail[email] = storedToken;
         if (targetChannelType === "gcp") {
-          if (!cfg.__meta__.gcpOAuthTokensByEmail || typeof cfg.__meta__.gcpOAuthTokensByEmail !== "object") {
-            cfg.__meta__.gcpOAuthTokensByEmail = {};
-          }
+          if (!cfg.__meta__.gcpOAuthTokensByEmail || typeof cfg.__meta__.gcpOAuthTokensByEmail !== "object") cfg.__meta__.gcpOAuthTokensByEmail = {};
           cfg.__meta__.gcpOAuthTokensByEmail[email] = storedToken;
         }
 
         for (const existingAcc of Object.values(cfg.accounts || {})) {
           if (existingAcc.email === email) {
             const existingIsGcp = Boolean(existingAcc.gcpProjectId || existingAcc.channelType === "gcp");
-            if (targetChannelType === "personal" && existingIsGcp && existingAcc.storedToken?.token?.refresh_token) {
-              continue;
-            }
-            if (targetChannelType === "gcp" && !existingIsGcp && existingAcc.storedToken?.token?.refresh_token) {
-              continue;
-            }
+            if (targetChannelType === "personal" && existingIsGcp && existingAcc.storedToken?.token?.refresh_token) continue;
+            if (targetChannelType === "gcp" && !existingIsGcp && existingAcc.storedToken?.token?.refresh_token) continue;
             existingAcc.storedToken = existingAcc.gcpProjectId
-              ? {
-                  ...storedToken,
-                  auth_method: "gcp",
-                  project_id: existingAcc.gcpProjectId,
-                  region: existingAcc.gcpBillingMode === "agent_platform" ? (existingAcc.gcpLocation || "global") : ""
-                }
+              ? { ...storedToken, auth_method: "gcp", project_id: existingAcc.gcpProjectId, region: existingAcc.gcpBillingMode === "agent_platform" ? (existingAcc.gcpLocation || "global") : "" }
               : storedToken;
           }
         }
@@ -876,55 +899,21 @@ export function startIsolatedOAuthFlow(optionsOrCallback = {}, maybeCallback = n
               cfg.__meta__.deletedChannelIds = cfg.__meta__.deletedChannelIds.filter((id) => id !== gcpKey);
             }
             const tierName = targetGcpBillingMode === "gemini_enterprise" ? "Gemini Enterprise" : "Agent Platform";
-            if (!cfg.gcpProjects.includes(targetGcpProjectId)) {
-              cfg.gcpProjects.push(targetGcpProjectId);
-            }
+            if (!cfg.gcpProjects.includes(targetGcpProjectId)) cfg.gcpProjects.push(targetGcpProjectId);
             cfg.accounts[gcpKey] = {
-              id: gcpKey,
-              alias: `${email} (${targetGcpProjectId})`,
-              email,
-              channelType: "gcp",
-              tierName,
-              gcpProjectId: targetGcpProjectId,
-              gcpBillingMode: targetGcpBillingMode,
-              gcpLocation: targetGcpLocation,
-              projectName: targetGcpProjectId,
-              savedAt: new Date().toISOString(),
-              storedToken: {
-                ...storedToken,
-                auth_method: "gcp",
-                project_id: targetGcpProjectId,
-                region: targetGcpBillingMode === "agent_platform" ? targetGcpLocation : ""
-              },
+              id: gcpKey, alias: `${email} (${targetGcpProjectId})`, email, channelType: "gcp", tierName,
+              gcpProjectId: targetGcpProjectId, gcpBillingMode: targetGcpBillingMode, gcpLocation: targetGcpLocation,
+              projectName: targetGcpProjectId, savedAt: new Date().toISOString(),
+              storedToken: { ...storedToken, auth_method: "gcp", project_id: targetGcpProjectId, region: targetGcpBillingMode === "agent_platform" ? targetGcpLocation : "" },
               cachedQuota: targetGcpBillingMode === "agent_platform"
-                ? {
-                    isGcpUnlimited: true,
-                    quotaGroups: [],
-                    availableModels: AGENT_PLATFORM_DEFAULT_MODELS.map((m) => ({ ...m, variantIds: [...m.variantIds] })),
-                    updatedAt: Date.now()
-                  }
+                ? { isGcpUnlimited: true, quotaGroups: [], availableModels: AGENT_PLATFORM_DEFAULT_MODELS.map((m) => ({ ...m, variantIds: [...m.variantIds] })), updatedAt: Date.now() }
                 : { isGcpUnlimited: true, quotaGroups: [], availableModels: [], updatedAt: Date.now() }
             };
             writeRelayConfig(cfg);
-            if (onCompleteCallback) {
-              onCompleteCallback({
-                success: true,
-                email,
-                channelType: "gcp",
-                gcpProjectId: targetGcpProjectId,
-                autoScanGcp: false
-              });
-            }
+            if (onCompleteCallback) onCompleteCallback({ success: true, email, channelType: "gcp", gcpProjectId: targetGcpProjectId, autoScanGcp: false });
           } else {
             writeRelayConfig(cfg);
-            if (onCompleteCallback) {
-              onCompleteCallback({
-                success: true,
-                email,
-                channelType: "gcp",
-                autoScanGcp: true
-              });
-            }
+            if (onCompleteCallback) onCompleteCallback({ success: true, email, channelType: "gcp", autoScanGcp: true });
           }
           return;
         }
@@ -934,14 +923,9 @@ export function startIsolatedOAuthFlow(optionsOrCallback = {}, maybeCallback = n
           cfg.__meta__.deletedChannelIds = cfg.__meta__.deletedChannelIds.filter((id) => id !== personalKey);
         }
         cfg.accounts[personalKey] = {
-          id: personalKey,
-          alias: email,
-          email,
-          channelType: "personal",
+          id: personalKey, alias: email, email, channelType: "personal",
           tierName: cfg.accounts[personalKey]?.tierName || "Google AI Pro",
-          gcpProjectId: "",
-          savedAt: new Date().toISOString(),
-          storedToken
+          gcpProjectId: "", savedAt: new Date().toISOString(), storedToken
         };
         writeRelayConfig(cfg);
 

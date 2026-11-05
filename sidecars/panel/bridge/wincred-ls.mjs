@@ -65,15 +65,9 @@ export const AGY_OAUTH_CLIENTS = loadOAuthClients();
 export const AGY_OAUTH_CLIENT_ID = AGY_OAUTH_CLIENTS[0]?.clientId || "";
 export const AGY_OAUTH_CLIENT_SECRET = AGY_OAUTH_CLIENTS[0]?.clientSecret || "";
 export const AGY_OAUTH_SCOPES = [
-  "openid",
-  "email",
-  "profile",
-  "https://www.googleapis.com/auth/aicode",
-  "https://www.googleapis.com/auth/cclog",
-  "https://www.googleapis.com/auth/cloud-platform",
-  "https://www.googleapis.com/auth/experimentsandconfigs",
-  "https://www.googleapis.com/auth/userinfo.email",
-  "https://www.googleapis.com/auth/userinfo.profile"
+  "openid", "email", "profile", "https://www.googleapis.com/auth/aicode", "https://www.googleapis.com/auth/cclog",
+  "https://www.googleapis.com/auth/cloud-platform", "https://www.googleapis.com/auth/experimentsandconfigs",
+  "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile"
 ];
 export const AGY_AUTH_SUCCESS_URL = "https://antigravity.google/auth-success?app=antigravity";
 
@@ -152,7 +146,7 @@ public class WinCred {
         }
     }
 
-    public static bool WriteIsolated(string target, string user, string tempSecret, string restoreSecret, int[] suspendPids, int holdMs) {
+    public static bool WriteIsolated(string target, string user, string tempSecret, string restoreSecret, int[] suspendPids, int holdMs, string logPath) {
         IntPtr[] handles = new IntPtr[suspendPids != null ? suspendPids.Length : 0];
         try {
             for (int i = 0; i < handles.Length; i++) {
@@ -164,9 +158,43 @@ public class WinCred {
                     }
                 }
             }
+            long startLen = -1;
+            if (!string.IsNullOrEmpty(logPath) && System.IO.File.Exists(logPath)) {
+                try { startLen = new System.IO.FileInfo(logPath).Length; } catch { startLen = -1; }
+            }
             if (!Write(target, user, tempSecret)) return false;
-            if (holdMs > 0) {
-                System.Threading.Thread.Sleep(holdMs);
+            int maxWait = holdMs > 0 ? holdMs : 5800;
+            if (startLen >= 0) {
+                int waited = 0;
+                bool seenWif = false;
+                int afterWifMs = 0;
+                while (waited < maxWait) {
+                    System.Threading.Thread.Sleep(100);
+                    waited += 100;
+                    try {
+                        System.IO.FileInfo fi = new System.IO.FileInfo(logPath);
+                        if (fi.Exists && fi.Length > startLen) {
+                            using (System.IO.FileStream fs = new System.IO.FileStream(logPath, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.ReadWrite | System.IO.FileShare.Delete)) {
+                                fs.Seek(startLen, System.IO.SeekOrigin.Begin);
+                                int toRead = (int)Math.Min(65536, fi.Length - startLen);
+                                byte[] buf = new byte[toRead];
+                                int n = fs.Read(buf, 0, toRead);
+                                string tail = Encoding.UTF8.GetString(buf, 0, n);
+                                if (tail.IndexOf("SetWIFProvider called with wifProvider", StringComparison.OrdinalIgnoreCase) >= 0) {
+                                    seenWif = true;
+                                }
+                                if (seenWif) {
+                                    if (tail.IndexOf("State refresh took", StringComparison.OrdinalIgnoreCase) >= 0 || afterWifMs >= 800) {
+                                        break;
+                                    }
+                                    afterWifMs += 100;
+                                }
+                            }
+                        }
+                    } catch {}
+                }
+            } else if (maxWait > 0) {
+                System.Threading.Thread.Sleep(maxWait);
             }
             return true;
         } finally {
@@ -243,47 +271,121 @@ ${WINCRED_CSHARP}
   } catch {}
 }
 
-export function writeWinCredIsolatedForProcess(tempTokenObj, restoreTokenObj, suspendPids = [], holdMs = 1450) {
+export function writeWinCredIsolatedForProcess(
+  tempTokenObj,
+  restoreTokenObj,
+  suspendPids = [],
+  holdMs = 5800,
+  watchLogFile = ""
+) {
   const cleanPids = (Array.isArray(suspendPids) ? suspendPids : [])
     .map((n) => Number(n))
     .filter((n) => Number.isFinite(n) && n > 0);
-  if (cleanPids.length === 0 || !restoreTokenObj) {
+  const hasRestore = cleanPids.length > 0 && Boolean(restoreTokenObj);
+  const alignedRestore = hasRestore
+    ? {
+        ...restoreTokenObj,
+        writer_id: tempTokenObj.writer_id
+      }
+    : null;
+  if (!hasRestore && !watchLogFile) {
     writeWinCredToken(tempTokenObj);
     return false;
   }
-  const alignedRestore = {
-    ...restoreTokenObj,
-    writer_id: tempTokenObj.writer_id
-  };
   const tempStr = JSON.stringify(tempTokenObj);
-  const restoreStr = JSON.stringify(alignedRestore);
+  const restoreStr = alignedRestore ? JSON.stringify(alignedRestore) : "";
   const tempB64 = Buffer.from(tempStr, "utf8").toString("base64");
   const restoreB64 = Buffer.from(restoreStr, "utf8").toString("base64");
-  const pidListExpr = `@(${cleanPids.join(",")})`;
+  const logB64 = Buffer.from(String(watchLogFile || ""), "utf8").toString("base64");
+  const pidListExpr = cleanPids.length > 0 ? `@(${cleanPids.join(",")})` : "@()";
+  const maxWaitMs = Number(holdMs) || 5800;
   const ps = `
     Add-Type -TypeDefinition @'
 ${WINCRED_CSHARP}
 '@
     $tJson = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('${tempB64}'))
     $rJson = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('${restoreB64}'))
+    $logPath = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('${logB64}'))
     [int[]]$pids = ${pidListExpr}
-    $ok = [WinCred]::WriteIsolated('gemini:antigravity', 'antigravity', $tJson, $rJson, $pids, ${Number(holdMs) || 1450})
+    $ok = [WinCred]::WriteIsolated('gemini:antigravity', 'antigravity', $tJson, $rJson, $pids, ${maxWaitMs}, $logPath)
     if (-not $ok) { throw "WriteIsolated failed" }
   `;
   execFileSync("powershell.exe", ["-NoProfile", "-Command", ps], {
     encoding: "utf8",
-    timeout: 10000,
+    timeout: Math.max(12000, maxWaitMs + 5000),
     windowsHide: true
   });
-  cachedWinCred = alignedRestore;
+  const finalCred = alignedRestore || tempTokenObj;
+  const finalStr = alignedRestore ? restoreStr : tempStr;
+  cachedWinCred = finalCred;
   cachedWinCredAt = Date.now();
   try {
     if (fs.existsSync(JETSKI_TOKEN_FILE)) {
-      fs.writeFileSync(JETSKI_TOKEN_FILE, restoreStr, { encoding: "utf8", mode: 0o600 });
+      fs.writeFileSync(JETSKI_TOKEN_FILE, finalStr, { encoding: "utf8", mode: 0o600 });
     }
   } catch {}
   return true;
 }
+
+export function syncInstanceAppStorage(userDataDir, email, isGcp = false, isIsolated = false) {
+  if (!userDataDir) return;
+  try {
+    fs.mkdirSync(userDataDir, { recursive: true });
+    const appStoragePath = path.join(userDataDir, "app_storage.json");
+    let storageObj = {};
+    if (fs.existsSync(appStoragePath)) {
+      try {
+        const parsed = JSON.parse(fs.readFileSync(appStoragePath, "utf8"));
+        if (parsed && typeof parsed === "object") {
+          storageObj = parsed;
+        }
+      } catch {}
+    }
+    if (isIsolated) {
+      const hadMainWindowArtifacts = Boolean(
+        storageObj["comments"] ||
+          storageObj["aux-pane-v2-session"] ||
+          storageObj["aux-pane-session"]
+      );
+      delete storageObj["aux-pane-v2-session"];
+      delete storageObj["aux-pane-session"];
+      delete storageObj["comments"];
+      delete storageObj["projectsConversationOrder"];
+      delete storageObj["lastCreatedProjectId"];
+      if (hadMainWindowArtifacts) {
+        for (const k of Object.keys(storageObj)) {
+          if (k.startsWith("antigravity-multi-conversation-layout-")) {
+            delete storageObj[k];
+          }
+        }
+      }
+    }
+    storageObj["ide-install-wizard-shown"] = "true";
+    storageObj["didAskForNotificationPermission"] = "true";
+    if (email) {
+      storageObj["agy.onboarding.lastLoginUsername"] = String(email).trim();
+    }
+    storageObj["agy.onboarding.lastLoginIsGcpTos"] = isGcp ? "true" : "false";
+    storageObj["agy.onboarding.lastLoginStrategy"] = isGcp ? "gcp" : "google";
+    fs.writeFileSync(appStoragePath, JSON.stringify(storageObj, null, 2), "utf8");
+  } catch {}
+}
+
+export function sanitizeAllIsolatedInstancesAppStorage() {
+  try {
+    if (!fs.existsSync(INSTANCES_ROOT_DIR)) return;
+    const dirs = fs.readdirSync(INSTANCES_ROOT_DIR, { withFileTypes: true });
+    for (const d of dirs) {
+      if (!d.isDirectory()) continue;
+      const instDir = path.join(INSTANCES_ROOT_DIR, d.name);
+      const desc = readInstanceDescriptor(instDir);
+      if (desc && desc.email) {
+        syncInstanceAppStorage(instDir, desc.email, Boolean(desc.gcpProjectId), true);
+      }
+    }
+  } catch {}
+}
+sanitizeAllIsolatedInstancesAppStorage();
 
 export function normalizeIsoExpiry(rawExpiry) {
   if (!rawExpiry) {
@@ -865,22 +967,17 @@ export function scheduleDetachedLanguageServerRestart(
       const ownSidecarUrl = (sidecarPort > 1024 && sidecarPort !== 8089) ? `http://127.0.0.1:${sidecarPort}` : "";
       const savedProxy = ownSidecarUrl || proxyUrlHint || globalThis.__agyCloudCodeProxyUrl || "http://127.0.0.1:8091";
       const targetUrl = isGcpTarget ? "https://daily-cloudcode-pa.googleapis.com" : savedProxy;
-      if (!isGcpTarget) {
-        callLsRpc(activeLs, "ValidateProject", { projectId: "", location: "" }).catch(() => {});
-      }
       callLsRpc(activeLs, "SetCloudCodeURL", { url: targetUrl }).catch(() => {});
       if (restoreCredAfterSwitch) {
         try {
           writeWinCredToken(restoreCredAfterSwitch);
         } catch {}
         setTimeout(() => {
-          callLsRpc(activeLs, "ValidateProject", { projectId: "", location: "" }).catch(() => {});
           callLsRpc(activeLs, "SetCloudCodeURL", { url: targetUrl }).catch(() => {});
           callLsRpc(activeLs, "GetUserStatus", {}).catch(() => {});
           callLsRpc(activeLs, "RetrieveUserQuotaSummary", {}).catch(() => {});
         }, 1150);
         setTimeout(() => {
-          callLsRpc(activeLs, "ValidateProject", { projectId: "", location: "" }).catch(() => {});
           callLsRpc(activeLs, "GetUserStatus", {}).catch(() => {});
           callLsRpc(activeLs, "RetrieveUserQuotaSummary", {}).catch(() => {});
         }, 2100);
