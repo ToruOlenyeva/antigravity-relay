@@ -260,9 +260,27 @@ function resolveBestAvailableChannelSpec(baseModelName, relayCfg) {
   return `account:${candidates[0].acc.id}`;
 }
 
-async function ensureLocalCloudCodeProxyMounted(lsTarget, relayCfg) {
+function resolveHookInstanceMeta(relayCfg) {
+  const meta = relayCfg?.__meta__ || {};
+  const instances = meta.instances || {};
+  const envId = String(process.env.AGY_RELAY_INSTANCE_ID || "").trim();
+  if (envId && instances[envId]) {
+    return instances[envId];
+  }
+  const ppid = Number(process.ppid || 0);
+  if (ppid > 0) {
+    for (const inst of Object.values(instances)) {
+      if (inst && Number(inst.lsRpcTarget?.pid || inst.cloudCodeProxyPid || 0) === ppid) {
+        return inst;
+      }
+    }
+  }
+  return instances.main || meta;
+}
+
+async function ensureLocalCloudCodeProxyMounted(lsTarget, relayCfg, instMeta = null) {
   if (!lsTarget || !lsTarget.port || !lsTarget.csrf) return false;
-  const savedProxyUrl = String(relayCfg?.__meta__?.cloudCodeProxyUrl || "").trim();
+  const savedProxyUrl = String(instMeta?.cloudCodeProxyUrl || relayCfg?.__meta__?.cloudCodeProxyUrl || "").trim();
   const proxyUrl = /^http:\/\/127\.0\.0\.1:\d+$/i.test(savedProxyUrl) ? savedProxyUrl : "http://127.0.0.1:8091";
   const payload = Buffer.from(JSON.stringify({ url: proxyUrl }), "utf-8");
   const primaryProto = lsTarget.protocol || "http";
@@ -283,8 +301,9 @@ async function ensureLocalCloudCodeProxyMounted(lsTarget, relayCfg) {
   );
 }
 
-async function applyGcpTargetRoute(targetSpec, relayCfg, baseModelName = "", rawModelName = "") {
-  if (!relayCfg?.__meta__?.lastAppliedGcpProject) return false;
+async function applyGcpTargetRoute(targetSpec, relayCfg, baseModelName = "", rawModelName = "", instMeta = null) {
+  const activeMeta = instMeta || resolveHookInstanceMeta(relayCfg);
+  if (!activeMeta?.lastAppliedGcpProject) return false;
   if (!relayCfg.__meta__) relayCfg.__meta__ = {};
   relayCfg.__meta__.lastRoutedModel = rawModelName || baseModelName || "";
 
@@ -301,10 +320,10 @@ async function applyGcpTargetRoute(targetSpec, relayCfg, baseModelName = "", raw
       writeJsonSafe(relayConfigPath, relayCfg);
       return false;
     }
-    const lsTarget = relayCfg?.__meta__?.lsRpcTarget;
-    if (lsTarget && targetPid !== relayCfg.__meta__.lastAppliedGcpProject) {
+    const lsTarget = activeMeta?.lsRpcTarget || relayCfg?.__meta__?.lsRpcTarget;
+    if (lsTarget && targetPid !== activeMeta.lastAppliedGcpProject) {
       await callValidateProjectRpc(lsTarget, targetPid);
-      relayCfg.__meta__.lastAppliedGcpProject = targetPid;
+      activeMeta.lastAppliedGcpProject = targetPid;
     }
     relayCfg.__meta__.lastRoutedChannelId = acc.id;
     writeJsonSafe(relayConfigPath, relayCfg);
@@ -315,14 +334,15 @@ async function applyGcpTargetRoute(targetSpec, relayCfg, baseModelName = "", raw
   return false;
 }
 
-async function applyTargetRoute(targetSpec, relayCfg, baseModelName = "", rawModelName = "") {
-  if (relayCfg?.__meta__?.lastAppliedGcpProject) {
-    return applyGcpTargetRoute(targetSpec, relayCfg, baseModelName, rawModelName);
+async function applyTargetRoute(targetSpec, relayCfg, baseModelName = "", rawModelName = "", instMeta = null) {
+  const activeMeta = instMeta || resolveHookInstanceMeta(relayCfg);
+  if (activeMeta?.lastAppliedGcpProject) {
+    return applyGcpTargetRoute(targetSpec, relayCfg, baseModelName, rawModelName, activeMeta);
   }
 
-  const lsTarget = relayCfg?.__meta__?.lsRpcTarget;
+  const lsTarget = activeMeta?.lsRpcTarget || relayCfg?.__meta__?.lsRpcTarget;
   if (lsTarget) {
-    await ensureLocalCloudCodeProxyMounted(lsTarget, relayCfg);
+    await ensureLocalCloudCodeProxyMounted(lsTarget, relayCfg, activeMeta);
   }
 
   if (!relayCfg.__meta__) relayCfg.__meta__ = {};
@@ -386,26 +406,27 @@ async function main() {
       const convId = (payload.conversationId || payload.conversation_id || "").trim();
       const modelName = (payload.modelName || "").trim();
       const baseModelName = modelName.replace(/\s*\((Low|Medium|High|Max)\)\s*$/i, "").trim();
-      const isGcpMode = Boolean(relayCfg.__meta__?.lastAppliedGcpProject);
+      const activeMeta = resolveHookInstanceMeta(relayCfg);
+      const isGcpMode = Boolean(activeMeta?.lastAppliedGcpProject);
       const routeMap = isGcpMode
         ? (relayCfg.routing.gcpModels || {})
         : (relayCfg.routing.models || {});
       const targetSpec = routeMap[baseModelName] || routeMap[modelName] || "follow_current";
       if (targetSpec && targetSpec !== "follow_current") {
-        await applyTargetRoute(targetSpec, relayCfg, baseModelName, modelName);
+        await applyTargetRoute(targetSpec, relayCfg, baseModelName, modelName, activeMeta);
       } else {
-        const pinnedId = String(relayCfg.__meta__?.activeChannelId || "").trim();
+        const pinnedId = String(activeMeta?.activeChannelId || relayCfg.__meta__?.activeChannelId || "").trim();
         if (pinnedId && relayCfg.accounts?.[pinnedId]) {
-          await applyTargetRoute(`account:${pinnedId}`, relayCfg, baseModelName, modelName);
+          await applyTargetRoute(`account:${pinnedId}`, relayCfg, baseModelName, modelName, activeMeta);
         } else {
-          await applyTargetRoute("follow_current", relayCfg, baseModelName, modelName);
+          await applyTargetRoute("follow_current", relayCfg, baseModelName, modelName, activeMeta);
         }
       }
       if (convId) {
         const currentActiveChannel =
           relayCfg.__meta__?.lastRoutedChannelId ||
-          relayCfg.__meta__?.activeChannelId ||
-          `${relayCfg.__meta__?.activeEmail || ""}#${relayCfg.__meta__?.lastAppliedGcpProject || "personal"}`;
+          activeMeta?.activeChannelId ||
+          `${activeMeta?.activeEmail || ""}#${activeMeta?.lastAppliedGcpProject || "personal"}`;
         if (!relayCfg.__meta__.convLastChannelMap) relayCfg.__meta__.convLastChannelMap = {};
         if (relayCfg.__meta__.convLastChannelMap[convId] !== currentActiveChannel) {
           relayCfg.__meta__.convLastChannelMap[convId] = currentActiveChannel;

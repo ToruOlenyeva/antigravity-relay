@@ -25,10 +25,16 @@ antigravity-relay/
 │   └── proto-scrub.cjs          # Offline Protobuf thoughtSignature scrubbing engine
 ├── sidecars/
 │   └── panel/                   # Native build-free decoupled Sidecar panel
+│       ├── bridge/              # Cohesive backend domain sub-modules
+│       │   ├── cloudcode-proxy.mjs # Local transparent proxy & dual-bucket routing
+│       │   ├── oauth-launcher.mjs  # Isolated OAuth, multi-instance launcher & telemetry
+│       │   ├── quota-probe.mjs     # Official dynamic model whitelist & quota probes
+│       │   ├── signature-scrub.mjs # Offline SQLite Protobuf signature scrubber
+│       │   └── wincred-ls.mjs      # WinCred P/Invoke, multi-client OAuth & LS RPC
 │       ├── app.js               # Frontend interaction, custom dropdowns, and sync engine
 │       ├── i18n.js              # Strictly isolated English and Chinese dictionary
 │       ├── index.html           # Frontend HTML skeleton structure
-│       ├── ls-bridge.mjs        # Backend LS RPC, transparent proxy, WinCred & OAuth engine
+│       ├── ls-bridge.mjs        # Backend orchestrator and barrel export facade
 │       ├── main.mjs             # Backend dual-port HTTP router and SSE broadcaster
 │       ├── preload.js           # Host preload script
 │       ├── sidecar.json         # Antigravity Sidecar container manifest
@@ -75,13 +81,11 @@ When `ls-bridge.mjs` requests `/v1internal:fetchAvailableModels` and `/v1interna
 - Only with this native header does CloudCode return all three official quota groups for paid `Pro` and `Ultra` accounts: `Gemini Models` (5-hour + weekly limits), `Claude and GPT Models` (5-hour + weekly limits), and the dedicated third group `Gemini 4 Argon` (`bucketId: "gemini-argon-wtu-weekly"` weekly limit).
 - Handling Go `proto3` zero-value omission: when a bucket or model reports `remainingFraction === undefined` alongside a non-empty `resetTime`, the engine accurately evaluates remaining quota as `0%` (exhausted) rather than defaulting to `100%`.
 
-### 2.2 Five-Tier Channel Classification Matrix (`Free` / `Plus` / `Pro` / `Ultra` / `GCP`)
-`detectPersonalAccountTier(rawModelsListOrMap, rawTierName, rawTierId, prevIsPaid)` combines upstream `userTier` metadata with the live available model map to classify every channel:
-1. <b>`GCP` (Cloud Project Channel)</b>: Bound to an explicit `gcpProjectId` under `Agent Platform` pay-as-you-go billing or `Gemini Code Assist` enterprise quota; displays billing mode and model chips without personal percentage rings.
-2. <b>`Ultra` (`Google AI Ultra`)</b>: Identified via `ultra` in `tierName` or `tierId`, unlocking full access and maximum quota across `Gemini 4 Argon`, `Gemini 3.8 Flash`, `Claude Opus 5.5`, and `Claude Sonnet 5.5`.
-3. <b>`Pro` (Paid `Google AI Pro`)</b>: Upstream model list includes active (non-`disabled`, non-`Unavailable`) `gemini-4-argon` or `claude-opus` / `claude-sonnet` families.
-4. <b>`Plus` (`Google One AI Plus` or Promotional Partner Plans)</b>: Carries a subscription tier label while upstream marks `gemini-4-argon-disabled` (`tagTitle: "Unavailable"`), exposing `Gemini 3.8 Flash` as the primary available model.
-5. <b>`Free` (No-Subscription Personal Account)</b>: Standard Google account without a paid subscription, automatically exposing its eligible free models for personal channel routing.
+### 2.2 Five-Tier Channel Matrix (`Free` / `Plus` / `Pro` / `Ultra` / `GCP`) & Pure Dynamic Model Whitelist
+`detectPersonalAccountTier` and `parseCloudCodeModelsAndQuota` evaluate upstream metadata dynamically without static model templates:
+1. <b>`agentModelSorts` Whitelist & `Notice` Grace-Period Preservation</b>: Personal channel probes send `{}` to `/v1internal:fetchAvailableModels`, extracting `agentModelSorts[0].groups[].modelIds` and keeping models that carry `quotaInfo` and are not marked `disabled` or `Unavailable`. Models tagged `tagTitle: "Notice"` (such as `Claude Sonnet 4.6 (Thinking)`, `Claude Opus 4.6 (Thinking)`, and `GPT-OSS 120B (Medium)` on promotional partner Pro plans during their grace period) remain active until upstream flips their tag to `Unavailable`.
+2. <b>Multi-Client OAuth Refresh Pool & `refresh_token`-Scoped Isolation</b>: `wincred-ls.mjs` rotates across official OAuth clients when refreshing tokens and propagates a refreshed `access_token` strictly to channels sharing the exact same `refresh_token`, eliminating cross-contamination between `#personal` and `#gcp` channels under the same email.
+3. <b>Cross-Talk-Free Multi-Instance Launcher (`+ Multi-Instance`)</b>: `oauth-launcher.mjs` passes `--user-data-dir=<path>` (with `=`) so Chromium switches its `userData` lock directory prior to `app.requestSingleInstanceLock()`, copies `app_storage.json` to bypass the onboarding wizard, and preserves the primary window's `writer_id` while temporarily staging the target channel's credential (preventing `cred_store.go`'s 1-second polling loop from switching the primary window), automatically restoring the primary credential once the new instance logs `Auth succeeded`.
 
 ## 3. Dual-Layer Channel Architecture: Primary Reload Switch vs Reload-Free Personal Routing
 

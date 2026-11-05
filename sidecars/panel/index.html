@@ -33,19 +33,25 @@
     </div>
   </div>
 
-  <!-- 1. 会话与使用量（支持下拉选择任意已收录账号/通道查看配额） -->
+  <!-- 1. 账户模型额度（支持下拉选择任意已收录账号/通道查看配额） -->
   <div class="section-card">
     <div class="section-header">
-      <span class="section-title" id="secCurrentTitle">会话与使用量</span>
+      <span class="section-title" id="secCurrentTitle">账户模型额度</span>
     </div>
 
     <div id="sessionChannelSelectorMount"></div>
 
-    <!-- 对话算力遥测栏：输出速度 (tok/s) 与本轮 / 对话累计 Token 用量 -->
-    <div id="sessionTelemetryMount"></div>
-
     <!-- 三大真实配额池（对齐官方双行：周限额 + 5 小时限额） -->
     <div class="quota-list" id="quotaGroupsContainer"></div>
+  </div>
+
+  <!-- 2. 当前会话统计（独立板块：展示本窗口当前会话的输出速度、本轮用词、累计 Token 与按模型细分） -->
+  <div class="section-card">
+    <div class="section-header">
+      <span class="section-title" id="secTelemetryTitle">当前会话统计</span>
+    </div>
+
+    <div id="sessionTelemetryMount"></div>
   </div>
 
   <!-- 2. 通道与账号管理（个人账号通道与 GCP 计费通道分组展示） -->
@@ -56,8 +62,7 @@
         <button class="secondary small" id="btnScrubSignatures" onclick="toggleScrubSignaturesDrawer()">清除签名</button>
         <button class="secondary small" id="btnToggleMultiInstance" onclick="toggleMultiInstanceDrawer()">+ 多开实例</button>
         <button class="secondary small" id="btnCaptureCurrent" onclick="captureCurrentAccount()">收录当前</button>
-        <button class="secondary small" id="btnToggleAddGcp" onclick="toggleAddGcpDrawer()">+ 添加通道</button>
-        <button class="small" id="btnAddOAuthAccount" onclick="startIsolatedBrowserLogin()">+ 添加账号</button>
+        <button class="small" id="btnAddOAuthAccount" onclick="toggleAddGcpDrawer()">+ 添加账号</button>
       </div>
     </div>
 
@@ -92,6 +97,8 @@
   <div class="toast" id="toast"></div>
 
   <script src="/i18n.js"></script>
+  <script src="/ui-session-quota.js"></script>
+  <script src="/ui-channels-drawers.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

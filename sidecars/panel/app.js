@@ -1,3 +1,5 @@
+// 全局状态管理、主题与多语言同步、第 4 板块（模型算力路由）与 API / SSE 通信主控制器
+
 let savedLang = null;
 try { savedLang = localStorage.getItem("agy_relay_lang"); } catch (e) {}
 const defaultBrowserLang = (typeof navigator !== "undefined" && typeof navigator.language === "string" && /^zh\b/i.test(navigator.language)) ? "zh" : "en";
@@ -14,7 +16,7 @@ let state = {
   oauthPending: false
 };
 
-// 顶部「会话与使用量」当前选中的查看通道 ID（空字符串表示跟随当前激活通道）
+// 顶部「账户模型额度」当前选中的查看通道 ID（空字符串表示跟随当前激活通道）
 let selectedQuotaChannelId = "";
 // 当前处于待二次确认删除状态的通道 ID
 let pendingDeleteAccountId = "";
@@ -29,7 +31,8 @@ let selectedMultiInstanceTargetId = "";
 let expandedGcpConfigIds = new Set();
 let isAddGcpDrawerOpen = false;
 let addGcpDraft = {
-  channelType: "gcp",
+  sourceMode: "new_oauth",
+  channelType: "personal",
   email: "",
   gcpBillingMode: "agent_platform",
   gcpLocation: "global",
@@ -89,58 +92,16 @@ function toggleLanguage() {
   }).catch(() => {});
 }
 
-function formatResetCountdown(isoStr) {
-  if (!isoStr) return "";
-  const diffMs = new Date(isoStr).getTime() - Date.now();
-  if (!Number.isFinite(diffMs) || diffMs <= 0) return "";
-  const t = I18N[currentLang];
-  const totalMins = Math.floor(diffMs / 60000);
-  const days = Math.floor(totalMins / 1440);
-  const hours = Math.floor((totalMins % 1440) / 60);
-  const mins = totalMins % 60;
-  if (days > 0) return hours > 0 ? `${days}${t.unitDay} ${hours}${t.unitHour}` : `${days}${t.unitDay}`;
-  if (hours > 0) return `${hours}${t.unitHour} ${mins}${t.unitMin}`;
-  return `${mins}${t.unitMin}`;
-}
-
-function translateQuotaGroupName(rawName) {
-  if (currentLang !== "zh") return rawName;
-  const n = (rawName || "").trim();
-  if (/^gemini models$/i.test(n)) return "Gemini 模型";
-  if (/^claude and gpt models$/i.test(n)) return "Claude 和 GPT 模型";
-  return n;
-}
-
-function getChannelBadgeInfo(ch) {
-  const t = I18N[currentLang];
-  if (!ch) return { badgeType: "personal", badgeText: t.channelPersonalBadge };
-  const isGcp = ch.channelType === "gcp" || Boolean(ch.gcpProjectId);
-  if (isGcp) {
-    return { badgeType: "gcp", badgeText: t.channelGcpBadge };
-  }
-  const code = String(ch.tierCode || ch.cachedQuota?.tierCode || "").trim();
-  const tName = String(ch.tierName || ch.cachedQuota?.tierName || "").trim();
-  if (/^ultra$/i.test(code) || /ultra/i.test(tName)) {
-    return { badgeType: "ultra", badgeText: "Ultra" };
-  }
-  if (/^pro$/i.test(code) || /\bpro\b/i.test(tName)) {
-    return { badgeType: "personal", badgeText: t.channelPersonalBadge };
-  }
-  if (/^plus$/i.test(code) || /plus/i.test(tName)) {
-    return { badgeType: "plus", badgeText: "Plus" };
-  }
-  if (/^free$/i.test(code) || /free|standard/i.test(tName)) {
-    return { badgeType: "free", badgeText: "Free" };
-  }
-  return { badgeType: "personal", badgeText: t.channelPersonalBadge };
-}
-
 function applyI18n() {
   const t = I18N[currentLang];
   document.getElementById("uiAppTitle").textContent = t.appTitle;
   document.getElementById("langToggleBtn").textContent = t.langBtn;
   document.getElementById("refreshBtn").textContent = t.refreshBtn;
   document.getElementById("secCurrentTitle").textContent = t.secCurrentTitle;
+  const telTitleEl = document.getElementById("secTelemetryTitle");
+  if (telTitleEl && t.secTelemetryTitle) {
+    telTitleEl.textContent = t.secTelemetryTitle;
+  }
   document.getElementById("secAccountsTitle").textContent = t.secAccountsTitle;
   const scrubBtn = document.getElementById("btnScrubSignatures");
   if (scrubBtn) scrubBtn.textContent = t.btnScrubSignatures;
@@ -172,1161 +133,13 @@ function renderAll() {
   oauthBanner.style.display = state.oauthPending ? "flex" : "none";
 
   renderSessionSelector();
-  renderSessionTelemetry();
   renderQuotaGroups();
+  renderSessionTelemetry();
   renderScrubSignaturesDrawer();
   renderMultiInstanceDrawer();
   renderAddGcpDrawer();
   renderAccountList();
   renderRoutingList();
-}
-
-function formatCompactTokenCount(num) {
-  const n = Number(num || 0);
-  if (!Number.isFinite(n) || n <= 0) return "0";
-  if (n >= 1000000) return `${(n / 1000000).toFixed(2)}M`;
-  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
-  return String(Math.round(n));
-}
-
-function renderSessionTelemetry() {
-  const mount = document.getElementById("sessionTelemetryMount");
-  if (!mount) return;
-  mount.innerHTML = "";
-  const t = I18N[currentLang];
-  const tel = state.telemetry || {};
-
-  const bar = document.createElement("div");
-  bar.className = "telemetry-bar";
-
-  const speedVal = Number(tel.avgTokPerSec || tel.lastTokPerSec || 0);
-  const lastTurnTok = Number(tel.lastOutputTokens || 0) + Number(tel.lastInputTokens || 0);
-  const totalTok = Number(tel.sessionTotalTokens || 0);
-
-  // 1. 输出速度 (对话均值 tok/s)
-  const col1 = document.createElement("div");
-  col1.className = "telemetry-metric";
-  const lbl1 = document.createElement("span");
-  lbl1.className = "telemetry-metric-label";
-  lbl1.textContent = t.telemetrySpeedLabel;
-  const val1 = document.createElement("span");
-  val1.className = "telemetry-metric-val" + (speedVal > 0 ? " highlight" : "");
-  if (speedVal > 0) {
-    val1.textContent = `${speedVal} ${t.telemetrySpeedUnit}`;
-    const subTag = document.createElement("span");
-    subTag.className = "telemetry-sub-tag";
-    subTag.textContent = `(${t.telemetryAvgTag})`;
-    val1.appendChild(subTag);
-  } else {
-    val1.textContent = `- ${t.telemetrySpeedUnit}`;
-  }
-  col1.appendChild(lbl1);
-  col1.appendChild(val1);
-
-  // 2. 最近一轮输出 / 输入 Token
-  const col2 = document.createElement("div");
-  col2.className = "telemetry-metric";
-  const lbl2 = document.createElement("span");
-  lbl2.className = "telemetry-metric-label";
-  lbl2.textContent = t.telemetryLastTurnLabel;
-  const val2 = document.createElement("span");
-  val2.className = "telemetry-metric-val";
-  if (Number(tel.lastOutputTokens || 0) > 0) {
-    val2.textContent = `↑${formatCompactTokenCount(tel.lastInputTokens)} ↓${formatCompactTokenCount(tel.lastOutputTokens)}`;
-  } else {
-    val2.textContent = formatCompactTokenCount(lastTurnTok);
-  }
-  col2.appendChild(lbl2);
-  col2.appendChild(val2);
-
-  // 3. 当前对话累计 Token
-  const col3 = document.createElement("div");
-  col3.className = "telemetry-metric";
-  const lbl3 = document.createElement("span");
-  lbl3.className = "telemetry-metric-label";
-  lbl3.textContent = t.telemetrySessionTotalLabel;
-  const val3 = document.createElement("span");
-  val3.className = "telemetry-metric-val";
-  val3.textContent = `${formatCompactTokenCount(totalTok)} tok`;
-  if (Number(tel.turnCount || 0) > 0) {
-    const turnTag = document.createElement("span");
-    turnTag.className = "telemetry-sub-tag";
-    turnTag.textContent = `(${tel.turnCount}T)`;
-    val3.appendChild(turnTag);
-  }
-  col3.appendChild(lbl3);
-  col3.appendChild(val3);
-
-  bar.appendChild(col1);
-  bar.appendChild(col2);
-  bar.appendChild(col3);
-  mount.appendChild(bar);
-}
-
-function renderSessionSelector() {
-  const mount = document.getElementById("sessionChannelSelectorMount");
-  if (!mount) return;
-  mount.innerHTML = "";
-  const t = I18N[currentLang];
-  const active = state.activeAccount || {};
-  const activeChannelId = active.channelId || (active.email ? `${active.email}#personal` : "");
-  const accounts = state.accounts || [];
-
-  // 构建可查看余额的通道列表
-  const channelOptions = [];
-  const seen = new Set();
-
-  if (active.email && activeChannelId) {
-    const existingActive = accounts.find((a) => a.id === activeChannelId);
-    seen.add(activeChannelId);
-    channelOptions.push(existingActive || {
-      id: activeChannelId,
-      email: active.email,
-      channelType: active.gcpProjectId ? "gcp" : "personal",
-      gcpProjectId: active.gcpProjectId || ""
-    });
-  }
-
-  for (const acc of accounts) {
-    if (!seen.has(acc.id)) {
-      seen.add(acc.id);
-      channelOptions.push(acc);
-    }
-  }
-
-  const targetId = (selectedQuotaChannelId && seen.has(selectedQuotaChannelId))
-    ? selectedQuotaChannelId
-    : activeChannelId;
-  const currentViewed = channelOptions.find((c) => c.id === targetId) || {
-    id: activeChannelId,
-    email: active.email || "-",
-    channelType: active.gcpProjectId ? "gcp" : "personal",
-    gcpProjectId: active.gcpProjectId || ""
-  };
-
-  const isViewingActive = !selectedQuotaChannelId || currentViewed.id === activeChannelId;
-  const isGcp = currentViewed.channelType === "gcp" || Boolean(currentViewed.gcpProjectId);
-
-  const wrapper = document.createElement("div");
-  wrapper.className = "custom-dropdown session-selector-dropdown";
-
-  const trigger = document.createElement("button");
-  trigger.type = "button";
-  trigger.className = "dropdown-trigger";
-
-  const leftWrap = document.createElement("div");
-  leftWrap.className = "active-email-wrap";
-
-  const dot = document.createElement("span");
-  dot.className = "status-dot" + (state.lsOnline && isViewingActive ? " online" : "");
-  leftWrap.appendChild(dot);
-
-  const curBadge = getChannelBadgeInfo(currentViewed);
-  const prefixBadge = document.createElement("span");
-  prefixBadge.className = "channel-type-badge " + curBadge.badgeType;
-  prefixBadge.textContent = curBadge.badgeText;
-  leftWrap.appendChild(prefixBadge);
-
-  const emailText = document.createElement("span");
-  emailText.className = "active-email";
-  emailText.textContent = isGcp && currentViewed.gcpProjectId
-    ? `${currentViewed.email} · ${currentViewed.gcpProjectId}`
-    : (currentViewed.email || "-");
-  leftWrap.appendChild(emailText);
-
-  const rightWrap = document.createElement("div");
-  rightWrap.className = "session-trigger-right";
-
-  const arrowSvg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  arrowSvg.setAttribute("class", "dropdown-arrow");
-  arrowSvg.setAttribute("viewBox", "0 0 16 16");
-  arrowSvg.setAttribute("fill", "none");
-  arrowSvg.innerHTML = `<path d="M4 6L8 10L12 6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>`;
-  rightWrap.appendChild(arrowSvg);
-
-  trigger.appendChild(leftWrap);
-  trigger.appendChild(rightWrap);
-
-  const menu = document.createElement("div");
-  menu.className = "dropdown-menu";
-
-  for (const ch of channelOptions) {
-    const chIsGcp = ch.channelType === "gcp" || Boolean(ch.gcpProjectId);
-    const chIsActive = ch.id === currentViewed.id;
-    const item = document.createElement("div");
-    item.className = "dropdown-option" + (chIsActive ? " active" : "");
-
-    const itemLeft = document.createElement("div");
-    itemLeft.className = "active-email-wrap";
-
-    const itemDot = document.createElement("span");
-    itemDot.className = "status-dot" + (ch.id === activeChannelId && state.lsOnline ? " online" : "");
-    itemLeft.appendChild(itemDot);
-
-    const chBadge = getChannelBadgeInfo(ch);
-    const itemBadge = document.createElement("span");
-    itemBadge.className = "channel-type-badge " + chBadge.badgeType;
-    itemBadge.textContent = chBadge.badgeText;
-    itemLeft.appendChild(itemBadge);
-
-    const itemLabel = document.createElement("span");
-    itemLabel.className = "dropdown-option-label";
-    itemLabel.textContent = chIsGcp && ch.gcpProjectId
-      ? `${ch.email} · ${ch.gcpProjectId}`
-      : ch.email;
-    itemLeft.appendChild(itemLabel);
-
-    const itemRight = document.createElement("div");
-    itemRight.className = "session-trigger-right";
-
-    const checkSvg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    checkSvg.setAttribute("class", "check-icon");
-    checkSvg.setAttribute("viewBox", "0 0 16 16");
-    checkSvg.setAttribute("fill", "none");
-    checkSvg.innerHTML = `<path d="M3.5 8.5L6.5 11.5L12.5 4.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>`;
-    itemRight.appendChild(checkSvg);
-
-    item.appendChild(itemLeft);
-    item.appendChild(itemRight);
-
-    item.onclick = (ev) => {
-      ev.stopPropagation();
-      wrapper.classList.remove("open");
-      selectedQuotaChannelId = ch.id === activeChannelId ? "" : ch.id;
-      renderSessionSelector();
-      renderQuotaGroups();
-      if (ch.id !== activeChannelId) {
-        probeChannelQuotaInBackground(ch.id);
-      }
-    };
-
-    menu.appendChild(item);
-  }
-
-  trigger.onclick = (ev) => {
-    ev.stopPropagation();
-    const isOpen = wrapper.classList.contains("open");
-    document.querySelectorAll(".custom-dropdown.open").forEach((el) => el.classList.remove("open"));
-    if (!isOpen) {
-      wrapper.classList.add("open");
-    }
-  };
-
-  wrapper.appendChild(trigger);
-  wrapper.appendChild(menu);
-  mount.appendChild(wrapper);
-}
-
-async function probeChannelQuotaInBackground(channelId) {
-  try {
-    const res = await fetch("/api/probe-channel-quota", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ channelId })
-    });
-    const data = await res.json();
-    if (data && data.snapshot) {
-      state = data.snapshot;
-      renderSessionSelector();
-      renderQuotaGroups();
-    }
-  } catch (e) {}
-}
-
-function createQuotaRingSvg(pct) {
-  const clamped = Math.max(0, Math.min(100, Number(pct) || 0));
-  const r = 5.4;
-  const c = 2 * Math.PI * r;
-  const offset = c * (1 - clamped / 100);
-  const colorClass = clamped <= 10 ? " low" : clamped <= 30 ? " warn" : "";
-  const ns = "http://www.w3.org/2000/svg";
-  const svg = document.createElementNS(ns, "svg");
-  svg.setAttribute("class", "quota-ring-svg");
-  svg.setAttribute("viewBox", "0 0 14 14");
-
-  const track = document.createElementNS(ns, "circle");
-  track.setAttribute("class", "quota-ring-track");
-  track.setAttribute("cx", "7");
-  track.setAttribute("cy", "7");
-  track.setAttribute("r", String(r));
-
-  const fill = document.createElementNS(ns, "circle");
-  fill.setAttribute("class", `quota-ring-fill${colorClass}`);
-  fill.setAttribute("cx", "7");
-  fill.setAttribute("cy", "7");
-  fill.setAttribute("r", String(r));
-  fill.setAttribute("stroke-dasharray", String(c.toFixed(2)));
-  fill.setAttribute("stroke-dashoffset", String(offset.toFixed(2)));
-
-  svg.appendChild(track);
-  svg.appendChild(fill);
-  return svg;
-}
-
-// 1:1 对齐官方「使用量」弹窗：每个分组下把「周限额」和「5h limit」拆成独立行 + 右侧百分比 + SVG 圆环 + Resets in ...
-function renderQuotaGroups() {
-  const container = document.getElementById("quotaGroupsContainer");
-  container.innerHTML = "";
-  const t = I18N[currentLang];
-  const activeChannelId = state.activeAccount?.channelId || "";
-  const targetChannelId = selectedQuotaChannelId || activeChannelId;
-  const viewedAcc = (state.accounts || []).find((a) => a.id === targetChannelId);
-  const isViewingActive = !selectedQuotaChannelId || selectedQuotaChannelId === activeChannelId;
-  const isGcpChannel = Boolean(
-    viewedAcc
-      ? (viewedAcc.channelType === "gcp" || viewedAcc.gcpProjectId)
-      : state.activeAccount?.gcpProjectId
-  );
-
-  let groups = (isViewingActive
-    ? (state.quotaGroups || [])
-    : (viewedAcc?.cachedQuota?.quotaGroups || [])
-  ).filter((g) => {
-    const gName = String(g?.displayName || g?.id || "").trim();
-    const bks = Array.isArray(g?.buckets) ? g.buckets : [];
-    if (/^all\s*models$/i.test(gName) || bks.length > 3) return false;
-    return true;
-  });
-
-  // 若查看的是 GCP 通道，顶部展示当前 GCP 计费模式（按量计费 Agent Platform / Gemini Enterprise）与可用模型芯片，绝对不显示剩余百分比
-  if (isGcpChannel) {
-    const gcpCard = document.createElement("div");
-    gcpCard.className = "gcp-billing-card";
-
-    const header = document.createElement("div");
-    header.className = "gcp-billing-header";
-
-    const gcpMode = viewedAcc?.gcpBillingMode || state.activeAccount?.gcpBillingMode || "agent_platform";
-    const gcpLoc = viewedAcc?.gcpLocation || state.activeAccount?.gcpLocation || "global";
-    const locLabel = gcpLoc === "us" ? t.gcpRegionUs : gcpLoc === "eu" ? t.gcpRegionEu : t.gcpRegionGlobal;
-    const title = document.createElement("span");
-    title.className = "gcp-billing-title";
-    title.textContent = gcpMode === "gemini_enterprise"
-      ? t.gcpBillingTitleEnterprise
-      : `${t.gcpBillingTitlePayg} · ${locLabel}`;
-
-    const pill = document.createElement("span");
-    pill.className = "gcp-unlimited-pill";
-    pill.textContent = gcpMode === "gemini_enterprise" ? t.gcpPillEnterprise : t.gcpPillPayg;
-
-    header.appendChild(title);
-    header.appendChild(pill);
-    gcpCard.appendChild(header);
-
-    const gcpModels = viewedAcc?.cachedQuota?.availableModels || (isViewingActive ? state.availableModels : []) || [];
-    if (gcpModels.length > 0) {
-      const modelsLabel = document.createElement("div");
-      modelsLabel.className = "gcp-models-label";
-      modelsLabel.textContent = t.gcpModelsLabel;
-      gcpCard.appendChild(modelsLabel);
-
-      const chipsWrap = document.createElement("div");
-      chipsWrap.className = "gcp-model-chips";
-      for (const gm of gcpModels) {
-        const chip = document.createElement("span");
-        chip.className = "gcp-model-chip";
-        chip.textContent = gm.label || gm.modelId;
-        chipsWrap.appendChild(chip);
-      }
-      gcpCard.appendChild(chipsWrap);
-    }
-
-    container.appendChild(gcpCard);
-    return;
-  }
-
-  if (groups.length === 0 && !isGcpChannel) {
-    const hint = document.createElement("div");
-    hint.className = "section-hint";
-    hint.style.padding = "6px 2px";
-    hint.textContent = t.quotaNoCacheHint;
-    container.appendChild(hint);
-    return;
-  }
-
-  for (const g of groups) {
-    const buckets = g.buckets || [];
-    if (buckets.length === 0) continue;
-
-    const groupEl = document.createElement("div");
-    groupEl.className = "quota-group";
-
-    const titleEl = document.createElement("div");
-    titleEl.className = "quota-group-title";
-    titleEl.textContent = translateQuotaGroupName(g.displayName);
-    groupEl.appendChild(titleEl);
-
-    for (const b of buckets) {
-      const pct = b.remainingPct ?? 100;
-      const countdown = formatResetCountdown(b.resetTime);
-      const isWeekly = /weekly/i.test(b.window || b.bucketId || "");
-      const rowLabel = isWeekly ? t.weeklyLimitLabel : t.fiveHourLimitLabel;
-
-      const row = document.createElement("div");
-      row.className = "quota-bucket-row";
-
-      const labelEl = document.createElement("span");
-      labelEl.className = "quota-bucket-label";
-      labelEl.textContent = rowLabel;
-
-      const rightCol = document.createElement("div");
-      rightCol.className = "quota-bucket-right";
-
-      const mainLine = document.createElement("div");
-      mainLine.className = "quota-bucket-main";
-
-      const pctSpan = document.createElement("span");
-      pctSpan.className = "quota-bucket-pct" + (pct === 100 ? " full" : "");
-      pctSpan.textContent = `${t.pctLeftPrefix}${pct}${t.pctLeftSuffix}`;
-
-      mainLine.appendChild(pctSpan);
-      mainLine.appendChild(createQuotaRingSvg(pct));
-      rightCol.appendChild(mainLine);
-
-      if (countdown) {
-        const resetLine = document.createElement("div");
-        resetLine.className = "quota-bucket-reset";
-        resetLine.textContent = `${t.resetsInPrefix}${countdown}${t.resetsInSuffix}`;
-        rightCol.appendChild(resetLine);
-      }
-
-      row.appendChild(labelEl);
-      row.appendChild(rightCol);
-      groupEl.appendChild(row);
-    }
-
-    container.appendChild(groupEl);
-  }
-}
-
-function createCompactFormDropdown(options, selectedValue, onSelect) {
-  const activeOpt = options.find((o) => o.value === selectedValue) || options[0] || { value: "", label: "-" };
-
-  const wrapper = document.createElement("div");
-  wrapper.className = "custom-dropdown compact-form-dropdown";
-
-  const trigger = document.createElement("button");
-  trigger.type = "button";
-  trigger.className = "dropdown-trigger";
-
-  const leftWrap = document.createElement("div");
-  leftWrap.className = "active-email-wrap";
-
-  if (activeOpt.badgeText) {
-    const b = document.createElement("span");
-    b.className = "channel-type-badge " + (activeOpt.badgeType || "personal");
-    b.textContent = activeOpt.badgeText;
-    leftWrap.appendChild(b);
-  }
-
-  const triggerText = document.createElement("span");
-  triggerText.className = "dropdown-trigger-text";
-  triggerText.textContent = activeOpt.label;
-  leftWrap.appendChild(triggerText);
-
-  const arrowSvg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  arrowSvg.setAttribute("class", "dropdown-arrow");
-  arrowSvg.setAttribute("viewBox", "0 0 16 16");
-  arrowSvg.setAttribute("fill", "none");
-  arrowSvg.innerHTML = `<path d="M4 6L8 10L12 6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>`;
-
-  trigger.appendChild(leftWrap);
-  trigger.appendChild(arrowSvg);
-
-  const menu = document.createElement("div");
-  menu.className = "dropdown-menu";
-
-  for (const opt of options) {
-    const item = document.createElement("div");
-    item.className = "dropdown-option" + (opt.value === activeOpt.value ? " active" : "");
-
-    const itemLeft = document.createElement("div");
-    itemLeft.className = "active-email-wrap";
-
-    if (opt.badgeText) {
-      const b = document.createElement("span");
-      b.className = "channel-type-badge " + (opt.badgeType || "personal");
-      b.textContent = opt.badgeText;
-      itemLeft.appendChild(b);
-    }
-
-    const itemLabel = document.createElement("span");
-    itemLabel.className = "dropdown-option-label";
-    itemLabel.textContent = opt.label;
-    itemLeft.appendChild(itemLabel);
-
-    const checkSvg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    checkSvg.setAttribute("class", "check-icon");
-    checkSvg.setAttribute("viewBox", "0 0 16 16");
-    checkSvg.setAttribute("fill", "none");
-    checkSvg.innerHTML = `<path d="M3.5 8.5L6.5 11.5L12.5 4.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>`;
-
-    item.appendChild(itemLeft);
-    item.appendChild(checkSvg);
-
-    item.onclick = (ev) => {
-      ev.stopPropagation();
-      wrapper.classList.remove("open");
-      if (opt.value !== activeOpt.value) {
-        onSelect(opt.value);
-      }
-    };
-
-    menu.appendChild(item);
-  }
-
-  trigger.onclick = (ev) => {
-    ev.stopPropagation();
-    const isOpen = wrapper.classList.contains("open");
-    document.querySelectorAll(".custom-dropdown.open").forEach((el) => el.classList.remove("open"));
-    if (!isOpen) {
-      wrapper.classList.add("open");
-    }
-  };
-
-  wrapper.appendChild(trigger);
-  wrapper.appendChild(menu);
-  return wrapper;
-}
-
-function toggleScrubSignaturesDrawer() {
-  isScrubSigsDrawerOpen = !isScrubSigsDrawerOpen;
-  if (isScrubSigsDrawerOpen) {
-    isMultiInstanceDrawerOpen = false;
-    isAddGcpDrawerOpen = false;
-  }
-  renderScrubSignaturesDrawer();
-  renderMultiInstanceDrawer();
-  renderAddGcpDrawer();
-}
-
-function renderScrubSignaturesDrawer() {
-  const drawer = document.getElementById("scrubSigsDrawer");
-  if (!drawer) return;
-  if (!isScrubSigsDrawerOpen) {
-    drawer.style.display = "none";
-    drawer.innerHTML = "";
-    return;
-  }
-  drawer.style.display = "flex";
-  drawer.innerHTML = "";
-  const t = I18N[currentLang];
-
-  const header = document.createElement("div");
-  header.className = "gcp-drawer-header";
-  const titleSpan = document.createElement("span");
-  titleSpan.textContent = t.scrubDrawerTitle;
-  header.appendChild(titleSpan);
-  drawer.appendChild(header);
-
-  const actionRow = document.createElement("div");
-  actionRow.className = "gcp-config-row";
-  actionRow.style.justifyContent = "flex-end";
-
-  const confirmBtn = document.createElement("button");
-  confirmBtn.className = "danger small";
-  confirmBtn.textContent = t.btnConfirmScrub;
-  confirmBtn.onclick = async () => {
-    isScrubSigsDrawerOpen = false;
-    renderScrubSignaturesDrawer();
-    await handleManualScrubSignatures();
-  };
-
-  const cancelBtn = document.createElement("button");
-  cancelBtn.className = "secondary small";
-  cancelBtn.textContent = t.btnCloseGcpConfig;
-  cancelBtn.onclick = () => {
-    isScrubSigsDrawerOpen = false;
-    renderScrubSignaturesDrawer();
-  };
-
-  actionRow.appendChild(confirmBtn);
-  actionRow.appendChild(cancelBtn);
-  drawer.appendChild(actionRow);
-}
-
-function toggleMultiInstanceDrawer() {
-  isMultiInstanceDrawerOpen = !isMultiInstanceDrawerOpen;
-  if (isMultiInstanceDrawerOpen) {
-    isScrubSigsDrawerOpen = false;
-    isAddGcpDrawerOpen = false;
-  }
-  renderScrubSignaturesDrawer();
-  renderMultiInstanceDrawer();
-  renderAddGcpDrawer();
-}
-
-function renderMultiInstanceDrawer() {
-  const drawer = document.getElementById("multiInstanceDrawer");
-  if (!drawer) return;
-  if (!isMultiInstanceDrawerOpen) {
-    drawer.style.display = "none";
-    drawer.innerHTML = "";
-    return;
-  }
-  drawer.style.display = "flex";
-  drawer.innerHTML = "";
-  const t = I18N[currentLang];
-
-  const currentIsGcp = Boolean(state.activeAccount?.gcpProjectId);
-  const allAccounts = state.accounts || [];
-  // 处于个人通道时列出 GCP 通道供多开；处于 GCP 通道时列出个人账号供多开
-  const complementaryList = allAccounts.filter((acc) => {
-    const isGcp = acc.channelType === "gcp" || Boolean(acc.gcpProjectId);
-    return currentIsGcp ? !isGcp : isGcp;
-  });
-
-  const header = document.createElement("div");
-  header.className = "gcp-drawer-header";
-  const titleSpan = document.createElement("span");
-  titleSpan.textContent = currentIsGcp ? t.multiDrawerTitleFromGcp : t.multiDrawerTitleFromPersonal;
-  const closeBtn = document.createElement("button");
-  closeBtn.className = "secondary small";
-  closeBtn.textContent = t.btnCloseGcpConfig;
-  closeBtn.onclick = () => {
-    isMultiInstanceDrawerOpen = false;
-    renderMultiInstanceDrawer();
-  };
-  header.appendChild(titleSpan);
-  header.appendChild(closeBtn);
-  drawer.appendChild(header);
-
-  if (complementaryList.length === 0) {
-    const emptyHint = document.createElement("div");
-    emptyHint.className = "section-hint";
-    emptyHint.style.padding = "4px 2px";
-    emptyHint.textContent = currentIsGcp ? t.multiDrawerEmptyPersonal : t.multiDrawerEmptyGcp;
-    drawer.appendChild(emptyHint);
-    return;
-  }
-
-  if (!selectedMultiInstanceTargetId || !complementaryList.some((c) => c.id === selectedMultiInstanceTargetId)) {
-    selectedMultiInstanceTargetId = complementaryList[0].id;
-  }
-
-  const row = document.createElement("div");
-  row.className = "gcp-config-row";
-
-  const opts = complementaryList.map((acc) => {
-    const isGcp = acc.channelType === "gcp" || Boolean(acc.gcpProjectId);
-    const badgeInfo = getChannelBadgeInfo(acc);
-    return {
-      value: acc.id,
-      label: isGcp ? `${acc.email} · ${acc.gcpProjectId}` : acc.email,
-      badgeType: badgeInfo.badgeType,
-      badgeText: badgeInfo.badgeText
-    };
-  });
-
-  const targetDropdown = createCompactFormDropdown(opts, selectedMultiInstanceTargetId, (val) => {
-    selectedMultiInstanceTargetId = val;
-    renderMultiInstanceDrawer();
-  });
-
-  const launchBtn = document.createElement("button");
-  launchBtn.className = "small";
-  launchBtn.textContent = t.btnConfirmLaunchMulti;
-  launchBtn.onclick = () => {
-    if (!selectedMultiInstanceTargetId) return;
-    const targetId = selectedMultiInstanceTargetId;
-    isMultiInstanceDrawerOpen = false;
-    renderMultiInstanceDrawer();
-    launchIsolatedInstance(targetId);
-  };
-
-  row.appendChild(targetDropdown);
-  row.appendChild(launchBtn);
-  drawer.appendChild(row);
-}
-
-function toggleAddGcpDrawer() {
-  isAddGcpDrawerOpen = !isAddGcpDrawerOpen;
-  if (isAddGcpDrawerOpen) {
-    isScrubSigsDrawerOpen = false;
-    isMultiInstanceDrawerOpen = false;
-  }
-  renderScrubSignaturesDrawer();
-  renderMultiInstanceDrawer();
-  renderAddGcpDrawer();
-}
-
-function renderAddGcpDrawer() {
-  const drawer = document.getElementById("addGcpDrawer");
-  if (!drawer) return;
-  if (!isAddGcpDrawerOpen) {
-    drawer.style.display = "none";
-    drawer.innerHTML = "";
-    return;
-  }
-  drawer.style.display = "flex";
-  drawer.innerHTML = "";
-  const t = I18N[currentLang];
-
-  // 收集所有已保存了 OAuth Token 的唯一 Google 邮箱，支持免二次浏览器登录直接绑定 GCP 项目
-  const uniqueEmails = [];
-  if (state.activeAccount?.email) {
-    uniqueEmails.push(state.activeAccount.email);
-  }
-  for (const acc of (state.accounts || [])) {
-    if (acc.email && !uniqueEmails.includes(acc.email)) {
-      uniqueEmails.push(acc.email);
-    }
-  }
-  if (!addGcpDraft.email || !uniqueEmails.includes(addGcpDraft.email)) {
-    addGcpDraft.email = uniqueEmails[0] || "";
-  }
-
-  const header = document.createElement("div");
-  header.className = "gcp-drawer-header";
-  const titleSpan = document.createElement("span");
-  titleSpan.textContent = t.gcpDrawerTitle;
-  const headerBtns = document.createElement("div");
-  headerBtns.className = "btn-group";
-  if (addGcpDraft.channelType !== "personal") {
-    const scanBtn = document.createElement("button");
-    scanBtn.className = "secondary small";
-    scanBtn.textContent = t.btnDiscoverGcp;
-    scanBtn.onclick = () => handleDiscoverGcpProjects(addGcpDraft.email);
-    headerBtns.appendChild(scanBtn);
-  }
-  const closeBtn = document.createElement("button");
-  closeBtn.className = "secondary small";
-  closeBtn.textContent = t.btnCloseGcpConfig;
-  closeBtn.onclick = () => {
-    isAddGcpDrawerOpen = false;
-    renderAddGcpDrawer();
-  };
-  headerBtns.appendChild(closeBtn);
-  header.appendChild(titleSpan);
-  header.appendChild(headerBtns);
-  drawer.appendChild(header);
-
-  // 第 1 行：选择要复用凭据的账号 + 选择要添加的通道类型（云项目通道 / 个人通道）
-  const emailRow = document.createElement("div");
-  emailRow.className = "gcp-config-row";
-  const emailOpts = uniqueEmails.map((em) => ({
-    value: em,
-    label: em
-  }));
-  emailOpts.push({ value: "__new_oauth__", label: t.gcpNewBrowserLoginOpt });
-
-  const emailDropdown = createCompactFormDropdown(emailOpts, addGcpDraft.email || "__new_oauth__", (val) => {
-    if (val === "__new_oauth__") {
-      startIsolatedBrowserLogin();
-      return;
-    }
-    addGcpDraft.email = val;
-    addGcpDraft.scannedProjects = [];
-    renderAddGcpDrawer();
-  });
-
-  const existingPersonalForDraft = (state.accounts || []).find(
-    (a) => a.email === addGcpDraft.email && a.channelType !== "gcp" && !a.gcpProjectId
-  );
-  const draftPersonalBadge = existingPersonalForDraft
-    ? getChannelBadgeInfo(existingPersonalForDraft)
-    : { badgeType: "personal", badgeText: t.channelPersonalBadge };
-  const typeOpts = [
-    { value: "gcp", label: t.drawerChannelTypeGcp, badgeType: "gcp", badgeText: t.channelGcpBadge },
-    { value: "personal", label: t.drawerChannelTypePersonal, badgeType: draftPersonalBadge.badgeType, badgeText: draftPersonalBadge.badgeText }
-  ];
-  const typeDropdown = createCompactFormDropdown(typeOpts, addGcpDraft.channelType || "gcp", (val) => {
-    addGcpDraft.channelType = val;
-    renderAddGcpDrawer();
-  });
-
-  emailRow.appendChild(emailDropdown);
-  emailRow.appendChild(typeDropdown);
-  drawer.appendChild(emailRow);
-
-  // 若选择添加个人通道（例如当前处于云项目通道时补充同邮箱的个人通道）
-  if (addGcpDraft.channelType === "personal") {
-    const personalSubmitRow = document.createElement("div");
-    personalSubmitRow.className = "gcp-config-row";
-    personalSubmitRow.style.justifyContent = "flex-end";
-    const submitPersonalBtn = document.createElement("button");
-    submitPersonalBtn.className = "small";
-    submitPersonalBtn.textContent = t.btnAddGcpForEmail;
-    submitPersonalBtn.onclick = () => {
-      if (!addGcpDraft.email) return;
-      addPersonalChannelForEmail(addGcpDraft.email);
-      isAddGcpDrawerOpen = false;
-      renderAddGcpDrawer();
-    };
-    personalSubmitRow.appendChild(submitPersonalBtn);
-    drawer.appendChild(personalSubmitRow);
-    return;
-  }
-
-  // 第 2 行：选择云项目计费模式与区域（圆角悬浮下拉）
-  const modeLocRow = document.createElement("div");
-  modeLocRow.className = "gcp-config-row";
-  const modeOpts = [
-    { value: "agent_platform", label: t.gcpModePaygShort },
-    { value: "gemini_enterprise", label: t.gcpModeEnterpriseShort }
-  ];
-  const modeDropdown = createCompactFormDropdown(modeOpts, addGcpDraft.gcpBillingMode, (val) => {
-    addGcpDraft.gcpBillingMode = val;
-    renderAddGcpDrawer();
-  });
-  modeLocRow.appendChild(modeDropdown);
-
-  if (addGcpDraft.gcpBillingMode === "agent_platform") {
-    const locOpts = [
-      { value: "global", label: t.gcpRegionGlobal },
-      { value: "us", label: t.gcpRegionUs },
-      { value: "eu", label: t.gcpRegionEu }
-    ];
-    const locDropdown = createCompactFormDropdown(locOpts, addGcpDraft.gcpLocation, (val) => {
-      addGcpDraft.gcpLocation = val;
-      renderAddGcpDrawer();
-    });
-    modeLocRow.appendChild(locDropdown);
-  }
-  drawer.appendChild(modeLocRow);
-
-  // 若自动扫描发现了多个项目 ID，提供下拉列表点击填入输入框（仅单个项目时已直接填入，无需下拉）
-  if (Array.isArray(addGcpDraft.scannedProjects) && addGcpDraft.scannedProjects.length > 1) {
-    const scannedRow = document.createElement("div");
-    scannedRow.className = "gcp-config-row";
-    const scannedOpts = addGcpDraft.scannedProjects.map((p) => ({
-      value: p.projectId,
-      label: p.name && p.name !== p.projectId ? `${p.projectId} (${p.name})` : p.projectId,
-      badgeType: "gcp",
-      badgeText: t.channelGcpBadge
-    }));
-    const scannedDropdown = createCompactFormDropdown(
-      scannedOpts,
-      addGcpDraft.projectId || scannedOpts[0]?.value || "",
-      (selectedPid) => {
-        addGcpDraft.projectId = selectedPid;
-        renderAddGcpDrawer();
-      }
-    );
-    scannedRow.appendChild(scannedDropdown);
-    drawer.appendChild(scannedRow);
-  }
-
-  // 第 3 行：输入云项目编号 + 确认添加
-  const pidRow = document.createElement("div");
-  pidRow.className = "gcp-config-row";
-  const pidInput = document.createElement("input");
-  pidInput.type = "text";
-  pidInput.className = "compact-input";
-  pidInput.placeholder = t.accGcpPlaceholder;
-  pidInput.value = addGcpDraft.projectId || "";
-  pidInput.oninput = () => {
-    addGcpDraft.projectId = pidInput.value;
-  };
-  const submitBtn = document.createElement("button");
-  submitBtn.className = "small";
-  submitBtn.textContent = t.btnAddGcpForEmail;
-  submitBtn.onclick = () => {
-    const cleanPid = (pidInput.value || "").trim();
-    if (!cleanPid || !addGcpDraft.email) return;
-    addGcpChannelForEmail(addGcpDraft.email, cleanPid, addGcpDraft.gcpBillingMode, addGcpDraft.gcpLocation);
-    addGcpDraft.projectId = "";
-    addGcpDraft.scannedProjects = [];
-    isAddGcpDrawerOpen = false;
-    renderAddGcpDrawer();
-  };
-  pidRow.appendChild(pidInput);
-  pidRow.appendChild(submitBtn);
-  drawer.appendChild(pidRow);
-}
-
-function buildAccountCardElement(acc, activeEmail, activeGcp) {
-  const t = I18N[currentLang];
-  const isGcpChannel = acc.channelType === "gcp" || Boolean(acc.gcpProjectId);
-  const accPid = (acc.gcpProjectId || "").trim();
-  const isCurrent = Boolean(
-    acc.email === activeEmail &&
-    ((isGcpChannel && accPid === activeGcp && activeGcp !== "") || (!isGcpChannel && activeGcp === ""))
-  );
-  const currentIsGcp = Boolean(activeGcp);
-  const isCrossChannelSwitch = currentIsGcp !== isGcpChannel;
-
-  const card = document.createElement("div");
-  card.className = "account-card" + (isCurrent ? " current" : "");
-
-  const top = document.createElement("div");
-  top.className = "account-card-top";
-
-  const titleWrap = document.createElement("div");
-  titleWrap.className = "account-title-wrap";
-
-  const badgeInfo = getChannelBadgeInfo(acc);
-  const typeBadge = document.createElement("span");
-  typeBadge.className = "channel-type-badge " + badgeInfo.badgeType;
-  typeBadge.textContent = badgeInfo.badgeText;
-  titleWrap.appendChild(typeBadge);
-
-  const emailEl = document.createElement("span");
-  emailEl.className = "account-email";
-  emailEl.textContent = acc.email || acc.id;
-  titleWrap.appendChild(emailEl);
-
-  top.appendChild(titleWrap);
-
-  const rightBadges = document.createElement("div");
-  rightBadges.className = "btn-group";
-
-  if (isGcpChannel) {
-    const editBtn = document.createElement("button");
-    editBtn.className = "secondary small";
-    const isExpanded = expandedGcpConfigIds.has(acc.id);
-    editBtn.textContent = isExpanded ? t.btnCloseGcpConfig : t.btnEditGcpConfig;
-    editBtn.onclick = () => {
-      if (expandedGcpConfigIds.has(acc.id)) {
-        expandedGcpConfigIds.delete(acc.id);
-      } else {
-        expandedGcpConfigIds.add(acc.id);
-      }
-      renderAccountList();
-    };
-    rightBadges.appendChild(editBtn);
-  }
-
-  if (isCurrent) {
-    const curTag = document.createElement("span");
-    curTag.className = "badge";
-    curTag.textContent = t.currentBadge;
-    rightBadges.appendChild(curTag);
-  } else {
-    const switchBtn = document.createElement("button");
-    switchBtn.className = "small";
-    switchBtn.textContent = t.btnSwitchAccount;
-    switchBtn.onclick = () => {
-      // 同通道切换（个人 <-> 个人 或 GCP <-> GCP）直接无感切换且绝不清除签名；
-      // 仅当跨通道切换（个人 <-> GCP）时展开内联签名清理确认条
-      if (!isCrossChannelSwitch) {
-        pendingCrossSwitchAccountId = "";
-        switchGoogleAccount(acc.id, false);
-      } else {
-        pendingCrossSwitchAccountId = pendingCrossSwitchAccountId === acc.id ? "" : acc.id;
-        renderAccountList();
-      }
-    };
-    rightBadges.appendChild(switchBtn);
-  }
-
-  if (pendingDeleteAccountId === acc.id) {
-    const confirmBtn = document.createElement("button");
-    confirmBtn.className = "danger small";
-    confirmBtn.textContent = t.btnConfirmDelete;
-    confirmBtn.onclick = () => {
-      pendingDeleteAccountId = "";
-      clearTimeout(pendingDeleteTimer);
-      deleteAccountProfile(acc.id);
-    };
-    const cancelBtn = document.createElement("button");
-    cancelBtn.className = "secondary small";
-    cancelBtn.textContent = t.btnCancelDelete;
-    cancelBtn.onclick = () => {
-      pendingDeleteAccountId = "";
-      clearTimeout(pendingDeleteTimer);
-      renderAccountList();
-    };
-    rightBadges.appendChild(confirmBtn);
-    rightBadges.appendChild(cancelBtn);
-  } else {
-    const delBtn = document.createElement("button");
-    delBtn.className = "danger small";
-    delBtn.textContent = t.btnDeleteAccount;
-    delBtn.onclick = () => {
-      pendingDeleteAccountId = acc.id;
-      clearTimeout(pendingDeleteTimer);
-      pendingDeleteTimer = setTimeout(() => {
-        if (pendingDeleteAccountId === acc.id) {
-          pendingDeleteAccountId = "";
-          renderAccountList();
-        }
-      }, 4000);
-      renderAccountList();
-    };
-    rightBadges.appendChild(delBtn);
-  }
-
-  top.appendChild(rightBadges);
-  card.appendChild(top);
-
-  if (pendingCrossSwitchAccountId === acc.id && !isCurrent) {
-    const confirmBar = document.createElement("div");
-    confirmBar.className = "cross-switch-confirm-bar";
-
-    const promptEl = document.createElement("div");
-    promptEl.className = "cross-switch-prompt";
-    promptEl.textContent = t.crossSwitchPrompt;
-    confirmBar.appendChild(promptEl);
-
-    const actionsEl = document.createElement("div");
-    actionsEl.className = "cross-switch-actions";
-
-    const scrubAndSwitchBtn = document.createElement("button");
-    scrubAndSwitchBtn.className = "small";
-    scrubAndSwitchBtn.textContent = t.btnSwitchAndScrub;
-    scrubAndSwitchBtn.onclick = () => {
-      pendingCrossSwitchAccountId = "";
-      switchGoogleAccount(acc.id, true);
-    };
-
-    const switchOnlyBtn = document.createElement("button");
-    switchOnlyBtn.className = "secondary small";
-    switchOnlyBtn.textContent = t.btnSwitchKeepSig;
-    switchOnlyBtn.onclick = () => {
-      pendingCrossSwitchAccountId = "";
-      switchGoogleAccount(acc.id, false);
-    };
-
-    const cancelSwitchBtn = document.createElement("button");
-    cancelSwitchBtn.className = "secondary small";
-    cancelSwitchBtn.textContent = t.btnCancelDelete;
-    cancelSwitchBtn.onclick = () => {
-      pendingCrossSwitchAccountId = "";
-      renderAccountList();
-    };
-
-    actionsEl.appendChild(scrubAndSwitchBtn);
-    actionsEl.appendChild(switchOnlyBtn);
-    actionsEl.appendChild(cancelSwitchBtn);
-    confirmBar.appendChild(actionsEl);
-    card.appendChild(confirmBar);
-  }
-
-  if (isGcpChannel) {
-    const bottom = document.createElement("div");
-    bottom.className = "account-card-bottom";
-
-    const curMode = acc.gcpBillingMode === "gemini_enterprise" ? "gemini_enterprise" : "agent_platform";
-    const curLoc = ["global", "us", "eu"].includes(acc.gcpLocation) ? acc.gcpLocation : "global";
-    const modeLabel = curMode === "gemini_enterprise" ? t.gcpModeEnterpriseShort : t.gcpModePaygShort;
-    const locLabel = curLoc === "us" ? t.gcpRegionUs : curLoc === "eu" ? t.gcpRegionEu : t.gcpRegionGlobal;
-
-    const summaryBar = document.createElement("div");
-    summaryBar.className = "gcp-summary-bar";
-    const summaryText = document.createElement("span");
-    summaryText.className = "gcp-summary-text";
-    summaryText.textContent = curMode === "agent_platform"
-      ? `${modeLabel} · ${locLabel} · ${accPid}`
-      : `${modeLabel} · ${accPid}`;
-    summaryBar.appendChild(summaryText);
-    bottom.appendChild(summaryBar);
-
-    if (expandedGcpConfigIds.has(acc.id)) {
-      const configRow1 = document.createElement("div");
-      configRow1.className = "gcp-config-row";
-
-      const modeOpts = [
-        { value: "agent_platform", label: t.gcpModePaygShort },
-        { value: "gemini_enterprise", label: t.gcpModeEnterpriseShort }
-      ];
-      const modeDropdown = createCompactFormDropdown(modeOpts, curMode, (newMode) => {
-        updateAccountGcpConfig(acc.id, accPid, newMode, curLoc);
-      });
-      configRow1.appendChild(modeDropdown);
-
-      if (curMode === "agent_platform") {
-        const locOpts = [
-          { value: "global", label: t.gcpRegionGlobal },
-          { value: "us", label: t.gcpRegionUs },
-          { value: "eu", label: t.gcpRegionEu }
-        ];
-        const locDropdown = createCompactFormDropdown(locOpts, curLoc, (newLoc) => {
-          updateAccountGcpConfig(acc.id, accPid, curMode, newLoc);
-        });
-        configRow1.appendChild(locDropdown);
-      }
-
-      const configRow2 = document.createElement("div");
-      configRow2.className = "gcp-config-row";
-
-      const pidInput = document.createElement("input");
-      pidInput.type = "text";
-      pidInput.className = "compact-input";
-      pidInput.value = accPid;
-      pidInput.placeholder = t.accGcpPlaceholder;
-
-      const saveBtn = document.createElement("button");
-      saveBtn.className = "secondary small";
-      saveBtn.textContent = t.btnSaveGcpConfig;
-      saveBtn.onclick = () => {
-        updateAccountGcpConfig(acc.id, pidInput.value, curMode, curLoc);
-      };
-
-      configRow2.appendChild(pidInput);
-      configRow2.appendChild(saveBtn);
-
-      bottom.appendChild(configRow1);
-      bottom.appendChild(configRow2);
-    }
-
-    card.appendChild(bottom);
-  }
-
-  return card;
-}
-
-function renderAccountList() {
-  const container = document.getElementById("accountListContainer");
-  container.innerHTML = "";
-  const t = I18N[currentLang];
-  const accounts = state.accounts || [];
-  const activeEmail = state.activeAccount?.email || "";
-  const activeGcp = state.activeAccount?.gcpProjectId || "";
-
-  if (accounts.length === 0) {
-    const empty = document.createElement("div");
-    empty.className = "section-hint";
-    empty.style.padding = "6px 2px";
-    empty.textContent = t.emptyAccounts;
-    container.appendChild(empty);
-    return;
-  }
-
-  const personalAccounts = accounts.filter((a) => a.channelType !== "gcp" && !a.gcpProjectId);
-  const gcpAccounts = accounts.filter((a) => a.channelType === "gcp" || Boolean(a.gcpProjectId));
-
-  if (personalAccounts.length > 0) {
-    const pGroup = document.createElement("div");
-    pGroup.className = "channel-group-box";
-    const pHeader = document.createElement("div");
-    pHeader.className = "channel-group-header";
-    const pTitle = document.createElement("span");
-    pTitle.className = "channel-group-title";
-    pTitle.textContent = `${t.groupPersonalTitle} (${personalAccounts.length})`;
-    const pHint = document.createElement("span");
-    pHint.className = "channel-group-hint";
-    pHint.textContent = t.groupPersonalHint;
-    pHeader.appendChild(pTitle);
-    pHeader.appendChild(pHint);
-    pGroup.appendChild(pHeader);
-
-    for (const acc of personalAccounts) {
-      pGroup.appendChild(buildAccountCardElement(acc, activeEmail, activeGcp));
-    }
-    container.appendChild(pGroup);
-  }
-
-  if (gcpAccounts.length > 0) {
-    const gGroup = document.createElement("div");
-    gGroup.className = "channel-group-box";
-    const gHeader = document.createElement("div");
-    gHeader.className = "channel-group-header";
-    const gTitle = document.createElement("span");
-    gTitle.className = "channel-group-title";
-    gTitle.textContent = `${t.groupGcpTitle} (${gcpAccounts.length})`;
-    const gHint = document.createElement("span");
-    gHint.className = "channel-group-hint";
-    gHint.textContent = t.groupGcpHint;
-    gHeader.appendChild(gTitle);
-    gHeader.appendChild(gHint);
-    gGroup.appendChild(gHeader);
-
-    for (const acc of gcpAccounts) {
-      gGroup.appendChild(buildAccountCardElement(acc, activeEmail, activeGcp));
-    }
-    container.appendChild(gGroup);
-  }
 }
 
 function getPoolModelsForScope(isGcpScope = false) {
@@ -1657,15 +470,12 @@ function selectAutoPollChannel(accounts, m, activeChannelId, thresholdPct = 5) {
   if (candidates.length === 0) return null;
 
   candidates.sort((a, b) => {
-    // 1. 5小时限额门控：优先选 5小时限额 > 5% 的通道；当 A 达到 5小时限额 (<=5%) 时顺位切下一通道，重置后切回 A
     if (a.fiveHourAboveThreshold !== b.fiveHourAboveThreshold) {
       return a.fiveHourAboveThreshold ? -1 : 1;
     }
-    // 2. 第一层排序：按周重置时间升序（若周限额 < 5%，重置时间 +7天 进入队尾）
     if (Math.abs(a.effectiveWeeklyResetMs - b.effectiveWeeklyResetMs) > 120000) {
       return a.effectiveWeeklyResetMs - b.effectiveWeeklyResetMs;
     }
-    // 3. 第二层排序：周重置时间相近时，按 5小时重置时间升序
     if (Math.abs(a.fiveHourResetMs - b.fiveHourResetMs) > 60000) {
       return a.fiveHourResetMs - b.fiveHourResetMs;
     }
@@ -1682,7 +492,6 @@ function formatModelQuotaSubText(m, selectedRoute) {
   const activeChannelId = state.activeAccount?.channelId || "";
   const thresholdPct = Number(state.routing?.lowQuotaThresholdPct ?? 5);
 
-  // 1. 自动轮询有余额通道：按双层重置时间（第一层周限额重置，第二层5小时限额重置）优先选出可用通道
   if (selectedRoute === "auto_poll") {
     const picked = selectAutoPollChannel(accounts, m, activeChannelId, thresholdPct);
     if (picked) {
@@ -1704,7 +513,6 @@ function formatModelQuotaSubText(m, selectedRoute) {
     }
   }
 
-  // 2. 指定具体通道：显示所选通道下该模型的真实剩余百分比与重置倒计时
   if (selectedRoute && selectedRoute.startsWith("account:")) {
     const accId = selectedRoute.slice(8);
     const targetAcc = accounts.find((a) => a.id === accId);
@@ -1724,7 +532,6 @@ function formatModelQuotaSubText(m, selectedRoute) {
     }
   }
 
-  // 3. 跟随当前通道：显示当前激活通道的配额与重置时间（若当前通道为 GCP 则不显示剩余百分比；若当前通道不支持该模型则提示）
   const activeAcc = accounts.find((a) => a.id === activeChannelId);
   if (activeAcc) {
     const isGcp = activeAcc.channelType === "gcp" || Boolean(activeAcc.gcpProjectId);
@@ -1872,8 +679,15 @@ async function handleDiscoverGcpProjects(targetEmail = "") {
       showToast(`${t.toastGcpMultiFound}${list.length}`);
     } else {
       addGcpDraft.scannedProjects = [];
+      if (/^(aicode-consumers|rising-fact-|gen-lang-client-)/i.test(addGcpDraft.projectId || "")) {
+        addGcpDraft.projectId = "";
+      }
       renderAddGcpDrawer();
-      showToast(t.toastGcpNoneFound);
+      if (data.reason === "scope_insufficient" || data.reason === "api_disabled") {
+        showToast(t.toastGcpScopeRestricted || t.toastGcpNoneFound);
+      } else {
+        showToast(t.toastGcpNoneFound);
+      }
     }
   } catch (e) {}
 }
@@ -1969,9 +783,13 @@ async function captureCurrentAccount() {
   } catch (e) {}
 }
 
-async function startIsolatedBrowserLogin() {
+async function startIsolatedBrowserLogin(opts = {}) {
   try {
-    const res = await fetch("/api/start-oauth-login", { method: "POST" });
+    const res = await fetch("/api/start-oauth-login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(opts || {})
+    });
     const data = await res.json();
     if (data.snapshot) {
       state = data.snapshot;
@@ -2039,16 +857,21 @@ async function switchGoogleAccount(accountId, scrubSignatures = false) {
       body: JSON.stringify({ accountId, scrubSignatures: Boolean(scrubSignatures) })
     });
     const data = await res.json();
+    if (data && data.error) {
+      showToast(data.error);
+      if (data.snapshot) {
+        state = data.snapshot;
+        renderAll();
+      }
+      return;
+    }
     if (data.snapshot) {
       state = data.snapshot;
       renderAll();
     }
-    if (data.instant) {
-      showToast(I18N[currentLang].toastProjectSwitched);
-    } else {
-      showToast(I18N[currentLang].toastRefreshed);
-      setTimeout(() => loadSystemStatus(true, true), 1200);
-    }
+    showToast(I18N[currentLang].toastRefreshed);
+    setTimeout(() => loadSystemStatus(true, true), 1000);
+    setTimeout(() => loadSystemStatus(false, true), 2600);
   } catch (e) {}
 }
 
@@ -2067,9 +890,14 @@ async function launchIsolatedInstance(accountId) {
       });
     }
     const data = await res.json();
-    if (data && (data.success || data.launched)) {
+    if (data?.snapshot) {
+      state = data.snapshot;
+      renderAll();
+    }
+    if (data && (data.success || data.launched) && !data.error) {
       const label = data.gcpProjectId ? `${data.email} (${data.gcpProjectId})` : (data.email || accountId);
       showToast(`${I18N[currentLang].toastInstanceLaunched}${label}`);
+      setTimeout(() => loadSystemStatus(false, true), 2500);
     } else if (data?.error) {
       showToast(data.error);
     }
@@ -2117,7 +945,7 @@ function connectSse() {
         const snap = JSON.parse(ev.data);
         if (snap && !snap.error) {
           if (snap.frontendVersion) {
-            if (currentFrontendVersion && currentFrontendVersion !== snap.frontendVersion) {
+            if (currentFrontendVersion && currentFrontendVersion !== dataFrontendVer(snap)) {
               window.location.reload();
               return;
             }
@@ -2125,14 +953,31 @@ function connectSse() {
           }
           const prevOAuthEvent = snap.lastOAuthEvent;
           state = snap;
-          renderAll();
           if (prevOAuthEvent?.success && prevOAuthEvent.email) {
+            if (prevOAuthEvent.autoScanGcp) {
+              isAddGcpDrawerOpen = true;
+              addGcpDraft.sourceMode = "existing";
+              addGcpDraft.email = prevOAuthEvent.email;
+              addGcpDraft.channelType = "gcp";
+              addGcpDraft.scannedProjects = [];
+              renderAll();
+              showToast(`${I18N[currentLang].toastOAuthGcpScanReady || I18N[currentLang].toastOAuthSuccess}${prevOAuthEvent.email}`);
+              handleDiscoverGcpProjects(prevOAuthEvent.email);
+              return;
+            }
+            renderAll();
             showToast(`${I18N[currentLang].toastOAuthSuccess}${prevOAuthEvent.email}`);
+            return;
           }
+          renderAll();
         }
       } catch (e) {}
     };
   } catch (e) {}
+}
+
+function dataFrontendVer(snap) {
+  return snap?.frontendVersion || "";
 }
 
 applyI18n();

@@ -8,12 +8,41 @@ import {
   APP_STORAGE_FILE,
   PRELOAD_SDK_PATH,
   readRelayConfig,
-  writeRelayConfig
+  writeRelayConfig,
+  resolveCurrentInstanceContext,
+  getActiveIsolatedSidecarPorts
 } from "./store.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const PORT = Number(process.env.ANTIGRAVITY_SIDECAR_WEB_PORT || process.env.PORT || 8089);
+globalThis.__AGY_RELAY_MAIN_V2__ = true;
+
+function checkParentLanguageServerAlive() {
+  const ppid = Number(process.ppid || 0);
+  if (ppid <= 0) return true;
+  try {
+    process.kill(ppid, 0);
+    return true;
+  } catch (err) {
+    if (err && err.code === "ESRCH") {
+      process.exit(0);
+    }
+    return true;
+  }
+}
+
+setInterval(checkParentLanguageServerAlive, 5000).unref();
+try {
+  process.stdin.on("end", () => process.exit(0));
+  process.stdin.on("close", () => process.exit(0));
+} catch {}
+
+function restartSelfGracefully() {
+  setTimeout(() => {
+    process.exit(0);
+  }, 120);
+}
 
 let lsBridge = await import("./ls-bridge.mjs");
 
@@ -21,16 +50,7 @@ const bridgePath = path.join(__dirname, "ls-bridge.mjs");
 try {
   fs.watchFile(bridgePath, { interval: 1000 }, async (curr, prev) => {
     if (curr.mtimeMs !== prev.mtimeMs) {
-      try {
-        lsBridge = await import(`./ls-bridge.mjs?v=${Date.now()}`);
-        const snap = await lsBridge.fetchLiveSystemSnapshot(false);
-        broadcastSnapshot(snap);
-        await lsBridge.probeAllChannelsQuotaSnapshot().catch(() => {});
-        const updatedSnap = await lsBridge.fetchLiveSystemSnapshot(false);
-        broadcastSnapshot(updatedSnap);
-      } catch (e) {
-        console.error("[AGY Relay Sidecar] Hot reload ls-bridge error:", e?.message || e);
-      }
+      restartSelfGracefully();
     }
   });
 } catch (e) {}
@@ -47,7 +67,7 @@ let latestSnapshot = null;
 
 function getFrontendAssetsVersion() {
   let ver = 0;
-  for (const f of ["index.html", "styles.css", "i18n.js", "app.js"]) {
+  for (const f of ["index.html", "styles.css", "i18n.js", "ui-session-quota.js", "ui-channels-drawers.js", "app.js"]) {
     try {
       ver += Math.floor(fs.statSync(path.join(__dirname, f)).mtimeMs);
     } catch {}
@@ -116,7 +136,7 @@ async function requestHandler(req, res) {
   }
 
   // 透明反向代理拦截 Language Server 发往 /v1internal* 的 CloudCode 请求（个人模式下实现免重载跨账号 Token 替换与内存签名剥离）
-  if (pathname.startsWith("/v1internal")) {
+  if (pathname.startsWith("/v1internal") || pathname === "/__agy_proxy_ping") {
     try {
       const rawBodyBuf = await readRawBufferBody(req);
       await lsBridge.proxyCloudCodeRequest(req, res, rawBodyBuf);
@@ -172,12 +192,13 @@ async function requestHandler(req, res) {
     return;
   }
 
-  if (req.method === "GET" && pathname === "/app.js") {
+  if (req.method === "GET" && (pathname === "/app.js" || pathname === "/ui-session-quota.js" || pathname === "/ui-channels-drawers.js")) {
+    const scriptName = pathname.slice(1);
     res.writeHead(200, {
       "Content-Type": "application/javascript; charset=utf-8",
       "Cache-Control": "no-store, no-cache, must-revalidate"
     });
-    res.end(fs.readFileSync(path.join(__dirname, "app.js"), "utf-8"));
+    res.end(fs.readFileSync(path.join(__dirname, scriptName), "utf-8"));
     return;
   }
 
@@ -247,10 +268,11 @@ async function requestHandler(req, res) {
     }
   }
 
-  // 2. 呼出 Antigravity 官方浏览器登录界面（旁路零打断）
+  // 2. 呼出 Antigravity 官方浏览器登录界面（旁路零打断，支持传入个人或 GCP 目标通道参数）
   if (req.method === "POST" && pathname === "/api/start-oauth-login") {
     try {
-      const info = await lsBridge.startIsolatedOAuthFlow(async (result) => {
+      const oauthOpts = await readJsonBody(req).catch(() => ({}));
+      const info = await lsBridge.startIsolatedOAuthFlow(oauthOpts, async (result) => {
         try {
           const snap = await lsBridge.fetchLiveSystemSnapshot(false);
           snap.lastOAuthEvent = result;
@@ -286,13 +308,21 @@ async function requestHandler(req, res) {
     }
   }
 
-  // 5. 切换通道或谷歌账号（写入凭据并异步调度重启 Language Server，先返回 HTTP 响应防止被宿主重载打断）
+  // 5. 切换通道或谷歌账号（写入凭据并异步调度重启 Language Server，先返回 HTTP 响应防止被宿主重载打断，并自动延时跟进推送 SSE 快照）
   if (req.method === "POST" && pathname === "/api/switch-account") {
     try {
       const { accountId, scrubSignatures } = await readJsonBody(req);
       const result = await lsBridge.switchActiveGoogleAccount(accountId, { scrubSignatures });
       const snap = await lsBridge.fetchLiveSystemSnapshot(false);
       broadcastSnapshot(snap);
+      for (const delayMs of [1200, 2600, 4500]) {
+        setTimeout(async () => {
+          try {
+            const followSnap = await lsBridge.fetchLiveSystemSnapshot(false);
+            broadcastSnapshot(followSnap);
+          } catch {}
+        }, delayMs);
+      }
       return sendJson(res, 200, { success: true, ...result, snapshot: snap });
     } catch (err) {
       return sendJson(res, 500, { success: false, error: err.message });
@@ -316,7 +346,17 @@ async function requestHandler(req, res) {
     try {
       const { accountId } = await readJsonBody(req);
       const result = await lsBridge.launchIsolatedAntigravityInstance(accountId || "");
-      return sendJson(res, 200, { success: true, ...result });
+      const snap = await lsBridge.fetchLiveSystemSnapshot(false);
+      broadcastSnapshot(snap);
+      for (const delayMs of [2500, 6000]) {
+        setTimeout(async () => {
+          try {
+            const followSnap = await lsBridge.fetchLiveSystemSnapshot(false);
+            broadcastSnapshot(followSnap);
+          } catch {}
+        }, delayMs);
+      }
+      return sendJson(res, 200, { success: true, ...result, snapshot: snap });
     } catch (err) {
       return sendJson(res, 500, { success: false, error: err.message });
     }
@@ -539,10 +579,14 @@ server.listen(PORT, "127.0.0.1", () => {
   console.log(`[AGY Relay Sidecar] Listening on http://127.0.0.1:${PORT}`);
 });
 
-if (PORT !== 8089) {
+const startupInstanceCtx = resolveCurrentInstanceContext();
+
+if (PORT !== 8089 && !startupInstanceCtx.isIsolatedInstance) {
   const standaloneServer = http.createServer(requestHandler);
+  let retriedStandalone8089 = false;
   standaloneServer.on("error", (err) => {
-    if (err && err.code === "EADDRINUSE") {
+    if (!retriedStandalone8089 && err && err.code === "EADDRINUSE") {
+      retriedStandalone8089 = true;
       try {
         const evictReq = http.request({
           hostname: "127.0.0.1",
@@ -556,7 +600,7 @@ if (PORT !== 8089) {
       } catch {}
       setTimeout(() => {
         try { standaloneServer.listen(8089, "127.0.0.1"); } catch {}
-      }, 350);
+      }, 400);
     }
   });
   try {
@@ -569,15 +613,19 @@ if (PORT !== 8089) {
 const boundPorts = new Set([PORT, 8089]);
 function bindAdditionalRelayPorts() {
   try {
+    const ctx = resolveCurrentInstanceContext();
+    if (ctx.isIsolatedInstance) return;
+    const isolatedPorts = getActiveIsolatedSidecarPorts();
     const candidatePorts = new Set();
     const cfg = readRelayConfig();
-    if (PORT !== 8089 && !cfg.__meta__.recentSidecarPorts.includes(PORT)) {
+    if (PORT !== 8089 && !isolatedPorts.has(PORT) && !cfg.__meta__.recentSidecarPorts.includes(PORT)) {
       cfg.__meta__.recentSidecarPorts.unshift(PORT);
       cfg.__meta__.recentSidecarPorts = cfg.__meta__.recentSidecarPorts.slice(0, 10);
       writeRelayConfig(cfg);
     }
     for (const p of cfg.__meta__.recentSidecarPorts) {
-      if (Number(p) > 1024) candidatePorts.add(Number(p));
+      const num = Number(p);
+      if (num > 1024 && !isolatedPorts.has(num)) candidatePorts.add(num);
     }
     if (fs.existsSync(APP_STORAGE_FILE)) {
       const rawText = fs.readFileSync(APP_STORAGE_FILE, "utf-8");
@@ -585,7 +633,7 @@ function bindAdditionalRelayPorts() {
       let match;
       while ((match = regex.exec(rawText)) !== null) {
         const num = Number(match[1]);
-        if (num > 1024 && num < 65535) candidatePorts.add(num);
+        if (num > 1024 && num < 65535 && !isolatedPorts.has(num)) candidatePorts.add(num);
       }
     }
     for (const p of candidatePorts) {
@@ -602,8 +650,10 @@ function bindAdditionalRelayPorts() {
   } catch {}
 }
 
-bindAdditionalRelayPorts();
-setTimeout(bindAdditionalRelayPorts, 4000);
+if (!startupInstanceCtx.isIsolatedInstance) {
+  bindAdditionalRelayPorts();
+  setTimeout(bindAdditionalRelayPorts, 4000);
+}
 
 // 启动即预热一次实时状态快照与全通道余额探测，同步更新 agy-relay-config.json 与 SSE 缓存
 lsBridge.fetchLiveSystemSnapshot(false)

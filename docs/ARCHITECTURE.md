@@ -25,10 +25,16 @@ antigravity-relay/
 │   └── proto-scrub.cjs          # Protobuf 跨通道思考签名离线剥离引擎
 ├── sidecars/
 │   └── panel/                   # 原生免构建前后端物理分离 Sidecar 面板
+│       ├── bridge/              # 后端高内聚业务子模块目录
+│       │   ├── cloudcode-proxy.mjs # 本地透明反向代理与双层重置算力路由
+│       │   ├── oauth-launcher.mjs  # 旁路 OAuth 登录、多开隔离实例与会话遥测
+│       │   ├── quota-probe.mjs     # 官方动态模型白名单与三配额池探针引擎
+│       │   ├── signature-scrub.mjs # SQLite Protobuf 思维签名离线无损剥离器
+│       │   └── wincred-ls.mjs      # WinCred 凭据读写、多客户端刷新与 LS RPC
 │       ├── app.js               # 前端核心交互、自定义下拉与状态同步引擎
 │       ├── i18n.js              # 前端中英双语严格隔离词典
 │       ├── index.html           # 前端纯骨架页面
-│       ├── ls-bridge.mjs        # 后端 LS RPC、透明代理、WinCred 与 OAuth 引擎
+│       ├── ls-bridge.mjs        # 后端主协调器与统一导出门面 (Barrel Facade)
 │       ├── main.mjs             # 后端双端口 HTTP 路由与 SSE 实时广播入口
 │       ├── preload.js           # 宿主预加载脚本
 │       ├── sidecar.json         # Antigravity Sidecar 容器元数据契约
@@ -75,13 +81,11 @@ antigravity-relay/
 - 仅在该原生请求头下，云端才会对付费 `Pro` 与 `Ultra` 账户完整下发 `Gemini Models`（5 小时 + 周限额）、`Claude and GPT Models`（5 小时 + 周限额）以及独立的第 3 配额组 `Gemini 4 Argon`（`bucketId: "gemini-argon-wtu-weekly"` 周限额）。
 - 针对 Go `proto3` 零值序列化省略机制：当某个配额桶或模型的 `remainingFraction === undefined` 但存在 `resetTime` 时，系统精确判定为 `0%`（已耗尽），杜绝误判为 `100%`。
 
-### 2.2 五大通道等级（`Free` / `Plus` / `Pro` / `Ultra` / `GCP`）裁决矩阵
-系统通过 `detectPersonalAccountTier(rawModelsListOrMap, rawTierName, rawTierId, prevIsPaid)` 综合云端返回的 `userTier` 信息与真实可用模型集完成全等级标定：
-1. <b>`GCP`（云项目通道）</b>：绑定独立 `gcpProjectId`，采用 `Agent Platform` 按量计费或 `Gemini Code Assist` 企业共享配额，卡片与顶部面板展示计费模式与可用模型芯片，不展示个人百分比圆环。
-2. <b>`Ultra`（`Google AI Ultra`）</b>：`tierName` 或 `tierId` 匹配 `ultra` 标识，支持全系 `Gemini 4 Argon`、`Gemini 3.8 Flash`、`Claude Opus 5.5` 与 `Claude Sonnet 5.5` 并享有最高配额池。
-3. <b>`Pro`（付费 `Google AI Pro`）</b>：云端返回可用（非 `disabled` 且无 `Unavailable` 标签）的 `gemini-4-argon` 或 `claude-opus` / `claude-sonnet` 模型家族。
-4. <b>`Plus`（`Google One AI Plus` 或 Jio 等渠道合作赠送版）</b>：账号虽带有会员标识，但云端下发 `gemini-4-argon-disabled`（`tagTitle: "Unavailable"`），仅开放 `Gemini 3.8 Flash` 等基础主力模型。
-5. <b>`Free`（无会员免费个人账号）</b>：未订阅任何付费层级的普通 Google 个人账号，自动提取其真实开放的免费可用模型并参与个人通道算力路由。
+### 2.2 五大通道等级（`Free` / `Plus` / `Pro` / `Ultra` / `GCP`）与官方纯动态模型白名单
+系统通过 `detectPersonalAccountTier` 与 `parseCloudCodeModelsAndQuota` 严格按照 Google 官方下发的元数据实时判定通道等级与可用模型（零静态硬编码模板）：
+1. <b>`agentModelSorts` 推荐白名单与 `Notice` 过渡期模型保留</b>：个人通道向 `/v1internal:fetchAvailableModels` 传入 `{}` 空载荷，提取官方 `agentModelSorts[0].groups[].modelIds` 白名单并过滤存在 `quotaInfo` 且非 `disabled` / `Unavailable` 的模型；对带有 `tagTitle: "Notice"`（如 Jio 渠道合作版 Pro 在过渡期内仍开放的 `Claude Sonnet 4.6 (Thinking)`、`Claude Opus 4.6 (Thinking)`、`GPT-OSS 120B (Medium)`）的模型完整保留，直至官方切换为 `Unavailable` 时自动下线。
+2. <b>多 OAuth Client 轮询池与按 `refresh_token` 严格隔离同步</b>：`wincred-ls.mjs` 内置多组官方 OAuth Client 轮询刷新池，且每次刷新获得的 `access_token` 仅同步至持有相同 `refresh_token` 的通道卡片，彻底杜绝同邮箱 `#personal` 与 `#gcp` 令牌交叉覆盖。
+3. <b>独立多开实例（`+ 多开实例`）免串扰架构</b>：`oauth-launcher.mjs` 通过等号拼接的 `--user-data-dir=<path>` 参数让 Chromium 在 `app.requestSingleInstanceLock()` 前切换独立用户目录锁，同步复制 `app_storage.json` 跳过首次向导直达 Hub，并在临时写入目标通道凭据时保留主窗口原本的 `writer_id`（防止主窗口 `cred_store.go` 1s 轮询被误触发切换），待新实例日志出现 `Auth succeeded` 后自动还原主实例凭据。
 
 ## 3. 双层通道架构：主通道重载切换 vs 个人通道免重载路由
 

@@ -1,0 +1,524 @@
+// 第 1 板块（账户模型额度）与第 2 板块（当前会话统计）视图渲染模块
+
+function formatResetCountdown(isoStr) {
+  if (!isoStr) return "";
+  const diffMs = new Date(isoStr).getTime() - Date.now();
+  if (!Number.isFinite(diffMs) || diffMs <= 0) return "";
+  const t = I18N[currentLang];
+  const totalMins = Math.floor(diffMs / 60000);
+  const days = Math.floor(totalMins / 1440);
+  const hours = Math.floor((totalMins % 1440) / 60);
+  const mins = totalMins % 60;
+  if (days > 0) return hours > 0 ? `${days}${t.unitDay} ${hours}${t.unitHour}` : `${days}${t.unitDay}`;
+  if (hours > 0) return `${hours}${t.unitHour} ${mins}${t.unitMin}`;
+  return `${mins}${t.unitMin}`;
+}
+
+function translateQuotaGroupName(rawName) {
+  if (currentLang !== "zh") return rawName;
+  const n = (rawName || "").trim();
+  if (/^gemini models$/i.test(n)) return "Gemini 模型";
+  if (/^claude and gpt models$/i.test(n)) return "Claude 和 GPT 模型";
+  return n;
+}
+
+function getChannelBadgeInfo(ch) {
+  const t = I18N[currentLang];
+  if (!ch) return { badgeType: "personal", badgeText: t.channelPersonalBadge };
+  const isGcp = ch.channelType === "gcp" || Boolean(ch.gcpProjectId);
+  if (isGcp) {
+    return { badgeType: "gcp", badgeText: t.channelGcpBadge };
+  }
+  const code = String(ch.tierCode || ch.cachedQuota?.tierCode || "").trim();
+  const tName = String(ch.tierName || ch.cachedQuota?.tierName || "").trim();
+  if (/^ultra$/i.test(code) || /ultra/i.test(tName)) {
+    return { badgeType: "ultra", badgeText: "Ultra" };
+  }
+  if (/^pro$/i.test(code) || /\bpro\b/i.test(tName)) {
+    return { badgeType: "personal", badgeText: t.channelPersonalBadge };
+  }
+  if (/^plus$/i.test(code) || /plus/i.test(tName)) {
+    return { badgeType: "plus", badgeText: "Plus" };
+  }
+  if (/^free$/i.test(code) || /free|standard/i.test(tName)) {
+    return { badgeType: "free", badgeText: "Free" };
+  }
+  return { badgeType: "personal", badgeText: t.channelPersonalBadge };
+}
+
+function formatCompactTokenCount(num) {
+  const n = Number(num || 0);
+  if (!Number.isFinite(n) || n <= 0) return "0";
+  if (n >= 1000000) return `${(n / 1000000).toFixed(2)}M`;
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
+  return String(Math.round(n));
+}
+
+function renderSessionTelemetry() {
+  const mount = document.getElementById("sessionTelemetryMount");
+  if (!mount) return;
+  mount.innerHTML = "";
+  const t = I18N[currentLang];
+  const tel = state.telemetry || {};
+
+  const card = document.createElement("div");
+  card.className = "telemetry-card";
+
+  const bar = document.createElement("div");
+  bar.className = "telemetry-bar";
+
+  const lastInTok = Number(tel.lastInputTokens || 0);
+  const lastOutTok = Number(tel.lastOutputTokens || 0);
+  const lastCtxTok = Number(tel.lastContextTokens || (lastInTok + Number(tel.lastCacheTokens || 0)));
+  const cacheTotalTok = Number(tel.sessionCacheTokens || 0);
+  const totalTok = Number(tel.sessionTotalTokens || 0);
+  const cacheHitPct = Number(tel.cacheHitPct || 0);
+  const turnCount = Number(tel.turnCount || 0);
+  const checkpointCount = Number(tel.checkpointCount || 0);
+
+  // 1. 本轮用词 (官方 input_tokens / output_tokens + 当前实时上下文窗口长度)
+  const col1 = document.createElement("div");
+  col1.className = "telemetry-metric";
+  const lbl1 = document.createElement("span");
+  lbl1.className = "telemetry-metric-label";
+  lbl1.textContent = t.telemetryLastTurnLabel;
+  const val1 = document.createElement("span");
+  val1.className = "telemetry-metric-val";
+  if (lastOutTok > 0 || lastInTok > 0) {
+    val1.textContent = `↑${formatCompactTokenCount(lastInTok)} ↓${formatCompactTokenCount(lastOutTok)}`;
+    if (lastCtxTok > 0) {
+      const ctxTag = document.createElement("span");
+      ctxTag.className = "telemetry-sub-tag";
+      ctxTag.textContent = `(${t.telemetryContextPrefix} ${formatCompactTokenCount(lastCtxTok)})`;
+      val1.appendChild(ctxTag);
+    }
+  } else {
+    val1.textContent = "0";
+  }
+  col1.appendChild(lbl1);
+  col1.appendChild(val1);
+
+  // 2. 前缀缓存命中 (官方 cache_read_tokens 累计总量 + 缓存命中率)
+  const col2 = document.createElement("div");
+  col2.className = "telemetry-metric";
+  const lbl2 = document.createElement("span");
+  lbl2.className = "telemetry-metric-label";
+  lbl2.textContent = t.telemetryCacheTotalLabel;
+  const val2 = document.createElement("span");
+  val2.className = "telemetry-metric-val" + (cacheTotalTok > 0 ? " highlight" : "");
+  val2.textContent = `${formatCompactTokenCount(cacheTotalTok)} tok`;
+  if (cacheHitPct > 0) {
+    const pctTag = document.createElement("span");
+    pctTag.className = "telemetry-sub-tag";
+    pctTag.textContent = `(${cacheHitPct}%)`;
+    val2.appendChild(pctTag);
+  }
+  col2.appendChild(lbl2);
+  col2.appendChild(val2);
+
+  // 3. 当前会话累计 (官方累计 input + output + 对话轮数 + CHECKPOINT 自动压缩次数)
+  const col3 = document.createElement("div");
+  col3.className = "telemetry-metric";
+  const lbl3 = document.createElement("span");
+  lbl3.className = "telemetry-metric-label";
+  lbl3.textContent = t.telemetrySessionTotalLabel;
+  const val3 = document.createElement("span");
+  val3.className = "telemetry-metric-val";
+  val3.textContent = `${formatCompactTokenCount(totalTok)} tok`;
+  if (turnCount > 0 || checkpointCount > 0) {
+    const turnTag = document.createElement("span");
+    turnTag.className = "telemetry-sub-tag";
+    const compressSuffix = checkpointCount > 0
+      ? ` · ${t.telemetryCompressPrefix}${checkpointCount}${t.telemetryCompressUnit}`
+      : "";
+    turnTag.textContent = `(${turnCount}${t.telemetryTurnUnit || "T"}${compressSuffix})`;
+    val3.appendChild(turnTag);
+  }
+  col3.appendChild(lbl3);
+  col3.appendChild(val3);
+
+  bar.appendChild(col1);
+  bar.appendChild(col2);
+  bar.appendChild(col3);
+  card.appendChild(bar);
+
+  // 4. 下半部分：本会话内按官方可用模型细分列表
+  const byModel = Array.isArray(tel.byModel) ? tel.byModel : [];
+  if (byModel.length > 0) {
+    const modelsList = document.createElement("div");
+    modelsList.className = "telemetry-models-list";
+
+    for (const m of byModel) {
+      const mRow = document.createElement("div");
+      mRow.className = "telemetry-model-row";
+
+      const mLeft = document.createElement("span");
+      mLeft.className = "telemetry-model-name";
+      mLeft.textContent = m.modelName;
+      if (Number(m.turns || 0) > 0) {
+        const mTurn = document.createElement("span");
+        mTurn.className = "telemetry-sub-tag";
+        mTurn.textContent = `(${m.turns}${t.telemetryTurnUnit || "T"})`;
+        mLeft.appendChild(mTurn);
+      }
+
+      const mRight = document.createElement("div");
+      mRight.className = "telemetry-model-stats";
+
+      if (Number(m.cacheTokens || 0) > 0) {
+        const mCache = document.createElement("span");
+        mCache.className = "telemetry-model-cache";
+        mCache.textContent = `${t.telemetryCacheTag} ${formatCompactTokenCount(m.cacheTokens)} (${m.cacheHitPct || 0}%)`;
+        mRight.appendChild(mCache);
+      }
+
+      const mTok = document.createElement("span");
+      mTok.className = "telemetry-model-tokens";
+      mTok.textContent = `↑${formatCompactTokenCount(m.inputTokens)} ↓${formatCompactTokenCount(m.outputTokens)}`;
+      mRight.appendChild(mTok);
+
+      mRow.appendChild(mLeft);
+      mRow.appendChild(mRight);
+      modelsList.appendChild(mRow);
+    }
+
+    card.appendChild(modelsList);
+  }
+
+  mount.appendChild(card);
+}
+
+function renderSessionSelector() {
+  const mount = document.getElementById("sessionChannelSelectorMount");
+  if (!mount) return;
+  mount.innerHTML = "";
+  const active = state.activeAccount || {};
+  const activeChannelId = active.channelId || (active.email ? `${active.email}#personal` : "");
+  const accounts = state.accounts || [];
+
+  // 构建可查看余额的通道列表
+  const channelOptions = [];
+  const seen = new Set();
+
+  if (active.email && activeChannelId) {
+    const existingActive = accounts.find((a) => a.id === activeChannelId);
+    seen.add(activeChannelId);
+    channelOptions.push(existingActive || {
+      id: activeChannelId,
+      email: active.email,
+      channelType: active.gcpProjectId ? "gcp" : "personal",
+      gcpProjectId: active.gcpProjectId || ""
+    });
+  }
+
+  for (const acc of accounts) {
+    if (!seen.has(acc.id)) {
+      seen.add(acc.id);
+      channelOptions.push(acc);
+    }
+  }
+
+  const targetId = (selectedQuotaChannelId && seen.has(selectedQuotaChannelId))
+    ? selectedQuotaChannelId
+    : activeChannelId;
+  const currentViewed = channelOptions.find((c) => c.id === targetId) || {
+    id: activeChannelId,
+    email: active.email || "-",
+    channelType: active.gcpProjectId ? "gcp" : "personal",
+    gcpProjectId: active.gcpProjectId || ""
+  };
+
+  const isViewingActive = !selectedQuotaChannelId || currentViewed.id === activeChannelId;
+  const isGcp = currentViewed.channelType === "gcp" || Boolean(currentViewed.gcpProjectId);
+
+  const wrapper = document.createElement("div");
+  wrapper.className = "custom-dropdown session-selector-dropdown";
+
+  const trigger = document.createElement("button");
+  trigger.type = "button";
+  trigger.className = "dropdown-trigger";
+
+  const leftWrap = document.createElement("div");
+  leftWrap.className = "active-email-wrap";
+
+  const dot = document.createElement("span");
+  dot.className = "status-dot" + (state.lsOnline && isViewingActive ? " online" : "");
+  leftWrap.appendChild(dot);
+
+  const curBadge = getChannelBadgeInfo(currentViewed);
+  const prefixBadge = document.createElement("span");
+  prefixBadge.className = "channel-type-badge " + curBadge.badgeType;
+  prefixBadge.textContent = curBadge.badgeText;
+  leftWrap.appendChild(prefixBadge);
+
+  const emailText = document.createElement("span");
+  emailText.className = "active-email";
+  emailText.textContent = isGcp && currentViewed.gcpProjectId
+    ? `${currentViewed.email} · ${currentViewed.gcpProjectId}`
+    : (currentViewed.email || "-");
+  leftWrap.appendChild(emailText);
+
+  const rightWrap = document.createElement("div");
+  rightWrap.className = "session-trigger-right";
+
+  const arrowSvg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  arrowSvg.setAttribute("class", "dropdown-arrow");
+  arrowSvg.setAttribute("viewBox", "0 0 16 16");
+  arrowSvg.setAttribute("fill", "none");
+  arrowSvg.innerHTML = `<path d="M4 6L8 10L12 6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>`;
+  rightWrap.appendChild(arrowSvg);
+
+  trigger.appendChild(leftWrap);
+  trigger.appendChild(rightWrap);
+
+  const menu = document.createElement("div");
+  menu.className = "dropdown-menu";
+
+  for (const ch of channelOptions) {
+    const chIsGcp = ch.channelType === "gcp" || Boolean(ch.gcpProjectId);
+    const chIsActive = ch.id === currentViewed.id;
+    const item = document.createElement("div");
+    item.className = "dropdown-option" + (chIsActive ? " active" : "");
+
+    const itemLeft = document.createElement("div");
+    itemLeft.className = "active-email-wrap";
+
+    const itemDot = document.createElement("span");
+    itemDot.className = "status-dot" + (ch.id === activeChannelId && state.lsOnline ? " online" : "");
+    itemLeft.appendChild(itemDot);
+
+    const chBadge = getChannelBadgeInfo(ch);
+    const itemBadge = document.createElement("span");
+    itemBadge.className = "channel-type-badge " + chBadge.badgeType;
+    itemBadge.textContent = chBadge.badgeText;
+    itemLeft.appendChild(itemBadge);
+
+    const itemLabel = document.createElement("span");
+    itemLabel.className = "dropdown-option-label";
+    itemLabel.textContent = chIsGcp && ch.gcpProjectId
+      ? `${ch.email} · ${ch.gcpProjectId}`
+      : ch.email;
+    itemLeft.appendChild(itemLabel);
+
+    const itemRight = document.createElement("div");
+    itemRight.className = "session-trigger-right";
+
+    const checkSvg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    checkSvg.setAttribute("class", "check-icon");
+    checkSvg.setAttribute("viewBox", "0 0 16 16");
+    checkSvg.setAttribute("fill", "none");
+    checkSvg.innerHTML = `<path d="M3.5 8.5L6.5 11.5L12.5 4.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>`;
+    itemRight.appendChild(checkSvg);
+
+    item.appendChild(itemLeft);
+    item.appendChild(itemRight);
+
+    item.onclick = (ev) => {
+      ev.stopPropagation();
+      wrapper.classList.remove("open");
+      selectedQuotaChannelId = ch.id === activeChannelId ? "" : ch.id;
+      renderSessionSelector();
+      renderQuotaGroups();
+      if (ch.id !== activeChannelId) {
+        probeChannelQuotaInBackground(ch.id);
+      }
+    };
+
+    menu.appendChild(item);
+  }
+
+  trigger.onclick = (ev) => {
+    ev.stopPropagation();
+    const isOpen = wrapper.classList.contains("open");
+    document.querySelectorAll(".custom-dropdown.open").forEach((el) => el.classList.remove("open"));
+    if (!isOpen) {
+      wrapper.classList.add("open");
+    }
+  };
+
+  wrapper.appendChild(trigger);
+  wrapper.appendChild(menu);
+  mount.appendChild(wrapper);
+}
+
+async function probeChannelQuotaInBackground(channelId) {
+  try {
+    const res = await fetch("/api/probe-channel-quota", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ channelId })
+    });
+    const data = await res.json();
+    if (data && data.snapshot) {
+      state = data.snapshot;
+      renderSessionSelector();
+      renderQuotaGroups();
+    }
+  } catch (e) {}
+}
+
+function createQuotaRingSvg(pct) {
+  const clamped = Math.max(0, Math.min(100, Number(pct) || 0));
+  const r = 5.4;
+  const c = 2 * Math.PI * r;
+  const offset = c * (1 - clamped / 100);
+  const colorClass = clamped <= 10 ? " low" : clamped <= 30 ? " warn" : "";
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("class", "quota-ring-svg");
+  svg.setAttribute("viewBox", "0 0 14 14");
+
+  const track = document.createElementNS(ns, "circle");
+  track.setAttribute("class", "quota-ring-track");
+  track.setAttribute("cx", "7");
+  track.setAttribute("cy", "7");
+  track.setAttribute("r", String(r));
+
+  const fill = document.createElementNS(ns, "circle");
+  fill.setAttribute("class", `quota-ring-fill${colorClass}`);
+  fill.setAttribute("cx", "7");
+  fill.setAttribute("cy", "7");
+  fill.setAttribute("r", String(r));
+  fill.setAttribute("stroke-dasharray", String(c.toFixed(2)));
+  fill.setAttribute("stroke-dashoffset", String(offset.toFixed(2)));
+
+  svg.appendChild(track);
+  svg.appendChild(fill);
+  return svg;
+}
+
+// 1:1 对齐官方「使用量」弹窗：每个分组下把「周限额」和「5h limit」拆成独立行 + 右侧百分比 + SVG 圆环 + Resets in ...
+function renderQuotaGroups() {
+  const container = document.getElementById("quotaGroupsContainer");
+  container.innerHTML = "";
+  const t = I18N[currentLang];
+  const activeChannelId = state.activeAccount?.channelId || "";
+  const targetChannelId = selectedQuotaChannelId || activeChannelId;
+  const viewedAcc = (state.accounts || []).find((a) => a.id === targetChannelId);
+  const isViewingActive = !selectedQuotaChannelId || selectedQuotaChannelId === activeChannelId;
+  const isGcpChannel = Boolean(
+    viewedAcc
+      ? (viewedAcc.channelType === "gcp" || viewedAcc.gcpProjectId)
+      : state.activeAccount?.gcpProjectId
+  );
+
+  let groups = (isViewingActive
+    ? (state.quotaGroups || [])
+    : (viewedAcc?.cachedQuota?.quotaGroups || [])
+  ).filter((g) => {
+    const gName = String(g?.displayName || g?.id || "").trim();
+    const bks = Array.isArray(g?.buckets) ? g.buckets : [];
+    if (/^all\s*models$/i.test(gName) || bks.length > 3) return false;
+    return true;
+  });
+
+  // 若查看的是 GCP 通道，顶部展示当前 GCP 计费模式（按量计费 Agent Platform / Gemini Enterprise）与可用模型芯片，绝对不显示剩余百分比
+  if (isGcpChannel) {
+    const gcpCard = document.createElement("div");
+    gcpCard.className = "gcp-billing-card";
+
+    const header = document.createElement("div");
+    header.className = "gcp-billing-header";
+
+    const gcpMode = viewedAcc?.gcpBillingMode || state.activeAccount?.gcpBillingMode || "agent_platform";
+    const gcpLoc = viewedAcc?.gcpLocation || state.activeAccount?.gcpLocation || "global";
+    const locLabel = gcpLoc === "us" ? t.gcpRegionUs : gcpLoc === "eu" ? t.gcpRegionEu : t.gcpRegionGlobal;
+    const title = document.createElement("span");
+    title.className = "gcp-billing-title";
+    title.textContent = gcpMode === "gemini_enterprise"
+      ? t.gcpBillingTitleEnterprise
+      : `${t.gcpBillingTitlePayg} · ${locLabel}`;
+
+    const pill = document.createElement("span");
+    pill.className = "gcp-unlimited-pill";
+    pill.textContent = gcpMode === "gemini_enterprise" ? t.gcpPillEnterprise : t.gcpPillPayg;
+
+    header.appendChild(title);
+    header.appendChild(pill);
+    gcpCard.appendChild(header);
+
+    const gcpModels = viewedAcc?.cachedQuota?.availableModels || (isViewingActive ? state.availableModels : []) || [];
+    if (gcpModels.length > 0) {
+      const modelsLabel = document.createElement("div");
+      modelsLabel.className = "gcp-models-label";
+      modelsLabel.textContent = t.gcpModelsLabel;
+      gcpCard.appendChild(modelsLabel);
+
+      const chipsWrap = document.createElement("div");
+      chipsWrap.className = "gcp-model-chips";
+      for (const gm of gcpModels) {
+        const chip = document.createElement("span");
+        chip.className = "gcp-model-chip";
+        chip.textContent = gm.label || gm.modelId;
+        chipsWrap.appendChild(chip);
+      }
+      gcpCard.appendChild(chipsWrap);
+    }
+
+    container.appendChild(gcpCard);
+    return;
+  }
+
+  if (groups.length === 0 && !isGcpChannel) {
+    const hint = document.createElement("div");
+    hint.className = "section-hint";
+    hint.style.padding = "6px 2px";
+    hint.textContent = t.quotaNoCacheHint;
+    container.appendChild(hint);
+    return;
+  }
+
+  for (const g of groups) {
+    const buckets = g.buckets || [];
+    if (buckets.length === 0) continue;
+
+    const groupEl = document.createElement("div");
+    groupEl.className = "quota-group";
+
+    const titleEl = document.createElement("div");
+    titleEl.className = "quota-group-title";
+    titleEl.textContent = translateQuotaGroupName(g.displayName);
+    groupEl.appendChild(titleEl);
+
+    for (const b of buckets) {
+      const pct = b.remainingPct ?? 100;
+      const countdown = formatResetCountdown(b.resetTime);
+      const isWeekly = /weekly/i.test(b.window || b.bucketId || "");
+      const rowLabel = isWeekly ? t.weeklyLimitLabel : t.fiveHourLimitLabel;
+
+      const row = document.createElement("div");
+      row.className = "quota-bucket-row";
+
+      const labelEl = document.createElement("span");
+      labelEl.className = "quota-bucket-label";
+      labelEl.textContent = rowLabel;
+
+      const rightCol = document.createElement("div");
+      rightCol.className = "quota-bucket-right";
+
+      const mainLine = document.createElement("div");
+      mainLine.className = "quota-bucket-main";
+
+      const pctSpan = document.createElement("span");
+      pctSpan.className = "quota-bucket-pct" + (pct === 100 ? " full" : "");
+      pctSpan.textContent = `${t.pctLeftPrefix}${pct}${t.pctLeftSuffix}`;
+
+      mainLine.appendChild(pctSpan);
+      mainLine.appendChild(createQuotaRingSvg(pct));
+      rightCol.appendChild(mainLine);
+
+      if (countdown) {
+        const resetLine = document.createElement("div");
+        resetLine.className = "quota-bucket-reset";
+        resetLine.textContent = `${t.resetsInPrefix}${countdown}${t.resetsInSuffix}`;
+        rightCol.appendChild(resetLine);
+      }
+
+      row.appendChild(labelEl);
+      row.appendChild(rightCol);
+      groupEl.appendChild(row);
+    }
+
+    container.appendChild(groupEl);
+  }
+}
