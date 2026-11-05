@@ -270,10 +270,12 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
   let activeGcpProject = "";
 
   if (ctx.isIsolatedInstance) {
-    // 多开独立窗口：绝不使用已被还原回主窗口的全局 WinCred，严格以当前窗口的 instMeta 与当前窗口专属描述符为准
+    // 多开独立窗口：绝不使用已被还原回主窗口的全局 WinCred，严格以当前窗口专属描述符与 instMeta 中最新切换者为准
     const descId = String(ctx.descriptor?.activeChannelId || "").trim();
     const descAcc = descId ? cfg.accounts?.[descId] : null;
-    const effectiveIsoAcc = instPinnedAcc || descAcc;
+    const descTs = Math.max(Number(ctx.descriptor?.switchedAt || 0), Number(ctx.descriptor?.launchedAt || 0));
+    const metaTs = Math.max(Number(instMeta.switchedAt || 0), Number(instMeta.seededLaunchAt || 0));
+    const effectiveIsoAcc = (descAcc && descTs >= metaTs) ? descAcc : (instPinnedAcc || descAcc);
     if (effectiveIsoAcc) {
       activeEmail = effectiveIsoAcc.email;
       isLiveGcp = effectiveIsoAcc.channelType === "gcp" || Boolean(effectiveIsoAcc.gcpProjectId);
@@ -818,7 +820,7 @@ export async function switchActiveGoogleAccount(accountId, opts = {}) {
     ? (targetBillingMode === "agent_platform" ? (target.gcpLocation || "global") : "")
     : "";
 
-  const baseToken = target.storedToken || findStoredTokenForEmail(cfg, target.email, Boolean(targetProject));
+  const baseToken = findStoredTokenForEmail(cfg, target.email, Boolean(targetProject)) || target.storedToken;
   if (!baseToken) {
     throw new Error(`未找到账号 ${target.email} 的凭据快照`);
   }
@@ -843,20 +845,27 @@ export async function switchActiveGoogleAccount(accountId, opts = {}) {
     } catch {}
   }
 
-  const anyOtherInstanceHasGcp = Boolean(
-    fieldStatus.otherGcpInstance ||
-    Object.entries(cfg.__meta__?.instances || {}).some(
-      ([instKey, m]) => instKey !== ctx.instanceId && Boolean(m?.lastAppliedGcpProject)
-    )
-  );
+  const originalWinCred = readWinCredToken(true) || readWinCredToken(false);
+  const hasOtherLiveInstance = Boolean(fieldStatus.otherGcpInstance || fieldStatus.otherPersonalInstance);
+  const sharedWriterId = originalWinCred?.writer_id || "";
+  const currentLs = discoverLanguageServer(false);
 
-  // 当处于多开独立窗口或另一窗口正在运行 GCP 通道时，切换到个人通道绝不修改全局 WinCred（避免踢掉 GCP 主窗口的 LS），全权由本窗口专属 CloudCode 代理热切换
-  const shouldKeepWinCredForOtherInstance = Boolean(!nextIsGcp && (ctx.isIsolatedInstance || anyOtherInstanceHasGcp));
-  const tokenToWrite = buildCleanChannelToken(baseToken, targetProject, targetLocation, !shouldKeepWinCredForOtherInstance);
-  target.storedToken = tokenToWrite;
-  if (!shouldKeepWinCredForOtherInstance) {
-    writeWinCredToken(tokenToWrite);
+  // 若存在另一运行中的窗口实例，保持相同的 writer_id（使另一窗口的 LS 1s 轮询完全无感、不发生连带切换），
+  // 同时对当前窗口的 LS 单独调用 AuthLogout 清空其内存 writer_id 缓存，使其立即重新读取 WinCred 并刷新当前窗口 IDE 的登录账号
+  const tokenToWrite = buildCleanChannelToken(baseToken, targetProject, targetLocation, !hasOtherLiveInstance);
+  if (hasOtherLiveInstance && sharedWriterId) {
+    tokenToWrite.writer_id = sharedWriterId;
   }
+  target.storedToken = tokenToWrite;
+
+  if (hasOtherLiveInstance && currentLs) {
+    await callLsRpc(currentLs, "AuthLogout", {}).catch(() => {});
+  }
+  writeWinCredToken(tokenToWrite);
+
+  const restoreCredAfterSwitch = (hasOtherLiveInstance && !nextIsGcp && originalWinCred && originalWinCred.project_id)
+    ? { ...originalWinCred, writer_id: tokenToWrite.writer_id }
+    : null;
 
   const nowTs = Date.now();
   instMeta.activeChannelId = target.id;
@@ -865,14 +874,17 @@ export async function switchActiveGoogleAccount(accountId, opts = {}) {
   instMeta.switchedAt = nowTs;
   instMeta.switchedViaPanel = true;
   if (ctx.isIsolatedInstance && ctx.userDataDir) {
-    writeInstanceDescriptor(ctx.userDataDir, {
+    const updatedDesc = {
       instanceId: ctx.instanceId,
       activeChannelId: target.id,
       email: target.email,
       gcpProjectId: targetProject,
       userDataDir: ctx.userDataDir,
-      launchedAt: instMeta.seededLaunchAt || nowTs
-    });
+      launchedAt: instMeta.seededLaunchAt || nowTs,
+      switchedAt: nowTs
+    };
+    writeInstanceDescriptor(ctx.userDataDir, updatedDesc);
+    ctx.descriptor = updatedDesc;
   } else {
     cfg.__meta__.activeChannelId = target.id;
     cfg.__meta__.activeEmail = target.email;
@@ -890,7 +902,6 @@ export async function switchActiveGoogleAccount(accountId, opts = {}) {
     }
   }
 
-  const currentLs = discoverLanguageServer(false);
   const shouldScrub = opts.scrubSignatures === true || (isCrossChannel && opts.scrubSignatures !== false);
   let scrubbedCount = 0;
   if (shouldScrub) {
@@ -898,10 +909,11 @@ export async function switchActiveGoogleAccount(accountId, opts = {}) {
     scrubbedCount = Array.isArray(scrubbedIds) ? scrubbedIds.length : 0;
   }
   scheduleDetachedLanguageServerRestart(
-    shouldKeepWinCredForOtherInstance ? null : tokenToWrite,
+    tokenToWrite,
     currentLs,
     Boolean(targetProject),
-    getActiveCloudCodeProxyUrl(cfg)
+    getActiveCloudCodeProxyUrl(cfg),
+    restoreCredAfterSwitch
   );
 
   return {

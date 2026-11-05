@@ -3,7 +3,9 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   readRelayConfig,
-  writeRelayConfig
+  writeRelayConfig,
+  resolveCurrentInstanceContext,
+  getInstanceMeta
 } from "../store.mjs";
 import {
   readWinCredToken,
@@ -587,6 +589,21 @@ export function normalizeAccountChannels(cfg) {
 
 export function findStoredTokenForEmail(cfg, email, preferGcp = null) {
   if (!email) return null;
+  if (preferGcp === false) {
+    if (cfg?.__meta__?.oauthTokensByEmail?.[email]?.token?.refresh_token) {
+      return cfg.__meta__.oauthTokensByEmail[email];
+    }
+    for (const acc of Object.values(cfg.accounts || {})) {
+      const accIsGcp = Boolean(acc.gcpProjectId || acc.channelType === "gcp");
+      if (acc.email === email && !accIsGcp && acc.storedToken?.token?.refresh_token) {
+        return acc.storedToken;
+      }
+    }
+    const winCred = readWinCredToken(false);
+    if (winCred && winCred.id_token_email === email && !winCred.project_id && winCred.auth_method !== "gcp") {
+      return winCred;
+    }
+  }
   if (preferGcp === true && cfg?.__meta__?.gcpOAuthTokensByEmail?.[email]?.token) {
     return cfg.__meta__.gcpOAuthTokensByEmail[email];
   }
@@ -598,6 +615,9 @@ export function findStoredTokenForEmail(cfg, email, preferGcp = null) {
       }
     }
   }
+  if (cfg?.__meta__?.oauthTokensByEmail?.[email]?.token) {
+    return cfg.__meta__.oauthTokensByEmail[email];
+  }
   if (cfg?.__meta__?.gcpOAuthTokensByEmail?.[email]?.token) {
     return cfg.__meta__.gcpOAuthTokensByEmail[email];
   }
@@ -605,9 +625,6 @@ export function findStoredTokenForEmail(cfg, email, preferGcp = null) {
     if (acc.email === email && acc.storedToken?.token) {
       return acc.storedToken;
     }
-  }
-  if (cfg?.__meta__?.oauthTokensByEmail?.[email]?.token) {
-    return cfg.__meta__.oauthTokensByEmail[email];
   }
   const winCred = readWinCredToken(false);
   if (winCred && winCred.id_token_email === email) return winCred;
@@ -1057,8 +1074,14 @@ export async function probeChannelQuotaSnapshot(channelId) {
   const gcpBillingMode = isGcp ? (acc.gcpBillingMode || "agent_platform") : "";
 
   const ls = discoverLanguageServer(false);
-  const activeEmail = (cfg.__meta__?.activeEmail || "").trim();
-  const originalGcpPid = String(cfg.__meta__?.lastAppliedGcpProject || "").trim();
+  const ctx = resolveCurrentInstanceContext();
+  const instMeta = getInstanceMeta(cfg, ctx);
+  const activeEmail = (instMeta?.activeEmail || cfg.__meta__?.activeEmail || "").trim();
+  const originalGcpPid = String(
+    instMeta?.lastAppliedGcpProject ??
+    (!ctx.isIsolatedInstance ? cfg.__meta__?.lastAppliedGcpProject : "") ??
+    ""
+  ).trim();
 
   if (ls && acc.email && acc.email === activeEmail && gcpPid === originalGcpPid) {
     try {
@@ -1194,8 +1217,42 @@ export async function probeChannelQuotaSnapshot(channelId) {
 
   const liveTierTemplate = cfg.__meta__?.liveTierModels?.[isGcp ? "gcp" : "personal"] || [];
 
-  const baseToken = acc.storedToken || findStoredTokenForEmail(cfg, acc.email, isGcp);
-  if (!baseToken || !baseToken.token) {
+  // 收集当前邮箱下的所有候选凭据（个人通道优先使用 oauthTokensByEmail 独立个人凭据，GCP 优先使用通道专属/GCP 凭据，且互为回退）
+  const candidateTokenObjs = [];
+  const seenRtSet = new Set();
+  const pushCandidateToken = (tokObj) => {
+    if (!tokObj || !tokObj.token) return;
+    const key = String(tokObj.token.refresh_token || tokObj.token.access_token || "").trim();
+    if (!key || seenRtSet.has(key)) return;
+    seenRtSet.add(key);
+    candidateTokenObjs.push(tokObj);
+  };
+
+  if (!isGcp) {
+    pushCandidateToken(cfg?.__meta__?.oauthTokensByEmail?.[acc.email]);
+    pushCandidateToken(acc.storedToken);
+    for (const item of Object.values(cfg.accounts || {})) {
+      if (item.email === acc.email && !item.gcpProjectId && item.channelType !== "gcp") {
+        pushCandidateToken(item.storedToken);
+      }
+    }
+    const winCred = readWinCredToken(false);
+    if (winCred && winCred.id_token_email === acc.email && !winCred.project_id) {
+      pushCandidateToken(winCred);
+    }
+    for (const item of Object.values(cfg.accounts || {})) {
+      if (item.email === acc.email) pushCandidateToken(item.storedToken);
+    }
+  } else {
+    pushCandidateToken(acc.storedToken);
+    pushCandidateToken(cfg?.__meta__?.gcpOAuthTokensByEmail?.[acc.email]);
+    pushCandidateToken(cfg?.__meta__?.oauthTokensByEmail?.[acc.email]);
+    for (const item of Object.values(cfg.accounts || {})) {
+      if (item.email === acc.email) pushCandidateToken(item.storedToken);
+    }
+  }
+
+  if (candidateTokenObjs.length === 0) {
     if (isGcp && gcpBillingMode === "agent_platform") {
       const baseGcpModels = liveTierTemplate.length >= 6 ? liveTierTemplate : AGENT_PLATFORM_DEFAULT_MODELS;
       acc.cachedQuota = {
@@ -1218,9 +1275,6 @@ export async function probeChannelQuotaSnapshot(channelId) {
     }
     return acc.cachedQuota || null;
   }
-
-  let accessToken = baseToken.token.access_token || "";
-  const refreshToken = baseToken.token.refresh_token || "";
 
   const tryProbeWithToken = async (tok) => {
     let companionPid = gcpPid;
@@ -1252,79 +1306,99 @@ export async function probeChannelQuotaSnapshot(channelId) {
       ).trim();
     }
 
-    const reqPayload = isGcp && companionPid ? { project: companionPid } : {};
+    const reqPayload = companionPid ? { project: companionPid } : {};
 
-    const [modelsResp, quotaSummaryResp] = await Promise.all([
+    let [modelsResp, quotaSummaryResp] = await Promise.all([
       callCloudCodeApi("/v1internal:fetchAvailableModels", tok, reqPayload),
       !isGcp
         ? callCloudCodeApi("/v1internal:retrieveUserQuotaSummary", tok, reqPayload)
         : Promise.resolve({ status: 0, data: null })
     ]);
+    if (!isGcp && (!quotaSummaryResp?.data?.groups?.length) && companionPid) {
+      const fallbackQs = await callCloudCodeApi("/v1internal:retrieveUserQuotaSummary", tok, {});
+      if (fallbackQs?.data?.groups?.length) {
+        quotaSummaryResp = fallbackQs;
+      }
+    }
     return { loadResp, modelsResp, quotaSummaryResp, companionPid, userTier };
   };
 
-  const expiryMs = baseToken.token.expiry ? new Date(baseToken.token.expiry).getTime() : 0;
-  const needsImmediateRefresh = Boolean(
-    refreshToken &&
-    (!accessToken || baseToken.token.refreshedForRt !== refreshToken || (expiryMs > 0 && expiryMs - Date.now() < 300000))
-  );
-  if (needsImmediateRefresh) {
-    try {
-      const refreshed = await refreshOAuthAccessToken(refreshToken);
-      if (refreshed && refreshed.access_token) {
-        accessToken = refreshed.access_token;
-        baseToken.token.access_token = accessToken;
-        baseToken.token.refreshedForRt = refreshToken;
-        baseToken.token.expiry = new Date(Date.now() + (refreshed.expires_in || 3599) * 1000).toISOString();
-        for (const item of Object.values(cfg.accounts || {})) {
-          if (item.storedToken?.token?.refresh_token === refreshToken) {
-            item.storedToken.token.access_token = accessToken;
-            item.storedToken.token.refreshedForRt = refreshToken;
-            item.storedToken.token.expiry = baseToken.token.expiry;
-          }
-        }
-      }
-    } catch {}
-  }
-
-  let probeRes = await tryProbeWithToken(accessToken);
-  if ((probeRes.modelsResp.status === 401 || probeRes.modelsResp.status === 403 || !probeRes.modelsResp.data) && refreshToken) {
-    try {
-      const refreshed = await refreshOAuthAccessToken(refreshToken);
-      if (refreshed && refreshed.access_token) {
-        accessToken = refreshed.access_token;
-        baseToken.token.access_token = accessToken;
-        baseToken.token.refreshedForRt = refreshToken;
-        baseToken.token.expiry = new Date(Date.now() + (refreshed.expires_in || 3599) * 1000).toISOString();
-        for (const item of Object.values(cfg.accounts || {})) {
-          if (item.storedToken?.token?.refresh_token === refreshToken) {
-            item.storedToken.token.access_token = accessToken;
-            item.storedToken.token.refreshedForRt = refreshToken;
-            item.storedToken.token.expiry = baseToken.token.expiry;
-          }
-        }
-        probeRes = await tryProbeWithToken(accessToken);
-      }
-    } catch {}
-  }
-
-  if (probeRes.modelsResp.status === 200 && probeRes.modelsResp.data) {
-    const parsed = parseCloudCodeModelsAndQuota(
-      probeRes.modelsResp.data,
-      probeRes.quotaSummaryResp?.data || null,
-      isGcp,
-      probeRes.userTier,
-      acc.cachedQuota || null,
-      []
+  for (const baseToken of candidateTokenObjs) {
+    let accessToken = baseToken.token.access_token || "";
+    const refreshToken = baseToken.token.refresh_token || "";
+    const expiryMs = baseToken.token.expiry ? new Date(baseToken.token.expiry).getTime() : 0;
+    const needsImmediateRefresh = Boolean(
+      refreshToken &&
+      (!accessToken || baseToken.token.refreshedForRt !== refreshToken || (expiryMs > 0 && expiryMs - Date.now() < 300000))
     );
-    if (parsed && (!isGcp || parsed.availableModels.length > 0)) {
-      if (!isGcp && parsed.tierCode) {
-        acc.tierCode = parsed.tierCode;
-        acc.tierName = parsed.tierName || acc.tierName;
+    if (needsImmediateRefresh) {
+      try {
+        const refreshed = await refreshOAuthAccessToken(refreshToken);
+        if (refreshed && refreshed.access_token) {
+          accessToken = refreshed.access_token;
+          baseToken.token.access_token = accessToken;
+          baseToken.token.refreshedForRt = refreshToken;
+          baseToken.token.expiry = new Date(Date.now() + (refreshed.expires_in || 3599) * 1000).toISOString();
+          for (const item of Object.values(cfg.accounts || {})) {
+            if (item.storedToken?.token?.refresh_token === refreshToken) {
+              item.storedToken.token.access_token = accessToken;
+              item.storedToken.token.refreshedForRt = refreshToken;
+              item.storedToken.token.expiry = baseToken.token.expiry;
+            }
+          }
+        }
+      } catch {}
+    }
+
+    let probeRes = await tryProbeWithToken(accessToken);
+    if ((probeRes.modelsResp.status === 401 || probeRes.modelsResp.status === 403 || !probeRes.modelsResp.data) && refreshToken) {
+      try {
+        const refreshed = await refreshOAuthAccessToken(refreshToken);
+        if (refreshed && refreshed.access_token) {
+          accessToken = refreshed.access_token;
+          baseToken.token.access_token = accessToken;
+          baseToken.token.refreshedForRt = refreshToken;
+          baseToken.token.expiry = new Date(Date.now() + (refreshed.expires_in || 3599) * 1000).toISOString();
+          for (const item of Object.values(cfg.accounts || {})) {
+            if (item.storedToken?.token?.refresh_token === refreshToken) {
+              item.storedToken.token.access_token = accessToken;
+              item.storedToken.token.refreshedForRt = refreshToken;
+              item.storedToken.token.expiry = baseToken.token.expiry;
+            }
+          }
+          probeRes = await tryProbeWithToken(accessToken);
+        }
+      } catch {}
+    }
+
+    if (probeRes.modelsResp.status === 200 && probeRes.modelsResp.data) {
+      const parsed = parseCloudCodeModelsAndQuota(
+        probeRes.modelsResp.data,
+        probeRes.quotaSummaryResp?.data || null,
+        isGcp,
+        probeRes.userTier,
+        acc.cachedQuota || null,
+        []
+      );
+      const personalHasValidGroups = !isGcp && Array.isArray(parsed?.quotaGroups) && parsed.quotaGroups.length > 0;
+      if (parsed && (personalHasValidGroups || (isGcp && parsed.availableModels.length > 0))) {
+        if (!isGcp) {
+          if (parsed.tierCode) {
+            acc.tierCode = parsed.tierCode;
+            acc.tierName = parsed.tierName || acc.tierName;
+          }
+          // 将经过验证具备消费级配额查询权限的个人凭据独立固化到个人通道与 oauthTokensByEmail，彻底与 GCP 凭据解耦
+          const cleanPersonalTok = buildCleanChannelToken(baseToken, "", "", false);
+          acc.storedToken = cleanPersonalTok;
+          if (!cfg.__meta__.oauthTokensByEmail || typeof cfg.__meta__.oauthTokensByEmail !== "object") {
+            cfg.__meta__.oauthTokensByEmail = {};
+          }
+          cfg.__meta__.oauthTokensByEmail[acc.email] = cleanPersonalTok;
+        }
+        acc.cachedQuota = parsed;
+        writeRelayConfig(cfg);
+        return acc.cachedQuota;
       }
-      acc.cachedQuota = parsed;
-      writeRelayConfig(cfg);
-      return acc.cachedQuota;
     }
   }
 

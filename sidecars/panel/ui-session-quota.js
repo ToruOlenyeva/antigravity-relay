@@ -341,8 +341,14 @@ function renderSessionSelector() {
   mount.appendChild(wrapper);
 }
 
+let lastAutoProbedChannelId = "";
+let lastAutoProbedAt = 0;
+
 async function probeChannelQuotaInBackground(channelId) {
   try {
+    if (!channelId) return;
+    lastAutoProbedChannelId = channelId;
+    lastAutoProbedAt = Date.now();
     const res = await fetch("/api/probe-channel-quota", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -351,8 +357,12 @@ async function probeChannelQuotaInBackground(channelId) {
     const data = await res.json();
     if (data && data.snapshot) {
       state = data.snapshot;
-      renderSessionSelector();
-      renderQuotaGroups();
+      if (typeof renderAll === "function") {
+        renderAll();
+      } else {
+        renderSessionSelector();
+        renderQuotaGroups();
+      }
     }
   } catch (e) {}
 }
@@ -402,10 +412,12 @@ function renderQuotaGroups() {
       : state.activeAccount?.gcpProjectId
   );
 
-  let groups = (isViewingActive
-    ? (state.quotaGroups || [])
-    : (viewedAcc?.cachedQuota?.quotaGroups || [])
-  ).filter((g) => {
+  const rawSourceGroups = isViewingActive
+    ? ((Array.isArray(state.quotaGroups) && state.quotaGroups.length > 0)
+        ? state.quotaGroups
+        : (viewedAcc?.cachedQuota?.quotaGroups || []))
+    : (viewedAcc?.cachedQuota?.quotaGroups || []);
+  let groups = rawSourceGroups.filter((g) => {
     const gName = String(g?.displayName || g?.id || "").trim();
     const bks = Array.isArray(g?.buckets) ? g.buckets : [];
     if (/^all\s*models$/i.test(gName) || bks.length > 3) return false;
@@ -465,6 +477,12 @@ function renderQuotaGroups() {
     hint.style.padding = "6px 2px";
     hint.textContent = t.quotaNoCacheHint;
     container.appendChild(hint);
+    if (
+      targetChannelId &&
+      (lastAutoProbedChannelId !== targetChannelId || Date.now() - lastAutoProbedAt > 8000)
+    ) {
+      probeChannelQuotaInBackground(targetChannelId);
+    }
     return;
   }
 

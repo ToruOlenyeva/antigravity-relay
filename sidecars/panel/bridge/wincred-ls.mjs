@@ -766,7 +766,8 @@ export function scheduleDetachedLanguageServerRestart(
   tokenToLock = null,
   activeLsHint = null,
   isGcpTarget = false,
-  proxyUrlHint = ""
+  proxyUrlHint = "",
+  restoreCredAfterSwitch = null
 ) {
   const activeLs = activeLsHint || discoverLanguageServer(false);
   invalidateWinCredCache();
@@ -787,10 +788,19 @@ export function scheduleDetachedLanguageServerRestart(
       setTimeout(() => {
         if (tokenToLock) writeWinCredToken(tokenToLock);
         callLsRpc(activeLs, "GetUserStatus", {}).catch(() => {});
-      }, 350);
+        callLsRpc(activeLs, "RetrieveUserQuotaSummary", {}).catch(() => {});
+      }, 400);
       setTimeout(() => {
         callLsRpc(activeLs, "GetUserStatus", {}).catch(() => {});
+        callLsRpc(activeLs, "RetrieveUserQuotaSummary", {}).catch(() => {});
       }, 1500);
+      if (restoreCredAfterSwitch) {
+        setTimeout(() => {
+          try {
+            writeWinCredToken(restoreCredAfterSwitch);
+          } catch {}
+        }, 2800);
+      }
     }
   } catch {}
 }

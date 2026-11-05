@@ -324,11 +324,17 @@ export function getInstanceMeta(cfg, instanceCtx = null) {
     }
   } else if (id !== "main") {
     const desc = ctx.descriptor || readInstanceDescriptor(ctx.userDataDir);
-    if (desc?.launchedAt && Number(desc.launchedAt) > Number(cfg.__meta__.instances[id].seededLaunchAt || 0)) {
-      cfg.__meta__.instances[id].activeChannelId = desc.activeChannelId || cfg.__meta__.instances[id].activeChannelId || "";
+    const descTs = Math.max(Number(desc?.switchedAt || 0), Number(desc?.launchedAt || 0));
+    const metaTs = Math.max(
+      Number(cfg.__meta__.instances[id].switchedAt || 0),
+      Number(cfg.__meta__.instances[id].seededLaunchAt || 0)
+    );
+    if (desc && desc.activeChannelId && descTs >= metaTs) {
+      cfg.__meta__.instances[id].activeChannelId = desc.activeChannelId;
       cfg.__meta__.instances[id].activeEmail = desc.email || cfg.__meta__.instances[id].activeEmail || "";
       cfg.__meta__.instances[id].lastAppliedGcpProject = desc.gcpProjectId ?? "";
-      cfg.__meta__.instances[id].seededLaunchAt = Number(desc.launchedAt);
+      if (desc.launchedAt) cfg.__meta__.instances[id].seededLaunchAt = Number(desc.launchedAt);
+      if (desc.switchedAt) cfg.__meta__.instances[id].switchedAt = Number(desc.switchedAt);
     }
   }
   return cfg.__meta__.instances[id];
@@ -469,6 +475,71 @@ export function writeRelayConfig(cfg) {
   try {
     const dir = path.dirname(RELAY_CONFIG_FILE);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+    // 跨进程原子合并锁：防止主窗口与多开窗口后台并发快照互相冲掉对方最新切换的通道或刚刚探测出的配额快照
+    try {
+      if (fs.existsSync(RELAY_CONFIG_FILE)) {
+        const diskRaw = fs.readFileSync(RELAY_CONFIG_FILE, "utf-8");
+        if (diskRaw && diskRaw.trim()) {
+          const diskCfg = JSON.parse(diskRaw);
+          if (diskCfg && typeof diskCfg === "object") {
+            const ctx = resolveCurrentInstanceContext();
+            const curInstId = ctx?.instanceId || "main";
+            if (!cfg.__meta__ || typeof cfg.__meta__ !== "object") cfg.__meta__ = {};
+            if (!cfg.__meta__.instances || typeof cfg.__meta__.instances !== "object") cfg.__meta__.instances = {};
+
+            const diskInstances = diskCfg.__meta__?.instances || {};
+            for (const [instKey, diskInst] of Object.entries(diskInstances)) {
+              if (!diskInst || typeof diskInst !== "object") continue;
+              const memInst = cfg.__meta__.instances[instKey];
+              const diskSwitchedAt = Number(diskInst.switchedAt || diskInst.seededLaunchAt || 0);
+              const memSwitchedAt = Number(memInst?.switchedAt || memInst?.seededLaunchAt || 0);
+              if (!memInst || diskSwitchedAt > memSwitchedAt || (instKey !== curInstId && memSwitchedAt <= diskSwitchedAt)) {
+                cfg.__meta__.instances[instKey] = {
+                  ...(memInst || {}),
+                  ...diskInst
+                };
+              }
+            }
+
+            // 多开独立窗口绝不覆盖顶层归属主窗口的 activeChannelId / activeEmail / lastAppliedGcpProject
+            if (ctx?.isIsolatedInstance && diskCfg.__meta__) {
+              if (diskCfg.__meta__.activeChannelId !== undefined) {
+                cfg.__meta__.activeChannelId = diskCfg.__meta__.activeChannelId;
+              }
+              if (diskCfg.__meta__.activeEmail !== undefined) {
+                cfg.__meta__.activeEmail = diskCfg.__meta__.activeEmail;
+              }
+              if (diskCfg.__meta__.lastAppliedGcpProject !== undefined) {
+                cfg.__meta__.lastAppliedGcpProject = diskCfg.__meta__.lastAppliedGcpProject;
+              }
+            } else if (!ctx?.isIsolatedInstance && cfg.__meta__.instances.main) {
+              cfg.__meta__.activeChannelId = cfg.__meta__.instances.main.activeChannelId || cfg.__meta__.activeChannelId || "";
+              cfg.__meta__.activeEmail = cfg.__meta__.instances.main.activeEmail || cfg.__meta__.activeEmail || "";
+              cfg.__meta__.lastAppliedGcpProject = cfg.__meta__.instances.main.lastAppliedGcpProject ?? cfg.__meta__.lastAppliedGcpProject ?? "";
+            }
+
+            // 保护各通道刚探测出的非空配额缓存不被慢速并发快照回退为空数组
+            if (diskCfg.accounts && typeof diskCfg.accounts === "object" && cfg.accounts && typeof cfg.accounts === "object") {
+              for (const [accId, diskAcc] of Object.entries(diskCfg.accounts)) {
+                const memAcc = cfg.accounts[accId];
+                if (!memAcc || !diskAcc) continue;
+                const diskUpdated = Number(diskAcc.cachedQuota?.updatedAt || 0);
+                const memUpdated = Number(memAcc.cachedQuota?.updatedAt || 0);
+                const diskHasGroups = Array.isArray(diskAcc.cachedQuota?.quotaGroups) && diskAcc.cachedQuota.quotaGroups.length > 0;
+                const memHasGroups = Array.isArray(memAcc.cachedQuota?.quotaGroups) && memAcc.cachedQuota.quotaGroups.length > 0;
+                if ((diskUpdated > memUpdated && (diskHasGroups || !memHasGroups)) || (diskHasGroups && !memHasGroups)) {
+                  memAcc.cachedQuota = diskAcc.cachedQuota;
+                  if (diskAcc.tierCode) memAcc.tierCode = diskAcc.tierCode;
+                  if (diskAcc.tierName) memAcc.tierName = diskAcc.tierName;
+                }
+              }
+            }
+          }
+        }
+      }
+    } catch {}
+
     const serialized = JSON.stringify(cfg, null, 2);
     const tmpPath = `${RELAY_CONFIG_FILE}.${process.pid}.${Date.now()}.tmp`;
     try {
