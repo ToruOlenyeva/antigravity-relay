@@ -11,6 +11,7 @@ import {
   readWinCredToken,
   normalizeIsoExpiry,
   buildCleanChannelToken,
+  parseLsLogInfo,
   discoverLanguageServer,
   callLsRpc,
   refreshOAuthAccessToken
@@ -505,8 +506,23 @@ export function normalizeAccountChannels(cfg) {
         }
       }
 
-      if (item.storedToken && typeof item.storedToken === "object" && item.storedToken.token && item.storedToken.token.expiry) {
-        item.storedToken.token.expiry = normalizeIsoExpiry(item.storedToken.token.expiry);
+      const rawChannelTok =
+        item.storedToken ||
+        cfg.__meta__?.channelTokensById?.[normKey] ||
+        findStoredTokenForEmail(cfg, email, Boolean(isGcp && pid));
+      const isolatedChannelTok = rawChannelTok
+        ? buildCleanChannelToken(
+            JSON.parse(JSON.stringify(rawChannelTok)),
+            isGcp && pid ? pid : "",
+            gcpBillingMode === "agent_platform" ? gcpLocation : "",
+            false
+          )
+        : null;
+      if (!cfg.__meta__.channelTokensById || typeof cfg.__meta__.channelTokensById !== "object") {
+        cfg.__meta__.channelTokensById = {};
+      }
+      if (isolatedChannelTok) {
+        cfg.__meta__.channelTokensById[normKey] = JSON.parse(JSON.stringify(isolatedChannelTok));
       }
 
       nextAccounts[normKey] = {
@@ -519,6 +535,7 @@ export function normalizeAccountChannels(cfg) {
         gcpBillingMode,
         gcpLocation,
         tierName: isGcp && pid ? cleanGcpTier : resolvedPersonalTierName,
+        storedToken: isolatedChannelTok,
         cachedQuota
       };
       if (pid && !cfg.gcpProjects.includes(pid)) cfg.gcpProjects.push(pid);
@@ -1095,10 +1112,16 @@ export async function probeChannelQuotaSnapshot(channelId) {
       const usEmail = (usResp?.userStatus?.email || "").trim();
       const usTierName = usResp?.userStatus?.userTier?.name || usResp?.userStatus?.planStatus?.planInfo?.planName || "";
       const usTierId = usResp?.userStatus?.userTier?.id || "";
-      const lsHasGcpModels = clientModels.some((m) => isGcpOnlyModel(m.label || m.modelOrAlias?.model || ""));
+      const logInfo = parseLsLogInfo(ctx.lsLogFile);
+      const logPid = String(logInfo.lastProjectId || "").trim();
+      const lsHasGcpModels = clientModels.some(
+        (m) => !isModelEntryRestrictedOrSunset(m) && isGcpOnlyModel(m.label || m.modelOrAlias?.model || "")
+      );
       const lsModeMatches = Boolean(
         usEmail === acc.email &&
-        isGcp === Boolean(/agent\s*platform|enterprise/i.test(usTierName) || lsHasGcpModels)
+        (isGcp
+          ? (logPid ? logPid === gcpPid : Boolean(/agent\s*platform|enterprise/i.test(usTierName) || lsHasGcpModels))
+          : (!logPid && !/agent\s*platform|enterprise/i.test(usTierName)))
       );
       if (lsModeMatches && (clientModels.length > 0 || rawGroups.length > 0)) {
         const tierInfo = isGcp
@@ -1229,8 +1252,9 @@ export async function probeChannelQuotaSnapshot(channelId) {
   };
 
   if (!isGcp) {
-    pushCandidateToken(cfg?.__meta__?.oauthTokensByEmail?.[acc.email]);
+    pushCandidateToken(cfg?.__meta__?.channelTokensById?.[acc.id]);
     pushCandidateToken(acc.storedToken);
+    pushCandidateToken(cfg?.__meta__?.oauthTokensByEmail?.[acc.email]);
     for (const item of Object.values(cfg.accounts || {})) {
       if (item.email === acc.email && !item.gcpProjectId && item.channelType !== "gcp") {
         pushCandidateToken(item.storedToken);
@@ -1244,12 +1268,15 @@ export async function probeChannelQuotaSnapshot(channelId) {
       if (item.email === acc.email) pushCandidateToken(item.storedToken);
     }
   } else {
+    pushCandidateToken(cfg?.__meta__?.channelTokensById?.[acc.id]);
     pushCandidateToken(acc.storedToken);
     pushCandidateToken(cfg?.__meta__?.gcpOAuthTokensByEmail?.[acc.email]);
-    pushCandidateToken(cfg?.__meta__?.oauthTokensByEmail?.[acc.email]);
     for (const item of Object.values(cfg.accounts || {})) {
-      if (item.email === acc.email) pushCandidateToken(item.storedToken);
+      if (item.email === acc.email && (item.gcpProjectId || item.channelType === "gcp")) {
+        pushCandidateToken(item.storedToken);
+      }
     }
+    pushCandidateToken(cfg?.__meta__?.oauthTokensByEmail?.[acc.email]);
   }
 
   if (candidateTokenObjs.length === 0) {
@@ -1390,10 +1417,14 @@ export async function probeChannelQuotaSnapshot(channelId) {
           // 将经过验证具备消费级配额查询权限的个人凭据独立固化到个人通道与 oauthTokensByEmail，彻底与 GCP 凭据解耦
           const cleanPersonalTok = buildCleanChannelToken(baseToken, "", "", false);
           acc.storedToken = cleanPersonalTok;
+          if (!cfg.__meta__.channelTokensById || typeof cfg.__meta__.channelTokensById !== "object") {
+            cfg.__meta__.channelTokensById = {};
+          }
+          cfg.__meta__.channelTokensById[acc.id] = JSON.parse(JSON.stringify(cleanPersonalTok));
           if (!cfg.__meta__.oauthTokensByEmail || typeof cfg.__meta__.oauthTokensByEmail !== "object") {
             cfg.__meta__.oauthTokensByEmail = {};
           }
-          cfg.__meta__.oauthTokensByEmail[acc.email] = cleanPersonalTok;
+          cfg.__meta__.oauthTokensByEmail[acc.email] = JSON.parse(JSON.stringify(cleanPersonalTok));
         }
         acc.cachedQuota = parsed;
         writeRelayConfig(cfg);

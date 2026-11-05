@@ -12,7 +12,9 @@ import {
   readRelayConfig,
   resolveCurrentInstanceContext,
   readInstanceDescriptor,
-  getInstanceMeta
+  getInstanceMeta,
+  getInstanceTokenFilePath,
+  ensureInstanceIsolatedHome
 } from "../store.mjs";
 
 const _G_HOST = ["apps", "googleusercontent", "com"].join(".");
@@ -180,11 +182,13 @@ public class WinCred {
                                 byte[] buf = new byte[toRead];
                                 int n = fs.Read(buf, 0, toRead);
                                 string tail = Encoding.UTF8.GetString(buf, 0, n);
-                                if (tail.IndexOf("SetWIFProvider called with wifProvider", StringComparison.OrdinalIgnoreCase) >= 0) {
+                                if (tail.IndexOf("SetWIFProvider called with wifProvider", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                    tail.IndexOf("SetProjectID called with projectID", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                    tail.IndexOf("Auth succeeded, refreshing features", StringComparison.OrdinalIgnoreCase) >= 0) {
                                     seenWif = true;
                                 }
                                 if (seenWif) {
-                                    if (tail.IndexOf("State refresh took", StringComparison.OrdinalIgnoreCase) >= 0 || afterWifMs >= 800) {
+                                    if (tail.IndexOf("State refresh took", StringComparison.OrdinalIgnoreCase) >= 0 || afterWifMs >= 400) {
                                         break;
                                     }
                                     afterWifMs += 100;
@@ -327,6 +331,127 @@ ${WINCRED_CSHARP}
   return true;
 }
 
+export function writeInstanceTokenFile(userDataDir, storedTokenObj) {
+  if (!userDataDir || !storedTokenObj) return false;
+  try {
+    ensureInstanceIsolatedHome(userDataDir);
+    const tokenFile = getInstanceTokenFilePath(userDataDir);
+    if (!tokenFile) return false;
+    fs.mkdirSync(path.dirname(tokenFile), { recursive: true });
+    fs.writeFileSync(tokenFile, JSON.stringify(storedTokenObj), { encoding: "utf8", mode: 0o600 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function readInstanceToken(ctx = null, force = false) {
+  const activeCtx = ctx || resolveCurrentInstanceContext();
+  if (activeCtx?.isIsolatedInstance && activeCtx?.userDataDir) {
+    try {
+      const tokenFile = getInstanceTokenFilePath(activeCtx.userDataDir);
+      if (tokenFile && fs.existsSync(tokenFile)) {
+        const raw = fs.readFileSync(tokenFile, "utf8").trim();
+        if (raw) {
+          return JSON.parse(raw);
+        }
+      }
+    } catch {}
+  }
+  return readWinCredToken(force);
+}
+
+export async function awaitLsLogTokenApplied(logFilePath, startOffset = -1, maxWaitMs = 5600) {
+  if (!logFilePath || startOffset < 0) {
+    await new Promise((r) => setTimeout(r, 800));
+    return false;
+  }
+  const startWait = Date.now();
+  let seenSwitch = false;
+  let afterSwitchMs = 0;
+  while (Date.now() - startWait < maxWaitMs) {
+    await new Promise((r) => setTimeout(r, 100));
+    try {
+      if (fs.existsSync(logFilePath)) {
+        const st = fs.statSync(logFilePath);
+        if (st.size > startOffset) {
+          const fd = fs.openSync(logFilePath, "r");
+          let tail = "";
+          try {
+            const len = Math.min(65536, st.size - startOffset);
+            const buf = Buffer.alloc(len);
+            fs.readSync(fd, buf, 0, len, startOffset);
+            tail = buf.toString("utf8");
+          } finally {
+            fs.closeSync(fd);
+          }
+          if (
+            /SetProjectID called with projectID/i.test(tail) ||
+            /SetWIFProvider called with wifProvider/i.test(tail) ||
+            /Auth succeeded, refreshing features/i.test(tail)
+          ) {
+            seenSwitch = true;
+          }
+          if (seenSwitch) {
+            if (/State refresh took/i.test(tail) || afterSwitchMs >= 300) {
+              return true;
+            }
+            afterSwitchMs += 100;
+          }
+        }
+      }
+    } catch {}
+  }
+  return seenSwitch;
+}
+
+export async function writeInstanceCredentialAndAwaitSync(
+  tokenObj,
+  ctx = null,
+  otherRestoreCred = null,
+  otherLsPids = [],
+  maxWaitMs = 5600
+) {
+  const activeCtx = ctx || resolveCurrentInstanceContext();
+  const logFile = activeCtx?.lsLogFile || LS_LOG_FILE;
+  let startOffset = -1;
+  try {
+    if (logFile && fs.existsSync(logFile)) {
+      startOffset = fs.statSync(logFile).size;
+    }
+  } catch {}
+
+  if (activeCtx?.isIsolatedInstance && activeCtx?.userDataDir) {
+    writeInstanceTokenFile(activeCtx.userDataDir, tokenObj);
+    const usesFileStorage = Boolean(
+      activeCtx.descriptor?.isolatedTokenStorage === "file" ||
+      process.env.SSH_TTY === "1"
+    );
+    if (usesFileStorage) {
+      await awaitLsLogTokenApplied(logFile, startOffset, maxWaitMs);
+      return true;
+    }
+  }
+
+  const cleanPids = (Array.isArray(otherLsPids) ? otherLsPids : [])
+    .map((n) => Number(n))
+    .filter((n) => Number.isFinite(n) && n > 0);
+
+  if (!activeCtx?.isIsolatedInstance && (!otherRestoreCred || cleanPids.length === 0)) {
+    writeWinCredToken(tokenObj);
+    await awaitLsLogTokenApplied(logFile, startOffset, maxWaitMs);
+    return true;
+  }
+
+  return writeWinCredIsolatedForProcess(
+    tokenObj,
+    otherRestoreCred,
+    cleanPids,
+    maxWaitMs,
+    logFile
+  );
+}
+
 export function syncInstanceAppStorage(userDataDir, email, isGcp = false, isIsolated = false) {
   if (!userDataDir) return;
   try {
@@ -374,6 +499,7 @@ export function syncInstanceAppStorage(userDataDir, email, isGcp = false, isIsol
 export function sanitizeAllIsolatedInstancesAppStorage() {
   try {
     if (!fs.existsSync(INSTANCES_ROOT_DIR)) return;
+    const cfg = readRelayConfig();
     const dirs = fs.readdirSync(INSTANCES_ROOT_DIR, { withFileTypes: true });
     for (const d of dirs) {
       if (!d.isDirectory()) continue;
@@ -381,6 +507,13 @@ export function sanitizeAllIsolatedInstancesAppStorage() {
       const desc = readInstanceDescriptor(instDir);
       if (desc && desc.email) {
         syncInstanceAppStorage(instDir, desc.email, Boolean(desc.gcpProjectId), true);
+        const chId = desc.activeChannelId || (desc.gcpProjectId ? `${desc.email}#gcp:${desc.gcpProjectId}` : `${desc.email}#personal`);
+        const chTok = cfg?.__meta__?.channelTokensById?.[chId] || cfg?.accounts?.[chId]?.storedToken;
+        if (chTok) {
+          writeInstanceTokenFile(instDir, chTok);
+        } else {
+          ensureInstanceIsolatedHome(instDir);
+        }
       }
     }
   } catch {}

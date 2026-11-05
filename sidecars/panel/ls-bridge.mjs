@@ -24,7 +24,8 @@ const _wincredMod = await import("./bridge/wincred-ls.mjs");
 const {
   readWinCredToken,
   writeWinCredToken,
-  writeWinCredIsolatedForProcess,
+  readInstanceToken,
+  writeInstanceCredentialAndAwaitSync,
   syncInstanceAppStorage,
   buildCleanChannelToken,
   parseLsLogInfo,
@@ -32,8 +33,7 @@ const {
   inspectActiveFieldInstances,
   discoverLanguageServer,
   callLsRpc,
-  refreshOAuthAccessToken,
-  scheduleDetachedLanguageServerRestart
+  refreshOAuthAccessToken
 } = _wincredMod;
 import {
   AGENT_PLATFORM_DEFAULT_MODELS,
@@ -249,7 +249,7 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
   }
 
   const logInfo = parseLsLogInfo(ctx.lsLogFile);
-  const cred = readWinCredToken(forceWinCred);
+  const cred = readInstanceToken(ctx, forceWinCred);
   const us = userStatusResp?.userStatus || {};
   const planStatus = us?.planStatus || {};
   const cascadeConfig = us?.cascadeModelConfigData || {};
@@ -492,8 +492,16 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
     }
   }
 
-  const lsHasGcpModels = clientModelConfigs.some((m) => isGcpOnlyModel(m.label || m.modelOrAlias?.model || ""));
-  const lsModeMatches = Boolean(lsEmail && lsEmail === activeEmail && Boolean(activeGcpProject) === Boolean(tierIndicatesGcp || lsHasGcpModels));
+  const lsHasGcpModels = clientModelConfigs.some(
+    (m) => !isModelEntryRestrictedOrSunset(m) && isGcpOnlyModel(m.label || m.modelOrAlias?.model || "")
+  );
+  const lsModeMatches = Boolean(
+    lsEmail &&
+    lsEmail === activeEmail &&
+    (activeGcpProject
+      ? (logPid ? logPid === activeGcpProject : Boolean(tierIndicatesGcp || lsHasGcpModels))
+      : (!logPid && !tierIndicatesGcp))
+  );
   const effectiveClientModels = lsModeMatches ? clientModelConfigs : [];
 
   const liveChannelKey = activeEmail
@@ -828,10 +836,14 @@ export async function switchActiveGoogleAccount(accountId, opts = {}) {
     ? (targetBillingMode === "agent_platform" ? (target.gcpLocation || "global") : "")
     : "";
 
-  const baseToken = findStoredTokenForEmail(cfg, target.email, Boolean(targetProject)) || target.storedToken;
-  if (!baseToken) {
+  const rawBaseToken =
+    cfg.__meta__?.channelTokensById?.[target.id] ||
+    target.storedToken ||
+    findStoredTokenForEmail(cfg, target.email, Boolean(targetProject));
+  if (!rawBaseToken) {
     throw new Error(`未找到账号 ${target.email} 的凭据快照`);
   }
+  const baseToken = JSON.parse(JSON.stringify(rawBaseToken));
 
   if (baseToken.token?.refresh_token) {
     try {
@@ -842,13 +854,6 @@ export async function switchActiveGoogleAccount(accountId, opts = {}) {
         baseToken.token.access_token = refreshed.access_token;
         baseToken.token.refreshedForRt = rt;
         baseToken.token.expiry = newExpiry;
-        for (const item of Object.values(cfg.accounts || {})) {
-          if (item.storedToken?.token?.refresh_token === rt) {
-            item.storedToken.token.access_token = refreshed.access_token;
-            item.storedToken.token.refreshedForRt = rt;
-            item.storedToken.token.expiry = newExpiry;
-          }
-        }
       }
     } catch {}
   }
@@ -869,6 +874,10 @@ export async function switchActiveGoogleAccount(accountId, opts = {}) {
 
   const tokenToWrite = buildCleanChannelToken(baseToken, targetProject, targetLocation, true);
   target.storedToken = tokenToWrite;
+  if (!cfg.__meta__.channelTokensById || typeof cfg.__meta__.channelTokensById !== "object") {
+    cfg.__meta__.channelTokensById = {};
+  }
+  cfg.__meta__.channelTokensById[target.id] = JSON.parse(JSON.stringify(tokenToWrite));
 
   let otherRestoreCred = null;
   if (otherLsPids.length > 0) {
@@ -878,7 +887,10 @@ export async function switchActiveGoogleAccount(accountId, opts = {}) {
         if (originalWinCred && originalWinCred.project_id === otherInst.gcpProjectId) {
           otherRestoreCred = { ...originalWinCred, writer_id: tokenToWrite.writer_id };
         } else {
-          const otherBase = otherAcc?.storedToken || findStoredTokenForEmail(cfg, otherInst.email, true);
+          const otherBase =
+            (otherInst.activeChannelId ? cfg.__meta__?.channelTokensById?.[otherInst.activeChannelId] : null) ||
+            otherAcc?.storedToken ||
+            findStoredTokenForEmail(cfg, otherInst.email, true);
           if (otherBase) {
             const otherMode = otherAcc?.gcpBillingMode || "agent_platform";
             const otherLoc = otherMode === "agent_platform" ? (otherAcc?.gcpLocation || "global") : "";
@@ -887,7 +899,10 @@ export async function switchActiveGoogleAccount(accountId, opts = {}) {
           }
         }
       } else {
-        const otherBase = otherAcc?.storedToken || findStoredTokenForEmail(cfg, otherInst.email, false);
+        const otherBase =
+          (otherInst.activeChannelId ? cfg.__meta__?.channelTokensById?.[otherInst.activeChannelId] : null) ||
+          otherAcc?.storedToken ||
+          findStoredTokenForEmail(cfg, otherInst.email, false);
         if (otherBase) {
           otherRestoreCred = buildCleanChannelToken(otherBase, "", "", false);
           if (otherRestoreCred) otherRestoreCred.writer_id = tokenToWrite.writer_id;
@@ -907,6 +922,7 @@ export async function switchActiveGoogleAccount(accountId, opts = {}) {
   instMeta.switchedViaPanel = true;
   if (ctx.isIsolatedInstance && ctx.userDataDir) {
     const updatedDesc = {
+      ...(ctx.descriptor || {}),
       instanceId: ctx.instanceId,
       activeChannelId: target.id,
       email: target.email,
@@ -936,12 +952,12 @@ export async function switchActiveGoogleAccount(accountId, opts = {}) {
     await callLsRpc(currentLs, "SetCloudCodeURL", { url: targetUrl }).catch(() => {});
   }
 
-  const usedIsolatedSync = writeWinCredIsolatedForProcess(
+  await writeInstanceCredentialAndAwaitSync(
     tokenToWrite,
+    ctx,
     otherRestoreCred,
     otherLsPids,
-    5800,
-    ctx.lsLogFile
+    5600
   );
 
   if (!targetProject) {
@@ -952,10 +968,7 @@ export async function switchActiveGoogleAccount(accountId, opts = {}) {
   }
 
   if (currentLs) {
-    if (!usedIsolatedSync) {
-      await new Promise((r) => setTimeout(r, 1150));
-    }
-    if (targetProject && !usedIsolatedSync) {
+    if (targetProject) {
       await callLsRpc(currentLs, "ValidateProject", { projectId: targetProject, location: targetLocation }).catch(() => {});
     }
     await callLsRpc(currentLs, "SetCloudCodeURL", { url: targetUrl }).catch(() => {});
@@ -971,17 +984,11 @@ export async function switchActiveGoogleAccount(accountId, opts = {}) {
     const scrubbedIds = await scrubRecentConversationsSignatures(currentLs).catch(() => []);
     scrubbedCount = Array.isArray(scrubbedIds) ? scrubbedIds.length : 0;
   }
-  scheduleDetachedLanguageServerRestart(
-    usedIsolatedSync ? null : tokenToWrite,
-    currentLs,
-    Boolean(targetProject),
-    localProxyUrl,
-    null
-  );
+
   const reloadCtx = { ...ctx };
   setTimeout(() => {
     reloadInstanceWorkbenchViaCdp(reloadCtx).catch(() => {});
-  }, 350);
+  }, 650);
 
   return {
     switchedTo: target.email,

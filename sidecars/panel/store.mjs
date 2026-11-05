@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 function resolveHostHomeDir() {
+  const realEnv = String(process.env.AGY_REAL_USERPROFILE || "").trim();
+  if (realEnv && fs.existsSync(realEnv)) return path.normalize(realEnv);
   const normalized = __dirname.replace(/\\/g, "/");
   const geminiIdx = normalized.toLowerCase().indexOf("/.gemini/");
   if (geminiIdx > 0) {
@@ -52,6 +54,66 @@ function extractActiveSegmentFromLsLog(logFilePath) {
   } catch {
     return { pid: 0, segment: "" };
   }
+}
+
+export function getInstanceTokenFilePath(userDataDir) {
+  if (!userDataDir) return "";
+  return path.join(userDataDir, "home", ".gemini", "jetski-standalone-oauth-token");
+}
+
+export function ensureInstanceIsolatedHome(userDataDir) {
+  if (!userDataDir) return "";
+  const isoHome = path.join(userDataDir, "home");
+  const isoGemini = path.join(isoHome, ".gemini");
+  const isoCache = path.join(isoGemini, "cache");
+  try {
+    fs.mkdirSync(isoCache, { recursive: true });
+    const markerFile = path.join(isoCache, "antigravity-keyring-unavailable");
+    fs.writeFileSync(markerFile, "1", "utf8");
+    const futureDate = new Date("2099-01-01T00:00:00.000Z");
+    try {
+      fs.utimesSync(markerFile, futureDate, futureDate);
+    } catch {}
+  } catch {}
+
+  const realGemini = path.join(HOME_DIR, ".gemini");
+  try {
+    if (fs.existsSync(realGemini)) {
+      for (const entry of fs.readdirSync(realGemini, { withFileTypes: true })) {
+        if (entry.name === "cache" || entry.name === "jetski-standalone-oauth-token") continue;
+        const src = path.join(realGemini, entry.name);
+        const dst = path.join(isoGemini, entry.name);
+        if (fs.existsSync(dst)) continue;
+        try {
+          if (entry.isDirectory()) {
+            fs.symlinkSync(src, dst, "junction");
+          } else if (entry.isFile() && entry.name === "settings.json") {
+            fs.copyFileSync(src, dst);
+          }
+        } catch {}
+      }
+    }
+  } catch {}
+
+  try {
+    if (fs.existsSync(HOME_DIR)) {
+      for (const entry of fs.readdirSync(HOME_DIR, { withFileTypes: true })) {
+        if (entry.name.toLowerCase() === ".gemini") continue;
+        const src = path.join(HOME_DIR, entry.name);
+        const dst = path.join(isoHome, entry.name);
+        if (fs.existsSync(dst)) continue;
+        try {
+          if (entry.isDirectory()) {
+            fs.symlinkSync(src, dst, "junction");
+          } else if (entry.isFile() && entry.name.startsWith(".")) {
+            fs.copyFileSync(src, dst);
+          }
+        } catch {}
+      }
+    }
+  } catch {}
+
+  return isoHome;
 }
 
 export function readInstanceDescriptor(userDataDir) {

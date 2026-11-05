@@ -11,7 +11,8 @@ import {
   writeRelayConfig,
   resolveCurrentInstanceContext,
   writeInstanceDescriptor,
-  getInstanceMeta
+  getInstanceMeta,
+  ensureInstanceIsolatedHome
 } from "../store.mjs";
 import {
   AGY_OAUTH_CLIENT_ID,
@@ -21,6 +22,7 @@ import {
   getOAuthClientForChannel,
   readWinCredToken,
   writeWinCredToken,
+  writeInstanceTokenFile,
   syncInstanceAppStorage,
   buildCleanChannelToken,
   refreshOAuthAccessToken,
@@ -228,13 +230,20 @@ function fetchCdpTargetsList(port, timeout = 320) {
 export async function reloadInstanceWorkbenchViaCdp(ctx = null) {
   const activeCtx = ctx || resolveCurrentInstanceContext();
   const port = discoverInstanceCdpPort(activeCtx);
-  const targets = await fetchCdpTargetsList(port, 600);
-  const pageTargets = targets.filter(
-    (t) => t && t.type === "page" && typeof t.webSocketDebuggerUrl === "string" && !/sidecar|devtools/i.test(String(t.url || ""))
-  );
-  const mainTarget = pageTargets.find((t) => /workbench|cascade|vscode-file|jetski/i.test(String(t.url || ""))) || pageTargets[0];
-  if (!mainTarget?.webSocketDebuggerUrl) return false;
-  return sendCdpCommandOverWebSocket(mainTarget.webSocketDebuggerUrl, "Page.reload", { ignoreCache: false });
+  const targets = await fetchCdpTargetsList(port, 800);
+  const pageTargets = targets.filter((t) => {
+    if (!t || t.type !== "page" || typeof t.webSocketDebuggerUrl !== "string") return false;
+    const u = String(t.url || "").trim().toLowerCase();
+    if (!u || u.startsWith("devtools://") || u.startsWith("chrome-devtools://") || u.startsWith("plugin://")) return false;
+    return true;
+  });
+  if (pageTargets.length === 0) return false;
+  let anyOk = false;
+  for (const pt of pageTargets) {
+    const ok = await sendCdpCommandOverWebSocket(pt.webSocketDebuggerUrl, "Page.reload", { ignoreCache: false });
+    if (ok) anyOk = true;
+  }
+  return anyOk;
 }
 
 async function fetchWindowActiveConvIdViaCdp(port) {
@@ -518,75 +527,48 @@ export async function launchIsolatedAntigravityInstance(accountId) {
     throw new Error("未找到本机 Antigravity.exe 可执行文件");
   }
 
-  const rawWinCred = readWinCredToken(true) || readWinCredToken(false);
-  const curCtx = resolveCurrentInstanceContext();
-  const curMeta = getInstanceMeta(cfg, curCtx);
-  const curActiveId =
-    curMeta?.activeChannelId ||
-    curCtx?.descriptor?.activeChannelId ||
-    (!curCtx?.isIsolatedInstance ? cfg.__meta__?.activeChannelId : "") ||
-    "";
-  const curActiveAcc = curActiveId ? cfg.accounts?.[curActiveId] : null;
-  let originalMainCred = rawWinCred;
-  if (curActiveAcc) {
-    const curProj = (curActiveAcc.gcpProjectId || "").trim();
-    const curMode = curProj ? (curActiveAcc.gcpBillingMode || "agent_platform") : "";
-    const curLoc = curProj ? (curMode === "agent_platform" ? (curActiveAcc.gcpLocation || "global") : "") : "";
-    const curBase = curActiveAcc.storedToken || findStoredTokenForEmail(cfg, curActiveAcc.email, Boolean(curProj));
-    if (curBase) {
-      const builtCur = buildCleanChannelToken(curBase, curProj, curLoc, false);
-      if (builtCur) {
-        if (rawWinCred?.writer_id) builtCur.writer_id = rawWinCred.writer_id;
-        originalMainCred = builtCur;
-      }
-    }
-  }
-
   const targetProject = (target.gcpProjectId || "").trim();
   const targetBillingMode = targetProject ? (target.gcpBillingMode || "agent_platform") : "";
   const targetLocation = targetProject
     ? (targetBillingMode === "agent_platform" ? (target.gcpLocation || "global") : "")
     : "";
 
-  const baseToken = target.storedToken || findStoredTokenForEmail(cfg, target.email, Boolean(targetProject));
+  const baseToken =
+    cfg.__meta__?.channelTokensById?.[target.id] ||
+    target.storedToken ||
+    findStoredTokenForEmail(cfg, target.email, Boolean(targetProject));
   if (!baseToken) {
     throw new Error(`未找到账号 ${target.email} 的凭据快照`);
   }
 
-  if (baseToken.token?.refresh_token) {
+  const clonedBase = JSON.parse(JSON.stringify(baseToken));
+  if (clonedBase.token?.refresh_token) {
     try {
-      const rt = baseToken.token.refresh_token;
+      const rt = clonedBase.token.refresh_token;
       const refreshed = await refreshOAuthAccessToken(rt);
       if (refreshed && refreshed.access_token) {
         const newExpiry = new Date(Date.now() + (refreshed.expires_in || 3599) * 1000).toISOString();
-        baseToken.token.access_token = refreshed.access_token;
-        baseToken.token.refreshedForRt = rt;
-        baseToken.token.expiry = newExpiry;
-        for (const item of Object.values(cfg.accounts || {})) {
-          if (item.storedToken?.token?.refresh_token === rt) {
-            item.storedToken.token.access_token = refreshed.access_token;
-            item.storedToken.token.refreshedForRt = rt;
-            item.storedToken.token.expiry = newExpiry;
-          }
-        }
+        clonedBase.token.access_token = refreshed.access_token;
+        clonedBase.token.refreshedForRt = rt;
+        clonedBase.token.expiry = newExpiry;
       }
     } catch {}
   }
 
-  // 关键防串扰机制：保留主实例原本的 writer_id（forceNewWriterId = false），使主实例的 language_server.exe (1s 轮询 writer_id) 完全无感、不触发切换，而新拉起的实例进程在冷启动时直接读取该目标通道凭据
-  const tokenToWrite = buildCleanChannelToken(baseToken, targetProject, targetLocation, false);
-  if (originalMainCred?.writer_id) {
-    tokenToWrite.writer_id = originalMainCred.writer_id;
-  }
+  const tokenToWrite = buildCleanChannelToken(clonedBase, targetProject, targetLocation, true);
   target.storedToken = tokenToWrite;
-  writeWinCredToken(tokenToWrite);
-  writeRelayConfig(cfg);
+  if (!cfg.__meta__.channelTokensById || typeof cfg.__meta__.channelTokensById !== "object") {
+    cfg.__meta__.channelTokensById = {};
+  }
+  cfg.__meta__.channelTokensById[target.id] = JSON.parse(JSON.stringify(tokenToWrite));
 
   const safeFolder = rawId.replace(/[^a-zA-Z0-9._-]+/g, "_");
   const instanceUserDataDir = path.join(HOME_DIR, ".gemini", "antigravity-instances", safeFolder);
   const instanceUserDir = path.join(instanceUserDataDir, "User");
   const instanceGlobalStorageDir = path.join(instanceUserDir, "globalStorage");
   const instanceLogsDir = path.join(instanceUserDataDir, "logs");
+  const isoHomeDir = ensureInstanceIsolatedHome(instanceUserDataDir);
+  writeInstanceTokenFile(instanceUserDataDir, tokenToWrite);
 
   try {
     fs.mkdirSync(instanceGlobalStorageDir, { recursive: true });
@@ -600,7 +582,6 @@ export async function launchIsolatedAntigravityInstance(accountId) {
     if (fs.existsSync(mainSettings) && !fs.existsSync(destSettings)) {
       fs.copyFileSync(mainSettings, destSettings);
     }
-    // 仅同步主实例的 window_state.json，并为多开实例生成完全独立干净的 app_storage.json（绝不拷贝主窗口历史会话布局或旧登录状态）
     const srcWinState = path.join(mainAppDataDir, "window_state.json");
     const dstWinState = path.join(instanceUserDataDir, "window_state.json");
     if (fs.existsSync(srcWinState) && !fs.existsSync(dstWinState)) {
@@ -616,6 +597,7 @@ export async function launchIsolatedAntigravityInstance(accountId) {
     email: target.email,
     gcpProjectId: targetProject,
     userDataDir: instanceUserDataDir,
+    isolatedTokenStorage: "file",
     launchedAt
   });
   const isoMeta = getInstanceMeta(cfg, {
@@ -631,15 +613,6 @@ export async function launchIsolatedAntigravityInstance(accountId) {
   isoMeta.switchedViaPanel = true;
   writeRelayConfig(cfg);
 
-  const instanceLsLogPath = path.join(instanceLogsDir, "language_server.log");
-  let prevLsLogSize = 0;
-  try {
-    if (fs.existsSync(instanceLsLogPath)) {
-      prevLsLogSize = fs.statSync(instanceLsLogPath).size;
-    }
-  } catch {}
-
-  // 剔除 Sidecar 宿主私有环境变量（ELECTRON_RUN_AS_NODE=1、CHROME_CRASHPAD_PIPE_NAME 等），确保拉起完整 GUI 窗口，同时注入当前多开实例标识
   const cleanEnv = { ...process.env };
   for (const k of Object.keys(cleanEnv)) {
     if (
@@ -656,18 +629,23 @@ export async function launchIsolatedAntigravityInstance(accountId) {
       delete cleanEnv[k];
     }
   }
+  cleanEnv.USERPROFILE = isoHomeDir;
+  cleanEnv.HOME = isoHomeDir;
+  cleanEnv.SSH_TTY = "1";
+  cleanEnv.AGY_REAL_USERPROFILE = HOME_DIR;
   cleanEnv.AGY_RELAY_INSTANCE_ID = safeFolder;
   cleanEnv.AGY_RELAY_INSTANCE_USER_DATA_DIR = instanceUserDataDir;
   cleanEnv.PLUGIN_SWITCHER_DISABLE_8088 = "1";
 
-  // Chromium 底层仅识别等号连接的 --user-data-dir=<path> 参数以在 app.requestSingleInstanceLock() 前切换数据目录锁
   const userDataArg = `--user-data-dir=${instanceUserDataDir}`;
   let launchedPid = 0;
   try {
     const psExe = exePath.replace(/'/g, "''");
     const psDir = path.dirname(exePath).replace(/'/g, "''");
     const psDataArg = userDataArg.replace(/'/g, "''");
-    const psCmd = `$p = Start-Process -FilePath '${psExe}' -WorkingDirectory '${psDir}' -ArgumentList @('${psDataArg}') -WindowStyle Normal -PassThru; if ($p) { Write-Output $p.Id }`;
+    const psIsoHome = isoHomeDir.replace(/'/g, "''");
+    const psRealHome = HOME_DIR.replace(/'/g, "''");
+    const psCmd = `$env:USERPROFILE = '${psIsoHome}'; $env:HOME = '${psIsoHome}'; $env:SSH_TTY = '1'; $env:AGY_REAL_USERPROFILE = '${psRealHome}'; $p = Start-Process -FilePath '${psExe}' -WorkingDirectory '${psDir}' -ArgumentList @('${psDataArg}') -WindowStyle Normal -PassThru; if ($p) { Write-Output $p.Id }`;
     const out = execFileSync(
       "powershell.exe",
       ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", psCmd],
@@ -689,46 +667,6 @@ export async function launchIsolatedAntigravityInstance(accountId) {
     });
     child.unref();
     launchedPid = child.pid || 0;
-  }
-
-  // 轮询新实例 logs/language_server.log 确认 initialized server successfully 且度过 +2.6s 二次 ApplyToken 窗口（或最长 8.5 秒超时）后，无感还原主实例原本的 WinCred 凭据（保持相同 writer_id，新旧实例双端零互扰）
-  if (originalMainCred) {
-    const startWait = Date.now();
-    let initializedAt = 0;
-    const restoreOriginalCred = () => {
-      try {
-        writeWinCredToken(originalMainCred);
-      } catch {}
-    };
-    const pollTimer = setInterval(() => {
-      const now = Date.now();
-      const elapsed = now - startWait;
-      try {
-        if (fs.existsSync(instanceLsLogPath)) {
-          const st = fs.statSync(instanceLsLogPath);
-          if (st.size > prevLsLogSize) {
-            const fd = fs.openSync(instanceLsLogPath, "r");
-            try {
-              const len = Math.min(65536, st.size - prevLsLogSize);
-              const buf = Buffer.alloc(len);
-              fs.readSync(fd, buf, 0, len, prevLsLogSize);
-              const tailText = buf.toString("utf8");
-              if (/initialized server successfully/i.test(tailText)) {
-                if (!initializedAt) initializedAt = now;
-              }
-            } finally {
-              fs.closeSync(fd);
-            }
-          }
-        }
-      } catch {}
-      const readyAfterInit = initializedAt > 0 && now - initializedAt >= 1600;
-      if (readyAfterInit || elapsed >= 8500) {
-        clearInterval(pollTimer);
-        restoreOriginalCred();
-      }
-    }, 350);
-    if (typeof pollTimer.unref === "function") pollTimer.unref();
   }
 
   return {
