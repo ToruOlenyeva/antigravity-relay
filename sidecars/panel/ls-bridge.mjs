@@ -24,6 +24,7 @@ const _wincredMod = await import("./bridge/wincred-ls.mjs");
 const {
   readWinCredToken,
   writeWinCredToken,
+  writeWinCredIsolatedForProcess,
   buildCleanChannelToken,
   parseLsLogInfo,
   listRunningLanguageServerProcesses,
@@ -846,26 +847,41 @@ export async function switchActiveGoogleAccount(accountId, opts = {}) {
   }
 
   const originalWinCred = readWinCredToken(true) || readWinCredToken(false);
-  const hasOtherLiveInstance = Boolean(fieldStatus.otherGcpInstance || fieldStatus.otherPersonalInstance);
-  const sharedWriterId = originalWinCred?.writer_id || "";
+  const otherInst = fieldStatus.otherGcpInstance || fieldStatus.otherPersonalInstance || null;
   const currentLs = discoverLanguageServer(false);
+  const allLsProcs = listRunningLanguageServerProcesses();
+  const otherLsPids = currentLs?.pid
+    ? allLsProcs.map((p) => Number(p.pid)).filter((pid) => pid > 0 && pid !== Number(currentLs.pid))
+    : [];
+  const localProxyUrl = getActiveCloudCodeProxyUrl(cfg);
+  const targetUrl = targetProject ? "https://daily-cloudcode-pa.googleapis.com" : localProxyUrl;
 
-  // 若存在另一运行中的窗口实例，保持相同的 writer_id（使另一窗口的 LS 1s 轮询完全无感、不发生连带切换），
-  // 同时对当前窗口的 LS 单独调用 AuthLogout 清空其内存 writer_id 缓存，使其立即重新读取 WinCred 并刷新当前窗口 IDE 的登录账号
-  const tokenToWrite = buildCleanChannelToken(baseToken, targetProject, targetLocation, !hasOtherLiveInstance);
-  if (hasOtherLiveInstance && sharedWriterId) {
-    tokenToWrite.writer_id = sharedWriterId;
-  }
+  const tokenToWrite = buildCleanChannelToken(baseToken, targetProject, targetLocation, true);
   target.storedToken = tokenToWrite;
 
-  if (hasOtherLiveInstance && currentLs) {
-    await callLsRpc(currentLs, "AuthLogout", {}).catch(() => {});
+  let otherRestoreCred = null;
+  if (otherInst && otherLsPids.length > 0) {
+    const otherAcc = otherInst.activeChannelId ? cfg.accounts?.[otherInst.activeChannelId] : null;
+    if (otherInst.gcpProjectId) {
+      if (originalWinCred && originalWinCred.project_id === otherInst.gcpProjectId) {
+        otherRestoreCred = { ...originalWinCred, writer_id: tokenToWrite.writer_id };
+      } else {
+        const otherBase = otherAcc?.storedToken || findStoredTokenForEmail(cfg, otherInst.email, true);
+        if (otherBase) {
+          const otherMode = otherAcc?.gcpBillingMode || "agent_platform";
+          const otherLoc = otherMode === "agent_platform" ? (otherAcc?.gcpLocation || "global") : "";
+          otherRestoreCred = buildCleanChannelToken(otherBase, otherInst.gcpProjectId, otherLoc, false);
+          if (otherRestoreCred) otherRestoreCred.writer_id = tokenToWrite.writer_id;
+        }
+      }
+    } else {
+      const otherBase = otherAcc?.storedToken || findStoredTokenForEmail(cfg, otherInst.email, false);
+      if (otherBase) {
+        otherRestoreCred = buildCleanChannelToken(otherBase, "", "", false);
+        if (otherRestoreCred) otherRestoreCred.writer_id = tokenToWrite.writer_id;
+      }
+    }
   }
-  writeWinCredToken(tokenToWrite);
-
-  const restoreCredAfterSwitch = (hasOtherLiveInstance && !nextIsGcp && originalWinCred && originalWinCred.project_id)
-    ? { ...originalWinCred, writer_id: tokenToWrite.writer_id }
-    : null;
 
   const nowTs = Date.now();
   instMeta.activeChannelId = target.id;
@@ -894,12 +910,30 @@ export async function switchActiveGoogleAccount(accountId, opts = {}) {
   cfg.__meta__.convLastChannelMap = {};
   writeRelayConfig(cfg);
 
-  // 若切换到个人号，确保其配额与模型快照立刻就绪，使前端 0ms 无需手动刷新即可呈现完整配额条
+  if (currentLs) {
+    await callLsRpc(currentLs, "ValidateProject", { projectId: targetProject, location: targetLocation }).catch(() => {});
+    await callLsRpc(currentLs, "SetCloudCodeURL", { url: targetUrl }).catch(() => {});
+  }
+
+  const usedIsolatedSync = writeWinCredIsolatedForProcess(tokenToWrite, otherRestoreCred, otherLsPids, 1450);
+
   if (!targetProject) {
     const cachedAt = Number(target.cachedQuota?.updatedAt || 0);
     if (!target.cachedQuota?.quotaGroups?.length || Date.now() - cachedAt > 20000) {
       await probeChannelQuotaSnapshot(target.id).catch(() => {});
     }
+  }
+
+  if (currentLs) {
+    if (!usedIsolatedSync) {
+      await new Promise((r) => setTimeout(r, 1150));
+    }
+    await callLsRpc(currentLs, "ValidateProject", { projectId: targetProject, location: targetLocation }).catch(() => {});
+    await callLsRpc(currentLs, "SetCloudCodeURL", { url: targetUrl }).catch(() => {});
+    await Promise.allSettled([
+      callLsRpc(currentLs, "GetUserStatus", {}),
+      callLsRpc(currentLs, "RetrieveUserQuotaSummary", {})
+    ]);
   }
 
   const shouldScrub = opts.scrubSignatures === true || (isCrossChannel && opts.scrubSignatures !== false);
@@ -909,11 +943,11 @@ export async function switchActiveGoogleAccount(accountId, opts = {}) {
     scrubbedCount = Array.isArray(scrubbedIds) ? scrubbedIds.length : 0;
   }
   scheduleDetachedLanguageServerRestart(
-    tokenToWrite,
+    usedIsolatedSync ? null : tokenToWrite,
     currentLs,
     Boolean(targetProject),
-    getActiveCloudCodeProxyUrl(cfg),
-    restoreCredAfterSwitch
+    localProxyUrl,
+    null
   );
 
   return {

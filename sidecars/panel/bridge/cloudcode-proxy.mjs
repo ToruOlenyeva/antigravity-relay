@@ -172,7 +172,10 @@ export function selectBestPersonalChannelForModel(baseFamily, cfg) {
 }
 
 export async function getValidPersonalAccessToken(cfg, targetAcc) {
-  const baseToken = targetAcc?.storedToken || findStoredTokenForEmail(cfg, targetAcc?.email, false);
+  const preferredStored = (targetAcc?.storedToken && !targetAcc.storedToken.project_id && targetAcc.storedToken.auth_method !== "gcp")
+    ? targetAcc.storedToken
+    : null;
+  const baseToken = preferredStored || findStoredTokenForEmail(cfg, targetAcc?.email, false) || targetAcc?.storedToken;
   if (!baseToken || !baseToken.token) return "";
   let accessToken = baseToken.token.access_token || "";
   const refreshToken = baseToken.token.refresh_token || "";
@@ -225,7 +228,7 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
   const instMeta = getInstanceMeta(cfg, ctx);
   const isGenerateEndpoint = /^\/v1internal:(streamGenerateContent|generateContent|countTokens)\b/i.test(reqUrl);
   const isFetchModelsEndpoint = /^\/v1internal:fetchAvailableModels\b/i.test(reqUrl);
-  const isPersonalControlEndpoint = /^\/v1internal:(fetchAvailableModels|retrieveUserQuotaSummary|loadCodeAssist)\b/i.test(reqUrl);
+  const isPersonalControlEndpoint = !isGenerateEndpoint && /^\/v1internal:/i.test(reqUrl);
 
   const outHeaders = {};
   for (const [k, v] of Object.entries(req.headers || {})) {
@@ -239,7 +242,12 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
   let routedTargetAcc = null;
   let strippedSigCount = 0;
 
-  const activeChannelId = String(instMeta?.activeChannelId || (!ctx.isIsolatedInstance ? cfg.__meta__?.activeChannelId : "") || "").trim();
+  const descId = ctx.isIsolatedInstance ? String(ctx.descriptor?.activeChannelId || "").trim() : "";
+  const descTs = ctx.isIsolatedInstance ? Math.max(Number(ctx.descriptor?.switchedAt || 0), Number(ctx.descriptor?.launchedAt || 0)) : 0;
+  const metaTs = Math.max(Number(instMeta?.switchedAt || 0), Number(instMeta?.seededLaunchAt || 0));
+  const activeChannelId = String(
+    (descId && descTs >= metaTs ? descId : (instMeta?.activeChannelId || descId || (!ctx.isIsolatedInstance ? cfg.__meta__?.activeChannelId : ""))) || ""
+  ).trim();
   const activePersonalAcc = (activeChannelId && cfg.accounts?.[activeChannelId] && cfg.accounts[activeChannelId].channelType !== "gcp" && !cfg.accounts[activeChannelId].gcpProjectId)
     ? cfg.accounts[activeChannelId]
     : null;
@@ -271,6 +279,8 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
         if (targetToken) {
           outHeaders["authorization"] = `Bearer ${targetToken}`;
           delete outHeaders["Authorization"];
+          delete outHeaders["x-goog-user-project"];
+          delete outHeaders["X-Goog-User-Project"];
           bodyJson.project = "aicode-consumers";
           cfg.__meta__.lastRoutedChannelId = routedTargetAcc.id;
           cfg.__meta__.lastProxyHit = {
@@ -297,21 +307,25 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
       if (targetToken) {
         outHeaders["authorization"] = `Bearer ${targetToken}`;
         delete outHeaders["Authorization"];
+        delete outHeaders["x-goog-user-project"];
+        delete outHeaders["X-Goog-User-Project"];
       }
       if (outBodyBuf.length > 0) {
-        const ctrlJson = JSON.parse(outBodyBuf.toString("utf8"));
-        let ctrlModified = false;
-        if (ctrlJson.project && ctrlJson.project !== "aicode-consumers") {
-          delete ctrlJson.project;
-          ctrlModified = true;
-        }
-        if (ctrlJson.cloudaicompanionProject) {
-          delete ctrlJson.cloudaicompanionProject;
-          ctrlModified = true;
-        }
-        if (ctrlModified) {
-          outBodyBuf = Buffer.from(JSON.stringify(ctrlJson), "utf8");
-        }
+        try {
+          const ctrlJson = JSON.parse(outBodyBuf.toString("utf8"));
+          let ctrlModified = false;
+          if (ctrlJson.project && ctrlJson.project !== "aicode-consumers") {
+            delete ctrlJson.project;
+            ctrlModified = true;
+          }
+          if (ctrlJson.cloudaicompanionProject) {
+            delete ctrlJson.cloudaicompanionProject;
+            ctrlModified = true;
+          }
+          if (ctrlModified) {
+            outBodyBuf = Buffer.from(JSON.stringify(ctrlJson), "utf8");
+          }
+        } catch {}
       }
     } catch {}
   }

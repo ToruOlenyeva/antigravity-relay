@@ -108,6 +108,18 @@ public class WinCred {
     [DllImport("advapi32.dll", EntryPoint = "CredFree", SetLastError = true)]
     public static extern bool CredFree([In] IntPtr cred);
 
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, int dwProcessId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool CloseHandle(IntPtr hObject);
+
+    [DllImport("ntdll.dll")]
+    public static extern int NtSuspendProcess(IntPtr processHandle);
+
+    [DllImport("ntdll.dll")]
+    public static extern int NtResumeProcess(IntPtr processHandle);
+
     public static string Read(string target) {
         IntPtr credPtr;
         if (!CredRead(target, 1, 0, out credPtr)) return null;
@@ -137,6 +149,36 @@ public class WinCred {
             return CredWrite(ref cred, 0);
         } finally {
             Marshal.FreeHGlobal(cred.CredentialBlob);
+        }
+    }
+
+    public static bool WriteIsolated(string target, string user, string tempSecret, string restoreSecret, int[] suspendPids, int holdMs) {
+        IntPtr[] handles = new IntPtr[suspendPids != null ? suspendPids.Length : 0];
+        try {
+            for (int i = 0; i < handles.Length; i++) {
+                if (suspendPids[i] > 0) {
+                    IntPtr h = OpenProcess(0x0800, false, suspendPids[i]);
+                    if (h != IntPtr.Zero) {
+                        NtSuspendProcess(h);
+                        handles[i] = h;
+                    }
+                }
+            }
+            if (!Write(target, user, tempSecret)) return false;
+            if (holdMs > 0) {
+                System.Threading.Thread.Sleep(holdMs);
+            }
+            return true;
+        } finally {
+            if (!string.IsNullOrEmpty(restoreSecret)) {
+                try { Write(target, user, restoreSecret); } catch {}
+            }
+            for (int i = 0; i < handles.Length; i++) {
+                if (handles[i] != IntPtr.Zero) {
+                    try { NtResumeProcess(handles[i]); } catch {}
+                    try { CloseHandle(handles[i]); } catch {}
+                }
+            }
         }
     }
 }
@@ -199,6 +241,48 @@ ${WINCRED_CSHARP}
       fs.writeFileSync(JETSKI_TOKEN_FILE, jsonStr, { encoding: "utf8", mode: 0o600 });
     }
   } catch {}
+}
+
+export function writeWinCredIsolatedForProcess(tempTokenObj, restoreTokenObj, suspendPids = [], holdMs = 1450) {
+  const cleanPids = (Array.isArray(suspendPids) ? suspendPids : [])
+    .map((n) => Number(n))
+    .filter((n) => Number.isFinite(n) && n > 0);
+  if (cleanPids.length === 0 || !restoreTokenObj) {
+    writeWinCredToken(tempTokenObj);
+    return false;
+  }
+  const alignedRestore = {
+    ...restoreTokenObj,
+    writer_id: tempTokenObj.writer_id
+  };
+  const tempStr = JSON.stringify(tempTokenObj);
+  const restoreStr = JSON.stringify(alignedRestore);
+  const tempB64 = Buffer.from(tempStr, "utf8").toString("base64");
+  const restoreB64 = Buffer.from(restoreStr, "utf8").toString("base64");
+  const pidListExpr = `@(${cleanPids.join(",")})`;
+  const ps = `
+    Add-Type -TypeDefinition @'
+${WINCRED_CSHARP}
+'@
+    $tJson = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('${tempB64}'))
+    $rJson = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('${restoreB64}'))
+    [int[]]$pids = ${pidListExpr}
+    $ok = [WinCred]::WriteIsolated('gemini:antigravity', 'antigravity', $tJson, $rJson, $pids, ${Number(holdMs) || 1450})
+    if (-not $ok) { throw "WriteIsolated failed" }
+  `;
+  execFileSync("powershell.exe", ["-NoProfile", "-Command", ps], {
+    encoding: "utf8",
+    timeout: 10000,
+    windowsHide: true
+  });
+  cachedWinCred = alignedRestore;
+  cachedWinCredAt = Date.now();
+  try {
+    if (fs.existsSync(JETSKI_TOKEN_FILE)) {
+      fs.writeFileSync(JETSKI_TOKEN_FILE, restoreStr, { encoding: "utf8", mode: 0o600 });
+    }
+  } catch {}
+  return true;
 }
 
 export function normalizeIsoExpiry(rawExpiry) {
@@ -773,7 +857,7 @@ export function scheduleDetachedLanguageServerRestart(
   invalidateWinCredCache();
 
   try {
-    if (tokenToLock) {
+    if (tokenToLock && !restoreCredAfterSwitch) {
       writeWinCredToken(tokenToLock);
     }
     if (activeLs) {
@@ -785,21 +869,31 @@ export function scheduleDetachedLanguageServerRestart(
         callLsRpc(activeLs, "ValidateProject", { projectId: "", location: "" }).catch(() => {});
       }
       callLsRpc(activeLs, "SetCloudCodeURL", { url: targetUrl }).catch(() => {});
-      setTimeout(() => {
-        if (tokenToLock) writeWinCredToken(tokenToLock);
-        callLsRpc(activeLs, "GetUserStatus", {}).catch(() => {});
-        callLsRpc(activeLs, "RetrieveUserQuotaSummary", {}).catch(() => {});
-      }, 400);
-      setTimeout(() => {
-        callLsRpc(activeLs, "GetUserStatus", {}).catch(() => {});
-        callLsRpc(activeLs, "RetrieveUserQuotaSummary", {}).catch(() => {});
-      }, 1500);
       if (restoreCredAfterSwitch) {
+        try {
+          writeWinCredToken(restoreCredAfterSwitch);
+        } catch {}
         setTimeout(() => {
-          try {
-            writeWinCredToken(restoreCredAfterSwitch);
-          } catch {}
-        }, 2800);
+          callLsRpc(activeLs, "ValidateProject", { projectId: "", location: "" }).catch(() => {});
+          callLsRpc(activeLs, "SetCloudCodeURL", { url: targetUrl }).catch(() => {});
+          callLsRpc(activeLs, "GetUserStatus", {}).catch(() => {});
+          callLsRpc(activeLs, "RetrieveUserQuotaSummary", {}).catch(() => {});
+        }, 1150);
+        setTimeout(() => {
+          callLsRpc(activeLs, "ValidateProject", { projectId: "", location: "" }).catch(() => {});
+          callLsRpc(activeLs, "GetUserStatus", {}).catch(() => {});
+          callLsRpc(activeLs, "RetrieveUserQuotaSummary", {}).catch(() => {});
+        }, 2100);
+      } else {
+        setTimeout(() => {
+          if (tokenToLock) writeWinCredToken(tokenToLock);
+          callLsRpc(activeLs, "GetUserStatus", {}).catch(() => {});
+          callLsRpc(activeLs, "RetrieveUserQuotaSummary", {}).catch(() => {});
+        }, 400);
+        setTimeout(() => {
+          callLsRpc(activeLs, "GetUserStatus", {}).catch(() => {});
+          callLsRpc(activeLs, "RetrieveUserQuotaSummary", {}).catch(() => {});
+        }, 1500);
       }
     }
   } catch {}
