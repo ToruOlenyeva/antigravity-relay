@@ -541,9 +541,7 @@ function renderAddGcpDrawer() {
     scannedRow.className = "gcp-config-row";
     const scannedOpts = addGcpDraft.scannedProjects.map((p) => ({
       value: p.projectId,
-      label: p.name && p.name !== p.projectId ? `${p.projectId} (${p.name})` : p.projectId,
-      badgeType: "gcp",
-      badgeText: t.channelGcpBadge
+      label: p.name && p.name !== p.projectId ? `${p.projectId} (${p.name})` : p.projectId
     }));
     const scannedDropdown = createCompactFormDropdown(
       scannedOpts,
