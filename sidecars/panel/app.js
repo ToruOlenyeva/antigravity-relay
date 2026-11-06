@@ -23,6 +23,8 @@ let pendingDeleteAccountId = "";
 let pendingDeleteTimer = null;
 // 当前处于跨通道切换待确认是否清除签名的通道 ID
 let pendingCrossSwitchAccountId = "";
+// 当前处于「切换中...」过渡态的目标通道 ID（等待底层完成切换与界面刷新后才变为「使用中」）
+let switchingAccountId = "";
 // 顶部手动清除签名确认抽屉与多开实例抽屉开关状态
 let isScrubSigsDrawerOpen = false;
 let isMultiInstanceDrawerOpen = false;
@@ -645,7 +647,11 @@ async function loadSystemStatus(force = false, silent = false) {
         }
         currentFrontendVersion = data.frontendVersion;
       }
+      const prevActive = state.activeAccount;
       state = data;
+      if (switchingAccountId && prevActive?.channelId) {
+        state.activeAccount = prevActive;
+      }
       renderAll();
       if (!silent) showToast(I18N[currentLang].toastRefreshed);
     }
@@ -843,29 +849,11 @@ async function handleManualScrubSignatures() {
 }
 
 async function switchGoogleAccount(accountId, scrubSignatures = false) {
+  if (switchingAccountId) return;
   try {
     selectedQuotaChannelId = "";
-    const targetAcc = (state.accounts || []).find((a) => a.id === accountId);
-    if (targetAcc) {
-      const isGcp = targetAcc.channelType === "gcp" || Boolean(targetAcc.gcpProjectId);
-      state.activeAccount = {
-        ...(state.activeAccount || {}),
-        channelId: targetAcc.id,
-        email: targetAcc.email,
-        gcpProjectId: isGcp ? (targetAcc.gcpProjectId || "") : "",
-        gcpBillingMode: isGcp ? (targetAcc.gcpBillingMode || "agent_platform") : "",
-        gcpLocation: isGcp ? (targetAcc.gcpLocation || "global") : "",
-        tierCode: targetAcc.tierCode || (isGcp ? "GCP" : "Pro"),
-        tierName: targetAcc.tierName || (isGcp ? "Agent Platform" : "Google AI Pro")
-      };
-      if (Array.isArray(targetAcc.cachedQuota?.availableModels) && targetAcc.cachedQuota.availableModels.length > 0) {
-        state.availableModels = targetAcc.cachedQuota.availableModels;
-      }
-      if (Array.isArray(targetAcc.cachedQuota?.quotaGroups)) {
-        state.quotaGroups = targetAcc.cachedQuota.quotaGroups;
-      }
-      renderAll();
-    }
+    switchingAccountId = accountId;
+    renderAccountList();
     showToast(I18N[currentLang].toastAccountSwitching);
     const res = await fetch("/api/switch-account", {
       method: "POST",
@@ -874,21 +862,28 @@ async function switchGoogleAccount(accountId, scrubSignatures = false) {
     });
     const data = await res.json();
     if (data && data.error) {
+      switchingAccountId = "";
       showToast(data.error);
       if (data.snapshot) {
         state = data.snapshot;
-        renderAll();
       }
+      renderAll();
       return;
     }
-    if (data.snapshot) {
-      state = data.snapshot;
+    // 保持「切换中...」过渡态直至 Workbench 自动刷新重载完成（若在独立浏览器打开无 CDP 重载，则在 1.8 秒后切换为「使用中」）
+    setTimeout(() => {
+      switchingAccountId = "";
+      if (data && data.snapshot) {
+        state = data.snapshot;
+      }
       renderAll();
-    }
-    showToast(I18N[currentLang].toastRefreshed);
-    setTimeout(() => loadSystemStatus(true, true), 900);
-    setTimeout(() => loadSystemStatus(false, true), 2400);
-  } catch (e) {}
+      showToast(I18N[currentLang].toastRefreshed);
+      loadSystemStatus(true, true);
+    }, 1800);
+  } catch (e) {
+    switchingAccountId = "";
+    renderAccountList();
+  }
 }
 
 async function launchIsolatedInstance(accountId) {
@@ -968,7 +963,11 @@ function connectSse() {
             currentFrontendVersion = snap.frontendVersion;
           }
           const prevOAuthEvent = snap.lastOAuthEvent;
+          const prevActive = state.activeAccount;
           state = snap;
+          if (switchingAccountId && prevActive?.channelId) {
+            state.activeAccount = prevActive;
+          }
           if (prevOAuthEvent?.success && prevOAuthEvent.email) {
             if (prevOAuthEvent.autoScanGcp) {
               isAddGcpDrawerOpen = true;

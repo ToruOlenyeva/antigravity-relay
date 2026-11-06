@@ -291,17 +291,26 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
         : "";
     }
   } else {
-    // 主窗口：只要用户在插件面板内明确启用固定了通道（instPinnedAcc + switchedViaPanel），严格以面板所选通道为唯一权威事实源，彻底杜绝多开实例或滞后 lsEmail 反向篡改主窗口通道
+    // 主窗口：仅在刚点击面板切换的 15 秒过渡期内（或 LS 尚未返回邮箱时）优先使用 instPinnedAcc；
+    // 一旦过渡期结束且 LS 已返回实时邮箱與项目状态，100% 尊重底层真实状态（兼容用户原生退出/重登与手动修改项目 ID）
     const lsActuallyGcp = Boolean(logPid || tierIndicatesGcp);
-    if (instPinnedAcc && (instMeta.switchedViaPanel || recentlySwitched || !lsEmail || (lsEmail === instPinnedAcc.email && lsActuallyGcp === Boolean(instPinnedAcc.gcpProjectId)))) {
+    const pinnedMatchesLs = Boolean(
+      instPinnedAcc &&
+      lsEmail &&
+      lsEmail === instPinnedAcc.email &&
+      lsActuallyGcp === Boolean(instPinnedAcc.gcpProjectId) &&
+      (!lsActuallyGcp || !logPid || logPid === instPinnedAcc.gcpProjectId)
+    );
+    if (instPinnedAcc && (recentlySwitched || !lsEmail || pinnedMatchesLs)) {
       activeEmail = instPinnedAcc.email;
       isLiveGcp = instPinnedAcc.channelType === "gcp" || Boolean(instPinnedAcc.gcpProjectId);
       activeGcpProject = isLiveGcp ? (instPinnedAcc.gcpProjectId || logPid || credPid) : "";
     } else if (lsEmail) {
+      instMeta.switchedViaPanel = false;
       activeEmail = lsEmail;
       isLiveGcp = lsActuallyGcp;
       activeGcpProject = isLiveGcp
-        ? (logPid || instMeta.lastAppliedGcpProject || credPid || findFirstGcpProjectForEmail(cfg, activeEmail))
+        ? (logPid || credPid || instMeta.lastAppliedGcpProject || findFirstGcpProjectForEmail(cfg, activeEmail))
         : "";
     } else {
       activeEmail = credEmail || instMeta.activeEmail || cfg.__meta__?.activeEmail || "";
@@ -314,22 +323,6 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
         ? (credPid || instMeta.lastAppliedGcpProject || cfg.__meta__?.lastAppliedGcpProject || findFirstGcpProjectForEmail(cfg, activeEmail))
         : "";
     }
-  }
-
-  // 严禁对个人通道调用 ValidateProject({ projectId: "", location: "" })（会导致底层 Go LS 陷入 Auth mode is unspecified 并清空模型列表）
-  // 仅当单实例 GCP 通道底层 ProjectID 曾被冲掉时，调用 ValidateProject(activeGcpProject) 自愈
-  if (
-    isLiveGcp &&
-    activeGcpProject &&
-    ls &&
-    logPid !== activeGcpProject &&
-    !ctx.isIsolatedInstance &&
-    listRunningLanguageServerProcesses().length <= 1
-  ) {
-    const healLoc = (instPinnedAcc?.gcpBillingMode || "agent_platform") === "agent_platform"
-      ? (instPinnedAcc?.gcpLocation || "global")
-      : "";
-    callLsRpc(ls, "ValidateProject", { projectId: activeGcpProject, location: healLoc }).catch(() => {});
   }
 
   const activeGcpBillingMode = isLiveGcp
@@ -469,9 +462,12 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
       cfg.__meta__.lsRpcTarget = rpcTargetObj;
     }
 
-    const desiredProxyMode = isLiveGcp ? "direct" : "local_proxy";
+    const hasActivePersonalRouting = !isLiveGcp && Object.values(cfg.routing?.models || {}).some(
+      (v) => typeof v === "string" && v !== "follow_current" && v.trim() !== ""
+    );
+    const desiredProxyMode = (!isLiveGcp && hasActivePersonalRouting) ? "local_proxy" : "direct";
     const localProxyUrl = getActiveCloudCodeProxyUrl(cfg);
-    const targetUrl = isLiveGcp ? "https://daily-cloudcode-pa.googleapis.com" : localProxyUrl;
+    const targetUrl = desiredProxyMode === "local_proxy" ? localProxyUrl : "https://cloudcode-pa.googleapis.com";
     if (
       instMeta.cloudCodeProxyPid !== ls.pid ||
       instMeta.cloudCodeProxyMode !== desiredProxyMode ||
@@ -736,10 +732,10 @@ export async function switchBillingProjectInstant(projectId, opts = {}) {
   const ctx = resolveCurrentInstanceContext();
   const fieldStatus = inspectActiveFieldInstances(cfg, ctx);
   if (cleanId && fieldStatus.otherGcpInstance) {
-    throw new Error(`GCP 通道已在另一窗口 (${fieldStatus.otherGcpInstance.email}) 运行中，当前窗口固定为个人通道（可启用其他个人账号或使用算力路由）`);
+    throw new Error(`GCP 通道已在另一实例 (${fieldStatus.otherGcpInstance.email}) 运行中，当前实例固定为个人通道（可启用其他个人账号或使用算力路由）`);
   }
   if (!cleanId && fieldStatus.otherPersonalInstance) {
-    throw new Error(`个人通道已在另一窗口 (${fieldStatus.otherPersonalInstance.email}) 运行中，当前窗口固定为 GCP 通道（可启用其他 GCP 通道或使用算力路由）`);
+    throw new Error(`个人通道已在另一实例 (${fieldStatus.otherPersonalInstance.email}) 运行中，当前实例固定为 GCP 通道（可启用其他 GCP 通道或使用算力路由）`);
   }
 
   const cred = readWinCredToken(true) || readWinCredToken(false);
@@ -824,10 +820,10 @@ export async function switchActiveGoogleAccount(accountId, opts = {}) {
   const fieldStatus = inspectActiveFieldInstances(cfg, ctx);
   if (isCrossChannel) {
     if (nextIsGcp && fieldStatus.otherGcpInstance) {
-      throw new Error(`GCP 通道已在另一窗口 (${fieldStatus.otherGcpInstance.email}) 运行中，当前窗口固定为个人通道（可启用其他个人账号或配置算力路由）`);
+      throw new Error(`GCP 通道已在另一实例 (${fieldStatus.otherGcpInstance.email}) 运行中，当前实例固定为个人通道（可启用其他个人账号或配置算力路由）`);
     }
     if (!nextIsGcp && fieldStatus.otherPersonalInstance) {
-      throw new Error(`个人通道已在另一窗口 (${fieldStatus.otherPersonalInstance.email}) 运行中，当前窗口固定为 GCP 通道（可启用其他 GCP 通道或配置算力路由）`);
+      throw new Error(`个人通道已在另一实例 (${fieldStatus.otherPersonalInstance.email}) 运行中，当前实例固定为 GCP 通道（可启用其他 GCP 通道或配置算力路由）`);
     }
   }
 
@@ -869,8 +865,11 @@ export async function switchActiveGoogleAccount(accountId, opts = {}) {
   const otherLsPids = currentLs?.pid
     ? allLsProcs.map((p) => Number(p.pid)).filter((pid) => pid > 0 && pid !== Number(currentLs.pid))
     : [];
+  const hasActivePersonalRouting = !targetProject && Object.values(cfg.routing?.models || {}).some(
+    (v) => typeof v === "string" && v !== "follow_current" && v.trim() !== ""
+  );
   const localProxyUrl = getActiveCloudCodeProxyUrl(cfg);
-  const targetUrl = targetProject ? "https://daily-cloudcode-pa.googleapis.com" : localProxyUrl;
+  const targetUrl = (!targetProject && hasActivePersonalRouting) ? localProxyUrl : "https://cloudcode-pa.googleapis.com";
 
   const tokenToWrite = buildCleanChannelToken(baseToken, targetProject, targetLocation, true);
   target.storedToken = tokenToWrite;
@@ -879,8 +878,9 @@ export async function switchActiveGoogleAccount(accountId, opts = {}) {
   }
   cfg.__meta__.channelTokensById[target.id] = JSON.parse(JSON.stringify(tokenToWrite));
 
+  // 主窗口独占使用全局 WinCred（多开独立窗口使用独立 token.json 文件隔离），主窗口切换时绝不可把 WinCred 还原回旧凭据
   let otherRestoreCred = null;
-  if (otherLsPids.length > 0) {
+  if (ctx.isIsolatedInstance && otherLsPids.length > 0) {
     if (otherInst) {
       const otherAcc = otherInst.activeChannelId ? cfg.accounts?.[otherInst.activeChannelId] : null;
       if (otherInst.gcpProjectId) {

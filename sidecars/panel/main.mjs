@@ -533,10 +533,25 @@ async function requestHandler(req, res) {
       if (!cfg.routing.gcpModels || typeof cfg.routing.gcpModels !== "object") cfg.routing.gcpModels = {};
       const targetRouteMap = isGcpScope ? cfg.routing.gcpModels : cfg.routing.models;
       if (modelId && targetSpec !== undefined) {
-        targetRouteMap[modelId] = targetSpec;
+        const cleanBase = String(modelId).trim();
+        targetRouteMap[cleanBase] = targetSpec;
         if (Array.isArray(variantIds)) {
           for (const vid of variantIds) {
             if (vid) targetRouteMap[vid] = targetSpec;
+          }
+        }
+        // 同步更新同模型族下的所有小写连字符变体键（如 gemini-4-argon-medium），彻底杜绝旧键残留
+        const slugPrefix = cleanBase
+          .toLowerCase()
+          .replace(/\s*\([^)]*\)\s*/g, "")
+          .trim()
+          .replace(/[\s_]+/g, "-");
+        if (slugPrefix) {
+          for (const existingKey of Object.keys(targetRouteMap)) {
+            const ekLower = existingKey.toLowerCase();
+            if (ekLower === slugPrefix || ekLower.startsWith(`${slugPrefix}-`)) {
+              targetRouteMap[existingKey] = targetSpec;
+            }
           }
         }
       }

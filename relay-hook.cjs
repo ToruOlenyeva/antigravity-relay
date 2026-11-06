@@ -301,6 +301,23 @@ async function ensureLocalCloudCodeProxyMounted(lsTarget, relayCfg, instMeta = n
   );
 }
 
+function normalizeBaseModelFamily(rawModelStr) {
+  const s = String(rawModelStr || "").trim();
+  if (!s) return "";
+  const lower = s.toLowerCase();
+  if (/argon|m417|m418|m419/i.test(lower)) return "Gemini 4 Argon";
+  if (/3[._-]8[._-]flash|m420|m421|m422|m318|m319|m320/i.test(lower)) return "Gemini 3.8 Flash";
+  if (/3[._-]7[._-]flash|m55|m62|m63|m298|m299|m300/i.test(lower)) return "Gemini 3.7 Flash";
+  if (/3[._-]6[._-]flash|m51|m60|m61|m71|m72|m73/i.test(lower)) return "Gemini 3.6 Flash";
+  if (/3[._-]1[._-]pro|m36|m37/i.test(lower)) return "Gemini 3.1 Pro";
+  if (/opus[._-\s]*5[._-]5|m409|m410|m411|m412|m400|m401|m402|m406/i.test(lower)) return "Claude Opus 5.5";
+  if (/sonnet[._-\s]*5[._-]5|m413|m414|m415|m416|m403|m404|m405|m407/i.test(lower)) return "Claude Sonnet 5.5";
+  if (/sonnet[._-\s]*4[._-]6/i.test(lower)) return "Claude Sonnet 4.6 (Thinking)";
+  if (/opus[._-\s]*4[._-]6/i.test(lower)) return "Claude Opus 4.6 (Thinking)";
+  if (/gpt[._-\s]*oss/i.test(lower)) return "GPT-OSS 120B";
+  return s.replace(/\s*\((Low|Medium|High|Max)\)\s*$/i, "").replace(/-(low|medium|high|max)$/i, "").trim();
+}
+
 async function applyGcpTargetRoute(targetSpec, relayCfg, baseModelName = "", rawModelName = "", instMeta = null) {
   const activeMeta = instMeta || resolveHookInstanceMeta(relayCfg);
   if (!activeMeta?.lastAppliedGcpProject) return false;
@@ -308,6 +325,7 @@ async function applyGcpTargetRoute(targetSpec, relayCfg, baseModelName = "", raw
   relayCfg.__meta__.lastRoutedModel = rawModelName || baseModelName || "";
 
   if (!targetSpec || targetSpec === "follow_current") {
+    relayCfg.__meta__.lastRoutedChannelId = activeMeta.activeChannelId || "";
     writeJsonSafe(relayConfigPath, relayCfg);
     return false;
   }
@@ -316,7 +334,9 @@ async function applyGcpTargetRoute(targetSpec, relayCfg, baseModelName = "", raw
     const accId = targetSpec.replace(/^(account|channel):/, "").trim();
     const acc = relayCfg?.accounts?.[accId];
     const targetPid = String(acc?.gcpProjectId || "").trim();
-    if (!acc || !targetPid) {
+    // GCP Vertex AI 使用当前登录 OAuth 凭据直连，严禁跨不同邮箱调用 ValidateProject 篡改 Project ID（否则必报 403 PERMISSION_DENIED）
+    if (!acc || !targetPid || (activeMeta.activeEmail && acc.email !== activeMeta.activeEmail)) {
+      relayCfg.__meta__.lastRoutedChannelId = activeMeta.activeChannelId || "";
       writeJsonSafe(relayConfigPath, relayCfg);
       return false;
     }
@@ -340,15 +360,11 @@ async function applyTargetRoute(targetSpec, relayCfg, baseModelName = "", rawMod
     return applyGcpTargetRoute(targetSpec, relayCfg, baseModelName, rawModelName, activeMeta);
   }
 
-  const lsTarget = activeMeta?.lsRpcTarget || relayCfg?.__meta__?.lsRpcTarget;
-  if (lsTarget) {
-    await ensureLocalCloudCodeProxyMounted(lsTarget, relayCfg, activeMeta);
-  }
-
   if (!relayCfg.__meta__) relayCfg.__meta__ = {};
   relayCfg.__meta__.lastRoutedModel = rawModelName || baseModelName || "";
 
   if (!targetSpec || targetSpec === "follow_current") {
+    relayCfg.__meta__.lastRoutedChannelId = activeMeta?.activeChannelId || "";
     writeJsonSafe(relayConfigPath, relayCfg);
     return false;
   }
@@ -357,6 +373,7 @@ async function applyTargetRoute(targetSpec, relayCfg, baseModelName = "", rawMod
   if (resolvedSpec === "auto_poll") {
     resolvedSpec = resolveBestAvailableChannelSpec(baseModelName, relayCfg) || "follow_current";
     if (resolvedSpec === "follow_current") {
+      relayCfg.__meta__.lastRoutedChannelId = activeMeta?.activeChannelId || "";
       writeJsonSafe(relayConfigPath, relayCfg);
       return false;
     }
@@ -368,6 +385,10 @@ async function applyTargetRoute(targetSpec, relayCfg, baseModelName = "", rawMod
     if (!acc || acc.channelType === "gcp" || acc.gcpProjectId) {
       writeJsonSafe(relayConfigPath, relayCfg);
       return false;
+    }
+    const lsTarget = activeMeta?.lsRpcTarget || relayCfg?.__meta__?.lsRpcTarget;
+    if (lsTarget && acc.id !== activeMeta?.activeChannelId) {
+      await ensureLocalCloudCodeProxyMounted(lsTarget, relayCfg, activeMeta);
     }
     relayCfg.__meta__.lastRoutedChannelId = acc.id;
     writeJsonSafe(relayConfigPath, relayCfg);
@@ -405,22 +426,18 @@ async function main() {
     if (mode === "pre-invocation") {
       const convId = (payload.conversationId || payload.conversation_id || "").trim();
       const modelName = (payload.modelName || "").trim();
-      const baseModelName = modelName.replace(/\s*\((Low|Medium|High|Max)\)\s*$/i, "").trim();
+      const baseModelName = normalizeBaseModelFamily(modelName);
       const activeMeta = resolveHookInstanceMeta(relayCfg);
       const isGcpMode = Boolean(activeMeta?.lastAppliedGcpProject);
       const routeMap = isGcpMode
         ? (relayCfg.routing.gcpModels || {})
         : (relayCfg.routing.models || {});
+      // 优先以标准模型族名（如 "Gemini 4 Argon"）读取路由配置，防止旧小写变体键残留污染
       const targetSpec = routeMap[baseModelName] || routeMap[modelName] || "follow_current";
       if (targetSpec && targetSpec !== "follow_current") {
         await applyTargetRoute(targetSpec, relayCfg, baseModelName, modelName, activeMeta);
       } else {
-        const pinnedId = String(activeMeta?.activeChannelId || relayCfg.__meta__?.activeChannelId || "").trim();
-        if (pinnedId && relayCfg.accounts?.[pinnedId]) {
-          await applyTargetRoute(`account:${pinnedId}`, relayCfg, baseModelName, modelName, activeMeta);
-        } else {
-          await applyTargetRoute("follow_current", relayCfg, baseModelName, modelName, activeMeta);
-        }
+        await applyTargetRoute("follow_current", relayCfg, baseModelName, modelName, activeMeta);
       }
       if (convId) {
         const currentActiveChannel =

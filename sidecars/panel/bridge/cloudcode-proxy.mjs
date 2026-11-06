@@ -236,7 +236,7 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
     if (lk === "host" || lk === "connection" || lk === "content-length") continue;
     outHeaders[k] = v;
   }
-  outHeaders["Host"] = "daily-cloudcode-pa.googleapis.com";
+  outHeaders["Host"] = "cloudcode-pa.googleapis.com";
 
   let outBodyBuf = rawBodyBuf || Buffer.alloc(0);
   let routedTargetAcc = null;
@@ -255,7 +255,6 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
   if (isGenerateEndpoint && outBodyBuf.length > 0) {
     try {
       const bodyJson = JSON.parse(outBodyBuf.toString("utf8"));
-      strippedSigCount = stripThoughtSignaturesFromJson(bodyJson);
       const rawModel = String(bodyJson.model || cfg.__meta__?.lastRoutedModel || "").trim();
       const baseFamily = resolveBaseModelFamilyFromId(rawModel, cfg);
       const routeMap = cfg.routing?.models || {};
@@ -270,18 +269,26 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
           routedTargetAcc = candidateAcc;
         }
       }
-      if (!routedTargetAcc && activePersonalAcc) {
-        routedTargetAcc = activePersonalAcc;
-      }
 
-      if (routedTargetAcc) {
+      const isCrossPersonalRoute = Boolean(
+        routedTargetAcc &&
+        activePersonalAcc &&
+        routedTargetAcc.id !== activePersonalAcc.id
+      );
+
+      if (isCrossPersonalRoute) {
+        strippedSigCount = stripThoughtSignaturesFromJson(bodyJson);
         const targetToken = await getValidPersonalAccessToken(cfg, routedTargetAcc);
         if (targetToken) {
           outHeaders["authorization"] = `Bearer ${targetToken}`;
           delete outHeaders["Authorization"];
           delete outHeaders["x-goog-user-project"];
           delete outHeaders["X-Goog-User-Project"];
-          bodyJson.project = "aicode-consumers";
+          if (routedTargetAcc.companionProjectId) {
+            bodyJson.project = routedTargetAcc.companionProjectId;
+          } else if (bodyJson.project && activePersonalAcc?.companionProjectId && bodyJson.project === activePersonalAcc.companionProjectId) {
+            delete bodyJson.project;
+          }
           cfg.__meta__.lastRoutedChannelId = routedTargetAcc.id;
           cfg.__meta__.lastProxyHit = {
             at: new Date().toISOString(),
@@ -295,37 +302,7 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
           };
           writeRelayConfig(cfg);
         }
-      }
-
-      if (routedTargetAcc || strippedSigCount > 0) {
         outBodyBuf = Buffer.from(JSON.stringify(bodyJson), "utf8");
-      }
-    } catch {}
-  } else if (isPersonalControlEndpoint && activePersonalAcc) {
-    try {
-      const targetToken = await getValidPersonalAccessToken(cfg, activePersonalAcc);
-      if (targetToken) {
-        outHeaders["authorization"] = `Bearer ${targetToken}`;
-        delete outHeaders["Authorization"];
-        delete outHeaders["x-goog-user-project"];
-        delete outHeaders["X-Goog-User-Project"];
-      }
-      if (outBodyBuf.length > 0) {
-        try {
-          const ctrlJson = JSON.parse(outBodyBuf.toString("utf8"));
-          let ctrlModified = false;
-          if (ctrlJson.project && ctrlJson.project !== "aicode-consumers") {
-            delete ctrlJson.project;
-            ctrlModified = true;
-          }
-          if (ctrlJson.cloudaicompanionProject) {
-            delete ctrlJson.cloudaicompanionProject;
-            ctrlModified = true;
-          }
-          if (ctrlModified) {
-            outBodyBuf = Buffer.from(JSON.stringify(ctrlJson), "utf8");
-          }
-        } catch {}
       }
     } catch {}
   }
@@ -337,7 +314,7 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
   await new Promise((resolve) => {
     const upReq = https.request(
       {
-        hostname: "daily-cloudcode-pa.googleapis.com",
+        hostname: "cloudcode-pa.googleapis.com",
         port: 443,
         path: reqUrl,
         method: req.method || "POST",
@@ -556,7 +533,10 @@ function persistAndSyncProxyUrl(proxyUrl) {
       writeRelayConfig(cfg);
     }
     const isLiveGcp = Boolean(instMeta.lastAppliedGcpProject);
-    if (!isLiveGcp) {
+    const hasActivePersonalRouting = !isLiveGcp && Object.values(cfg.routing?.models || {}).some(
+      (v) => typeof v === "string" && v !== "follow_current" && v.trim() !== ""
+    );
+    if (!isLiveGcp && hasActivePersonalRouting) {
       const ls = discoverLanguageServer(false);
       if (ls) {
         callLsRpc(ls, "SetCloudCodeURL", { url: effectiveUrl }).catch(() => {});

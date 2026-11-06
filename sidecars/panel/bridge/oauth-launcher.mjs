@@ -513,13 +513,13 @@ export async function launchIsolatedAntigravityInstance(accountId) {
   const fieldStatus = inspectActiveFieldInstances(cfg);
   const targetIsGcp = Boolean(target.gcpProjectId || target.channelType === "gcp");
   if (fieldStatus.multiLaunchLocked) {
-    throw new Error("个人通道与 GCP 通道独立窗口均已在场上运行，不能再开新实例；同通道账号请在对应窗口内启用或配置算力路由");
+    throw new Error("个人通道与 GCP 通道独立实例均已在场上运行，不能再开新实例；同通道账号请在对应实例内启用或配置算力路由");
   }
   if (targetIsGcp && fieldStatus.otherGcpInstance) {
-    throw new Error(`GCP 通道已在另一窗口 (${fieldStatus.otherGcpInstance.email}) 运行中，无需重复多开`);
+    throw new Error(`GCP 通道已在另一实例 (${fieldStatus.otherGcpInstance.email}) 运行中，无需重复多开`);
   }
   if (!targetIsGcp && fieldStatus.otherPersonalInstance) {
-    throw new Error(`个人通道已在另一窗口 (${fieldStatus.otherPersonalInstance.email}) 运行中，无需重复多开`);
+    throw new Error(`个人通道已在另一实例 (${fieldStatus.otherPersonalInstance.email}) 运行中，无需重复多开`);
   }
 
   const exePath = resolveAntigravityExePath();

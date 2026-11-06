@@ -649,7 +649,18 @@ function buildAccountCardElement(acc, activeEmail, activeGcp) {
     rightBadges.appendChild(editBtn);
   }
 
-  if (isCurrent) {
+  const isSwitchingThis = Boolean(switchingAccountId && switchingAccountId === acc.id);
+  const isEffectiveCurrent = isCurrent && !isSwitchingThis && !switchingAccountId;
+
+  if (isSwitchingThis) {
+    const switchingBtn = document.createElement("button");
+    switchingBtn.className = "secondary small";
+    switchingBtn.disabled = true;
+    switchingBtn.style.opacity = "0.85";
+    switchingBtn.style.cursor = "wait";
+    switchingBtn.textContent = t.switchingBadge || "切换中...";
+    rightBadges.appendChild(switchingBtn);
+  } else if (isEffectiveCurrent) {
     const curTag = document.createElement("span");
     curTag.className = "badge";
     curTag.textContent = t.currentBadge;
@@ -666,8 +677,10 @@ function buildAccountCardElement(acc, activeEmail, activeGcp) {
   } else {
     const switchBtn = document.createElement("button");
     switchBtn.className = "small";
+    switchBtn.disabled = Boolean(switchingAccountId);
     switchBtn.textContent = t.btnSwitchAccount;
     switchBtn.onclick = () => {
+      if (switchingAccountId) return;
       // 同通道切换（个人 <-> 个人 或 GCP <-> GCP）直接无感切换且绝不清除签名；
       // 仅当跨通道切换（个人 <-> GCP）时展开内联签名清理确认条
       if (!isCrossChannelSwitch) {
