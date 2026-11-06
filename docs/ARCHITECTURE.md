@@ -89,13 +89,15 @@ antigravity-relay/
 
 ## 3. 双层通道架构：主通道重载切换 vs 个人通道免重载路由
 
-### 3.1 第一层：独立通道池「启用」切换与 SQLite 离线签名剥离
-当用户在「独立通道池」点击某张卡片（无论是跨个人账号，还是在 `GCP` 与个人通道之间切换）的「启用」按钮时：
-1. <b>系统凭据覆写</b>：通过 Win32 `Advapi32.dll` `CredWriteW` 更新 `gemini:antigravity` 系统凭据中的 `StoredToken` 与 `project_id`。
-2. <b>离线 Protobuf 思维签名无损剥离（`scrubRecentConversationsSignatures`）</b>：
-   - Google Gemini 模型的思考签名（`thought_signature`）与生成该签名的通道密钥强绑定，跨通道继续同一会话会触发 `INVALID_ARGUMENT (400): Invalid thought signature`。
-   - 切换进程前，系统直接扫描 `~/.gemini/antigravity/conversations/<cascade_id>.db` 的 `steps` 与 `gen_metadata` 表，递归移除包含签名魔数头（`0x01 0x69 0x14 0x7d 0x13` 或 Base64 `AWkUfR` / `FpFH0T`）的 Protobuf Wire 字段，100% 保留聊天正文与工具调用记录。
-   - <b>严禁向旧进程发送 `LoadTrajectory`</b>：避免旧 `language_server.exe` 退出时把内存中的带签名旧轨迹回写覆盖 `.db`，随后直接重启 `language_server.exe` 触发主界面干净重载。
+### 3.1 第一层：独立通道池「启用」切换、Antigravity 2.29+ 四重登录态同步与双模式签名剥离
+当用户在「通道与账号管理」点击某张卡片（无论是跨个人账号，还是在 `GCP` 与个人通道之间切换）的「启用」按钮时：
+1. <b>Antigravity 2.29+ 四重登录态同步与单实例无感自重启（`switchActiveAccount` + `restartTargetAntigravityInstance`）</b>：
+   - 显式设置凭据 `auth_method: "consumer"`（个人通道，彻底剔除 `project_id`）或 `auth_method: "gcp"`（GCP 通道，携带绑定 `project_id`）；
+   - 同步写入目标实例四处核心状态源：① 主实例 Win32 `Advapi32.dll` `CredWriteW`（`gemini:antigravity`）或多开实例专属令牌文件；② 目标实例 `User/globalStorage/state.vscdb` 中的 `antigravityUnifiedStateSync.oauthToken`（Protobuf Base64 Sentinel `oauthTokenInfoSentinelKey`）与 `google.geminicodeassist`（防止 Electron 渲染层把旧账号状态刷回 `language_server`）；③ 目标实例 `app_storage.json` 的 `auth-session`；
+   - 当跨通道切换（个人 $\leftrightarrow$ `GCP`）时，通过 WMI 拉起脱离进程树的重启器仅重启当前目标实例（绝不影响另一多开实例），并在旧进程退出后、新进程拉起前二次覆写上述四处存储以防退出回写覆盖。
+2. <b>会话级签名归属检测与双模式离线 Protobuf 签名无损剥离（`detectConversationSignatureChannel` + `scrubConversationsByScope`）</b>：
+   - Google Gemini 模型的思考签名（`thought_signature`）与生成该签名的通道类型（`personal` vs `gcp`）强绑定；系统在读取官方 `transcript.jsonl` 实时计算「会话统计 / 项目汇总」Token 账单时，同步检测各会话 `.db` 是否包含思考签名并结合 `signatureChannelMap` 标记 `GCP` / `个人` / `无签名` 徽章；
+   - 面板「当前会话统计 / 项目汇总」卡片内置双模式「清除签名」下拉菜单：支持「仅清除当前会话签名」（`scope: "conversation"`）或「全项目扫描，清除与当前通道不匹配的遗留签名」（`scope: "project_mismatch"`），递归剥离 `~/.gemini/antigravity/conversations/<cascade_id>.db` 中的签名魔数头（`0x01 0x69 0x14 0x7d 0x13` 或 Base64 `AWkUfR` / `FpFH0T`），100% 保留聊天正文与工具调用记录。
 
 ### 3.2 第二层：个人通道本地透明反向代理与免重载算力接力
 当主界面处于任意个人通道（`Free` / `Plus` / `Pro` / `Ultra`）时，底部「模型算力路由」在不重载界面的前提下实现跨个人账号算力接力（`GCP` 通道完全独立，不参与底部路由）：
@@ -133,7 +135,9 @@ antigravity-relay/
 - <b>取消进行中的 OAuth 登录</b>：`POST /api/cancel-oauth`
 - <b>扫描账号可用 GCP 项目列表</b>：`POST /api/discover-gcp-projects`（请求体：`{ "email": "user@gmail.com" }`）
 - <b>添加独立通道（个人或 GCP）</b>：`POST /api/add-gcp-channel`（请求体包含 `email`、`channelType`、`gcpProjectId`、`gcpBillingMode`、`gcpLocation`）
-- <b>启用指定通道（重载主界面）</b>：`POST /api/switch-account`（请求体：`{ "channelId": "user@gmail.com#personal" }`）
+- <b>启用指定通道（四重同步 + 跨通道自动重启当前实例）</b>：`POST /api/switch-account`（请求体：`{ "channelId": "user@gmail.com#personal" }`）
+- <b>拉起独立多开实例</b>：`POST /api/launch-instance`（请求体：`{ "channelId": "user@gmail.com#gcp:my-proj" }`）
+- <b>双模式清除思考签名</b>：`POST /api/scrub-signatures`（请求体：`{ "scope": "conversation" | "project_mismatch", "conversationId": "<uuid>" }`）
 - <b>删除指定通道</b>：`POST /api/remove-account`（请求体：`{ "channelId": "user@gmail.com#personal" }`）
 - <b>查询非当前通道缓存配额</b>：`POST /api/probe-channel-quota`（请求体：`{ "channelId": "user@gmail.com#personal", "force": false }`）
 

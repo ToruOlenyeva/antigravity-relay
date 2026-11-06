@@ -89,13 +89,15 @@ When `ls-bridge.mjs` requests `/v1internal:fetchAvailableModels` and `/v1interna
 
 ## 3. Dual-Layer Channel Architecture: Primary Reload Switch vs Reload-Free Personal Routing
 
-### 3.1 Layer 1: Primary Channel "Enable" Switch and Offline SQLite Signature Scrubbing
-When a user clicks "Enable" on any channel card in the Independent Channel Pool (switching across personal accounts or between `GCP` and personal channels):
-1. <b>System Credential Update</b>: Overwrites `StoredToken` and `project_id` inside Windows Credential Manager (`gemini:antigravity`) via Win32 `Advapi32.dll` `CredWriteW`.
-2. <b>Lossless Offline Protobuf Signature Scrubbing (`scrubRecentConversationsSignatures`)</b>:
-   - Gemini `thought_signature` bytes are cryptographically tied to the originating channel/account; reusing them across channels triggers `INVALID_ARGUMENT (400): Invalid thought signature`.
-   - Before restarting the language server, the engine scans the `steps` and `gen_metadata` tables in `~/.gemini/antigravity/conversations/<cascade_id>.db` and recursively strips Protobuf wire fields matching the signature magic prefix (`0x01 0x69 0x14 0x7d 0x13` or Base64 `AWkUfR` / `FpFH0T`), preserving 100% of message text and tool calls.
-   - <b>Strict Ban on Pre-Exit `LoadTrajectory`</b>: Never calls `LoadTrajectory` on the outgoing `language_server.exe` process (which would flush stale in-memory signatures back to disk on exit), immediately respawning `language_server.exe` for a clean UI reload.
+### 3.1 Layer 1: Primary Channel "Enable" Switch, Antigravity 2.29+ Quad-Store Auth Sync & Dual-Mode Signature Scrubbing
+When a user clicks "Enable" on any channel card in Channel & Account Management (switching across personal accounts or between `GCP` and personal channels):
+1. <b>Antigravity 2.29+ Quad-Store Auth Sync and Per-Instance Auto-Restart (`switchActiveAccount` + `restartTargetAntigravityInstance`)</b>:
+   - Explicitly stamps `auth_method: "consumer"` (personal channel, omitting `project_id`) or `auth_method: "gcp"` (GCP channel, carrying bound `project_id`);
+   - Atomically updates all four state stores for the target instance: ① Windows Credential Manager (`gemini:antigravity` via `Advapi32.dll` `CredWriteW`) for the main instance or the isolated token file for a multi-instance; ② `antigravityUnifiedStateSync.oauthToken` (Protobuf Base64 Sentinel `oauthTokenInfoSentinelKey`) and `google.geminicodeassist` inside the target instance's `User/globalStorage/state.vscdb` (preventing the Electron renderer from flushing stale auth state back to `language_server`); ③ `auth-session` inside the target instance's `app_storage.json`;
+   - On cross-channel transitions (Personal $\leftrightarrow$ `GCP`), spawns a detached WMI restarter that restarts only the target instance (leaving other running instances untouched) and re-applies all four stores after the old process exits and before the new process launches.
+2. <b>Session Signature Origin Detection and Dual-Mode Offline Protobuf Scrubbing (`detectConversationSignatureChannel` + `scrubConversationsByScope`)</b>:
+   - Gemini `thought_signature` bytes are cryptographically tied to the originating channel type (`personal` vs `gcp`); while reading official `transcript.jsonl` telemetry for the "Session Stats / Project Summary" toggle view, the engine inspects each conversation `.db` and cross-references `signatureChannelMap` to render live `GCP` / `Personal` / `No Sig` badges;
+   - The "Session Stats / Project Summary" card provides a dual-mode "Clear Sig" dropdown menu: users can either scrub only the active conversation (`scope: "conversation"`) or scan the entire project to scrub legacy signatures mismatched with the active channel (`scope: "project_mismatch"`), recursively stripping signature wire fields (`0x01 0x69 0x14 0x7d 0x13` or Base64 `AWkUfR` / `FpFH0T`) from `~/.gemini/antigravity/conversations/<cascade_id>.db` while preserving 100% of message text and tool calls.
 
 ### 3.2 Layer 2: Local Transparent Reverse Proxy for Reload-Free Personal Routing
 When the primary session is on any personal channel (`Free` / `Plus` / `Pro` / `Ultra`), the bottom "Model Compute Routing" panel enables zero-reload cross-account routing (`GCP` channels remain completely isolated from bottom routing):
@@ -133,7 +135,9 @@ All endpoints are served identically from both the host-assigned internal Sideca
 - <b>Cancel Pending OAuth Login</b>: `POST /api/cancel-oauth`
 - <b>Discover Accessible GCP Projects</b>: `POST /api/discover-gcp-projects` (Payload: `{ "email": "user@gmail.com" }`)
 - <b>Add Independent Channel (Personal or GCP)</b>: `POST /api/add-gcp-channel` (Payload includes `email`, `channelType`, `gcpProjectId`, `gcpBillingMode`, `gcpLocation`)
-- <b>Enable Target Channel (Reloads Primary Session)</b>: `POST /api/switch-account` (Payload: `{ "channelId": "user@gmail.com#personal" }`)
+- <b>Enable Target Channel (Quad-Store Sync + Cross-Channel Instance Auto-Restart)</b>: `POST /api/switch-account` (Payload: `{ "channelId": "user@gmail.com#personal" }`)
+- <b>Launch Isolated Multi-Instance</b>: `POST /api/launch-instance` (Payload: `{ "channelId": "user@gmail.com#gcp:my-proj" }`)
+- <b>Dual-Mode Thought Signature Scrub</b>: `POST /api/scrub-signatures` (Payload: `{ "scope": "conversation" | "project_mismatch", "conversationId": "<uuid>" }`)
 - <b>Remove Target Channel</b>: `POST /api/remove-account` (Payload: `{ "channelId": "user@gmail.com#personal" }`)
 - <b>Probe Non-Active Channel Quota</b>: `POST /api/probe-channel-quota` (Payload: `{ "channelId": "user@gmail.com#personal", "force": false }`)
 
