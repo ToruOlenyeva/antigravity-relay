@@ -1263,8 +1263,8 @@ export function scheduleDetachedLanguageServerRestart(
         ? String(proxyUrlHint).trim()
         : "";
       const targetUrl = isGcpTarget
-        ? "https://daily-cloudcode-pa.googleapis.com"
-        : (validProxyHint || "https://daily-cloudcode-pa.googleapis.com");
+        ? "https://cloudcode-pa.googleapis.com"
+        : (validProxyHint || "https://cloudcode-pa.googleapis.com");
       callLsRpc(activeLs, "SetCloudCodeURL", { url: targetUrl }).catch(() => {});
       if (restoreCredAfterSwitch) {
         try {

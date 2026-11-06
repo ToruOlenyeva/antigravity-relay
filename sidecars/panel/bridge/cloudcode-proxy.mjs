@@ -520,9 +520,9 @@ function persistAndSyncProxyUrl(proxyUrl) {
     const hasActivePersonalRouting = !isLiveGcp && Object.values(cfg.routing?.models || {}).some(
       (v) => typeof v === "string" && v !== "follow_current" && v.trim() !== ""
     );
-    const desiredUrl = (!isLiveGcp && hasActivePersonalRouting)
-      ? effectiveUrl
-      : "https://daily-cloudcode-pa.googleapis.com";
+    const isLocalProxy = !isLiveGcp && hasActivePersonalRouting;
+    const desiredUrl = isLocalProxy ? effectiveUrl : "https://cloudcode-pa.googleapis.com";
+    const prevMode = instMeta.cloudCodeProxyMode;
     let changed = false;
     if (instMeta.cloudCodeProxyUrl !== desiredUrl) {
       instMeta.cloudCodeProxyUrl = desiredUrl;
@@ -536,7 +536,7 @@ function persistAndSyncProxyUrl(proxyUrl) {
       writeRelayConfig(cfg);
     }
     const ls = discoverLanguageServer(false);
-    if (ls) {
+    if (ls && (isLocalProxy || (prevMode === "local_proxy" && instMeta.cloudCodeProxyPid === ls.pid))) {
       callLsRpc(ls, "SetCloudCodeURL", { url: desiredUrl }).catch(() => {});
     }
   } catch {}

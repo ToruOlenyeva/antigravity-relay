@@ -470,24 +470,48 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
     );
     const desiredProxyMode = (!isLiveGcp && hasActivePersonalRouting) ? "local_proxy" : "direct";
     const localProxyUrl = getActiveCloudCodeProxyUrl(cfg);
-    const targetUrl = desiredProxyMode === "local_proxy" ? localProxyUrl : "https://daily-cloudcode-pa.googleapis.com";
-    if (
-      instMeta.cloudCodeProxyPid !== ls.pid ||
-      instMeta.cloudCodeProxyMode !== desiredProxyMode ||
-      instMeta.cloudCodeProxyUrl !== targetUrl
-    ) {
+    const targetUrl = desiredProxyMode === "local_proxy" ? localProxyUrl : "https://cloudcode-pa.googleapis.com";
+    if (desiredProxyMode === "local_proxy") {
+      if (
+        instMeta.cloudCodeProxyPid !== ls.pid ||
+        instMeta.cloudCodeProxyMode !== "local_proxy" ||
+        instMeta.cloudCodeProxyUrl !== targetUrl
+      ) {
+        await callLsRpc(ls, "SetCloudCodeURL", { url: targetUrl })
+          .then(() => {
+            instMeta.cloudCodeProxyPid = ls.pid;
+            instMeta.cloudCodeProxyMode = "local_proxy";
+            instMeta.cloudCodeProxyUrl = targetUrl;
+            if (!ctx.isIsolatedInstance) {
+              cfg.__meta__.cloudCodeProxyPid = ls.pid;
+              cfg.__meta__.cloudCodeProxyMode = "local_proxy";
+              cfg.__meta__.cloudCodeProxyUrl = targetUrl;
+            }
+          })
+          .catch(() => {});
+      }
+    } else if (instMeta.cloudCodeProxyMode === "local_proxy" && instMeta.cloudCodeProxyPid === ls.pid) {
       await callLsRpc(ls, "SetCloudCodeURL", { url: targetUrl })
         .then(() => {
           instMeta.cloudCodeProxyPid = ls.pid;
-          instMeta.cloudCodeProxyMode = desiredProxyMode;
+          instMeta.cloudCodeProxyMode = "direct";
           instMeta.cloudCodeProxyUrl = targetUrl;
           if (!ctx.isIsolatedInstance) {
             cfg.__meta__.cloudCodeProxyPid = ls.pid;
-            cfg.__meta__.cloudCodeProxyMode = desiredProxyMode;
+            cfg.__meta__.cloudCodeProxyMode = "direct";
             cfg.__meta__.cloudCodeProxyUrl = targetUrl;
           }
         })
         .catch(() => {});
+    } else {
+      instMeta.cloudCodeProxyPid = ls.pid;
+      instMeta.cloudCodeProxyMode = "direct";
+      instMeta.cloudCodeProxyUrl = targetUrl;
+      if (!ctx.isIsolatedInstance) {
+        cfg.__meta__.cloudCodeProxyPid = ls.pid;
+        cfg.__meta__.cloudCodeProxyMode = "direct";
+        cfg.__meta__.cloudCodeProxyUrl = targetUrl;
+      }
     }
   }
 
@@ -871,17 +895,7 @@ export async function switchActiveGoogleAccount(accountId, opts = {}) {
     } catch {}
   }
 
-  const originalWinCred = readWinCredToken(true) || readWinCredToken(false);
-  const otherInst =
-    fieldStatus.otherGcpInstance ||
-    fieldStatus.otherPersonalInstance ||
-    (fieldStatus.activeInstances || []).find((x) => !x.isCurrent) ||
-    null;
   const currentLs = discoverLanguageServer(false);
-  const allLsProcs = listRunningLanguageServerProcesses();
-  const otherLsPids = currentLs?.pid
-    ? allLsProcs.map((p) => Number(p.pid)).filter((pid) => pid > 0 && pid !== Number(currentLs.pid))
-    : [];
   const hasActivePersonalRouting = !targetProject && Object.values(cfg.routing?.models || {}).some(
     (v) => typeof v === "string" && v !== "follow_current" && v.trim() !== ""
   );
@@ -894,42 +908,6 @@ export async function switchActiveGoogleAccount(accountId, opts = {}) {
     cfg.__meta__.channelTokensById = {};
   }
   cfg.__meta__.channelTokensById[target.id] = JSON.parse(JSON.stringify(tokenToWrite));
-
-  // 主窗口独占使用全局 WinCred（多开独立窗口使用独立 token.json 文件隔离），主窗口切换时绝不可把 WinCred 还原回旧凭据
-  let otherRestoreCred = null;
-  if (ctx.isIsolatedInstance && otherLsPids.length > 0) {
-    if (otherInst) {
-      const otherAcc = otherInst.activeChannelId ? cfg.accounts?.[otherInst.activeChannelId] : null;
-      if (otherInst.gcpProjectId) {
-        if (originalWinCred && originalWinCred.project_id === otherInst.gcpProjectId) {
-          otherRestoreCred = { ...originalWinCred, writer_id: tokenToWrite.writer_id };
-        } else {
-          const otherBase =
-            (otherInst.activeChannelId ? cfg.__meta__?.channelTokensById?.[otherInst.activeChannelId] : null) ||
-            otherAcc?.storedToken ||
-            findStoredTokenForEmail(cfg, otherInst.email, true);
-          if (otherBase) {
-            const otherMode = otherAcc?.gcpBillingMode || "agent_platform";
-            const otherLoc = otherMode === "agent_platform" ? (otherAcc?.gcpLocation || "global") : "";
-            otherRestoreCred = buildCleanChannelToken(otherBase, otherInst.gcpProjectId, otherLoc, false);
-            if (otherRestoreCred) otherRestoreCred.writer_id = tokenToWrite.writer_id;
-          }
-        }
-      } else {
-        const otherBase =
-          (otherInst.activeChannelId ? cfg.__meta__?.channelTokensById?.[otherInst.activeChannelId] : null) ||
-          otherAcc?.storedToken ||
-          findStoredTokenForEmail(cfg, otherInst.email, false);
-        if (otherBase) {
-          otherRestoreCred = buildCleanChannelToken(otherBase, "", "", false);
-          if (otherRestoreCred) otherRestoreCred.writer_id = tokenToWrite.writer_id;
-        }
-      }
-    }
-    if (!otherRestoreCred && originalWinCred) {
-      otherRestoreCred = { ...originalWinCred, writer_id: tokenToWrite.writer_id };
-    }
-  }
 
   const nowTs = Date.now();
   instMeta.activeChannelId = target.id;
@@ -971,9 +949,7 @@ export async function switchActiveGoogleAccount(accountId, opts = {}) {
     targetProject
   );
   instMeta.cloudCodeProxyMode = (!targetProject && hasActivePersonalRouting) ? "local_proxy" : "direct";
-  instMeta.cloudCodeProxyUrl = (!targetProject && hasActivePersonalRouting)
-    ? localProxyUrl
-    : "https://daily-cloudcode-pa.googleapis.com";
+  instMeta.cloudCodeProxyUrl = targetUrl;
   if (!ctx.isIsolatedInstance) {
     cfg.__meta__.cloudCodeProxyMode = instMeta.cloudCodeProxyMode;
     cfg.__meta__.cloudCodeProxyUrl = instMeta.cloudCodeProxyUrl;
