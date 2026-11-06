@@ -308,20 +308,16 @@ async function requestHandler(req, res) {
     }
   }
 
-  // 5. 切换通道或谷歌账号（写入凭据并异步调度重启 Language Server，先返回 HTTP 响应防止被宿主重载打断，并自动延时跟进推送 SSE 快照）
+  // 5. 切换通道或谷歌账号（写入凭据并调度当前实例独立自动重启，立即返回 HTTP 响应供前端展示重启过渡态）
   if (req.method === "POST" && pathname === "/api/switch-account") {
     try {
       const { accountId, scrubSignatures } = await readJsonBody(req);
       const result = await lsBridge.switchActiveGoogleAccount(accountId, { scrubSignatures });
-      const snap = await lsBridge.fetchLiveSystemSnapshot(false);
-      broadcastSnapshot(snap);
-      for (const delayMs of [1200, 2600, 4500]) {
-        setTimeout(async () => {
-          try {
-            const followSnap = await lsBridge.fetchLiveSystemSnapshot(false);
-            broadcastSnapshot(followSnap);
-          } catch {}
-        }, delayMs);
+      const snap = result?.restarting && latestSnapshot
+        ? latestSnapshot
+        : await lsBridge.fetchLiveSystemSnapshot(false);
+      if (!result?.restarting) {
+        broadcastSnapshot(snap);
       }
       return sendJson(res, 200, { success: true, ...result, snapshot: snap });
     } catch (err) {

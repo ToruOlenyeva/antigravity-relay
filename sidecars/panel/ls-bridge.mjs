@@ -24,6 +24,7 @@ const _wincredMod = await import("./bridge/wincred-ls.mjs");
 const {
   readWinCredToken,
   writeWinCredToken,
+  writeInstanceTokenFile,
   readInstanceToken,
   writeInstanceCredentialAndAwaitSync,
   syncInstanceAppStorage,
@@ -65,6 +66,7 @@ import {
   computeSessionTelemetrySnapshot,
   launchIsolatedAntigravityInstance,
   reloadInstanceWorkbenchViaCdp,
+  restartCurrentAntigravityInstance,
   cancelIsolatedOAuthFlow,
   startIsolatedOAuthFlow,
   hasActiveOAuthSession
@@ -948,34 +950,17 @@ export async function switchActiveGoogleAccount(accountId, opts = {}) {
   cfg.__meta__.convLastChannelMap = {};
   writeRelayConfig(cfg);
 
-  if (currentLs) {
-    await callLsRpc(currentLs, "SetCloudCodeURL", { url: targetUrl }).catch(() => {});
+  if (ctx.isIsolatedInstance && ctx.userDataDir) {
+    writeInstanceTokenFile(ctx.userDataDir, tokenToWrite);
+  } else {
+    writeWinCredToken(tokenToWrite);
   }
-
-  await writeInstanceCredentialAndAwaitSync(
-    tokenToWrite,
-    ctx,
-    otherRestoreCred,
-    otherLsPids,
-    5600
-  );
 
   if (!targetProject) {
     const cachedAt = Number(target.cachedQuota?.updatedAt || 0);
     if (!target.cachedQuota?.quotaGroups?.length || Date.now() - cachedAt > 20000) {
       await probeChannelQuotaSnapshot(target.id).catch(() => {});
     }
-  }
-
-  if (currentLs) {
-    if (targetProject) {
-      await callLsRpc(currentLs, "ValidateProject", { projectId: targetProject, location: targetLocation }).catch(() => {});
-    }
-    await callLsRpc(currentLs, "SetCloudCodeURL", { url: targetUrl }).catch(() => {});
-    await Promise.allSettled([
-      callLsRpc(currentLs, "GetUserStatus", {}),
-      callLsRpc(currentLs, "RetrieveUserQuotaSummary", {})
-    ]);
   }
 
   const shouldScrub = opts.scrubSignatures === true || (isCrossChannel && opts.scrubSignatures !== false);
@@ -985,10 +970,11 @@ export async function switchActiveGoogleAccount(accountId, opts = {}) {
     scrubbedCount = Array.isArray(scrubbedIds) ? scrubbedIds.length : 0;
   }
 
-  const reloadCtx = { ...ctx };
-  setTimeout(() => {
-    reloadInstanceWorkbenchViaCdp(reloadCtx).catch(() => {});
-  }, 650);
+  const restartCtx = { ...ctx };
+  await restartCurrentAntigravityInstance(restartCtx, {
+    tokenObj: tokenToWrite,
+    lsPid: Number(currentLs?.pid || 0)
+  }).catch(() => {});
 
   return {
     switchedTo: target.email,
@@ -997,6 +983,7 @@ export async function switchActiveGoogleAccount(accountId, opts = {}) {
     isCrossChannel,
     scrubbedSignatures: shouldScrub,
     scrubbedCount,
+    restarting: true,
     instant: false
   };
 }

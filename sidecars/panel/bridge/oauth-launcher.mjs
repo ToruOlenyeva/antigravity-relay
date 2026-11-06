@@ -8,11 +8,13 @@ import { execFileSync, spawn } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import {
   HOME_DIR,
+  JETSKI_TOKEN_FILE,
   readRelayConfig,
   writeRelayConfig,
   resolveCurrentInstanceContext,
   writeInstanceDescriptor,
   getInstanceMeta,
+  getInstanceTokenFilePath,
   ensureInstanceIsolatedHome
 } from "../store.mjs";
 import { inspectConversationSignatureStatus } from "./signature-scrub.mjs";
@@ -246,6 +248,210 @@ export async function reloadInstanceWorkbenchViaCdp(ctx = null) {
     if (ok) anyOk = true;
   }
   return anyOk;
+}
+
+export async function restartCurrentAntigravityInstance(ctx = null, opts = {}) {
+  const activeCtx = ctx || resolveCurrentInstanceContext();
+  const exePath = resolveAntigravityExePath();
+  if (!exePath) {
+    return reloadInstanceWorkbenchViaCdp(activeCtx);
+  }
+  const isIsolated = Boolean(activeCtx?.isIsolatedInstance && activeCtx?.userDataDir);
+  const safeId = isIsolated
+    ? String(activeCtx.instanceId || "iso").replace(/[^a-zA-Z0-9._-]+/g, "_")
+    : "main";
+  const userDataDir = String(activeCtx?.userDataDir || "");
+  const isoHomeDir = isIsolated ? ensureInstanceIsolatedHome(userDataDir) : "";
+  const appStoragePath = userDataDir ? path.join(userDataDir, "app_storage.json") : "";
+  let appStorageContent = "";
+  try {
+    if (appStoragePath && fs.existsSync(appStoragePath)) {
+      appStorageContent = fs.readFileSync(appStoragePath, "utf8");
+    }
+  } catch {}
+  const tokenFilePath = isIsolated
+    ? getInstanceTokenFilePath(userDataDir)
+    : JETSKI_TOKEN_FILE;
+  const tokenContent = opts?.tokenObj ? JSON.stringify(opts.tokenObj) : "";
+
+  const geminiDir = path.join(HOME_DIR, ".gemini");
+  fs.mkdirSync(geminiDir, { recursive: true });
+  const configPath = path.join(geminiDir, `agy-relay-restart-${safeId}.json`);
+  const scriptPath = path.join(geminiDir, `agy-relay-restart-${safeId}.ps1`);
+
+  const restartCfg = {
+    isIsolated,
+    instanceId: String(activeCtx?.instanceId || ""),
+    userDataDir,
+    isoHomeDir,
+    realHomeDir: HOME_DIR,
+    appDataDir: process.env.APPDATA || path.join(HOME_DIR, "AppData", "Roaming"),
+    localAppDataDir: process.env.LOCALAPPDATA || path.join(HOME_DIR, "AppData", "Local"),
+    exePath,
+    exeDir: path.dirname(exePath),
+    lsPid: Number(opts?.lsPid || 0),
+    appStoragePath,
+    appStorageContent,
+    tokenFilePath: String(tokenFilePath || ""),
+    tokenContent
+  };
+  fs.writeFileSync(configPath, JSON.stringify(restartCfg, null, 2), "utf8");
+
+  const psScript = [
+    "param([string]$ConfigPath)",
+    "$ErrorActionPreference = 'SilentlyContinue'",
+    "$utf8NoBom = New-Object System.Text.UTF8Encoding($false)",
+    "if (-not [System.IO.File]::Exists($ConfigPath)) { exit 1 }",
+    "$cfgRaw = [System.IO.File]::ReadAllText($ConfigPath, $utf8NoBom)",
+    "$cfg = $cfgRaw | ConvertFrom-Json",
+    "Start-Sleep -Milliseconds 650",
+    "$allProcs = Get-CimInstance Win32_Process -Filter \"Name = 'Antigravity.exe' OR Name = 'language_server_windows_x64.exe'\"",
+    "$targetPids = New-Object System.Collections.Generic.HashSet[int]",
+    "if ($cfg.lsPid -gt 0) { [void]$targetPids.Add([int]$cfg.lsPid) }",
+    "if ($cfg.isIsolated -and $cfg.instanceId) {",
+    "  $instKey = [string]$cfg.instanceId",
+    "  $dataDir = [string]$cfg.userDataDir",
+    "  foreach ($p in $allProcs) {",
+    "    $cmd = [string]$p.CommandLine",
+    "    if (($cmd -and $cmd.IndexOf($instKey, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) -or ($dataDir -and $cmd -and $cmd.IndexOf($dataDir, [System.StringComparison]::OrdinalIgnoreCase) -ge 0)) {",
+    "      [void]$targetPids.Add([int]$p.ProcessId)",
+    "    }",
+    "  }",
+    "  for ($pass = 0; $pass -lt 3; $pass++) {",
+    "    foreach ($p in $allProcs) {",
+    "      if ($targetPids.Contains([int]$p.ParentProcessId)) { [void]$targetPids.Add([int]$p.ProcessId) }",
+    "    }",
+    "  }",
+    "} else {",
+    "  $isoPids = New-Object System.Collections.Generic.HashSet[int]",
+    "  foreach ($p in $allProcs) {",
+    "    $cmd = [string]$p.CommandLine",
+    "    if ($cmd -and $cmd.IndexOf('antigravity-instances', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {",
+    "      [void]$isoPids.Add([int]$p.ProcessId)",
+    "    }",
+    "  }",
+    "  for ($pass = 0; $pass -lt 3; $pass++) {",
+    "    foreach ($p in $allProcs) {",
+    "      if ($isoPids.Contains([int]$p.ParentProcessId)) { [void]$isoPids.Add([int]$p.ProcessId) }",
+    "    }",
+    "  }",
+    "  foreach ($p in $allProcs) {",
+    "    $pidVal = [int]$p.ProcessId",
+    "    if (-not $isoPids.Contains($pidVal)) { [void]$targetPids.Add($pidVal) }",
+    "  }",
+    "}",
+    "if ($targetPids.Count -gt 0) {",
+    "  $pidArray = [int[]]::new($targetPids.Count)",
+    "  $targetPids.CopyTo($pidArray)",
+    "  Stop-Process -Id $pidArray -Force -ErrorAction SilentlyContinue",
+    "  Wait-Process -Id $pidArray -Timeout 3 -ErrorAction SilentlyContinue",
+    "}",
+    "Start-Sleep -Milliseconds 380",
+    "if ($cfg.appStoragePath -and $cfg.appStorageContent) {",
+    "  [System.IO.File]::WriteAllText([string]$cfg.appStoragePath, [string]$cfg.appStorageContent, $utf8NoBom)",
+    "}",
+    "if ($cfg.tokenFilePath -and $cfg.tokenContent) {",
+    "  $tokDir = [System.IO.Path]::GetDirectoryName([string]$cfg.tokenFilePath)",
+    "  if ($tokDir -and -not [System.IO.Directory]::Exists($tokDir)) {",
+    "    [System.IO.Directory]::CreateDirectory($tokDir) | Out-Null",
+    "  }",
+    "  if ($cfg.isIsolated -or [System.IO.File]::Exists([string]$cfg.tokenFilePath)) {",
+    "    [System.IO.File]::WriteAllText([string]$cfg.tokenFilePath, [string]$cfg.tokenContent, $utf8NoBom)",
+    "  }",
+    "}",
+    "if (-not $cfg.isIsolated -and $cfg.tokenContent) {",
+    "  Add-Type -TypeDefinition @'",
+    "using System;",
+    "using System.Runtime.InteropServices;",
+    "using System.Text;",
+    "public class AgyWinCredRestart {",
+    "    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]",
+    "    public struct CREDENTIAL {",
+    "        public uint Flags;",
+    "        public uint Type;",
+    "        public IntPtr TargetName;",
+    "        public IntPtr Comment;",
+    "        public System.Runtime.InteropServices.ComTypes.FILETIME LastWritten;",
+    "        public uint CredentialBlobSize;",
+    "        public IntPtr CredentialBlob;",
+    "        public uint Persist;",
+    "        public uint AttributeCount;",
+    "        public IntPtr Attributes;",
+    "        public IntPtr TargetAlias;",
+    "        public IntPtr UserName;",
+    "    }",
+    "    [DllImport(\"Advapi32.dll\", SetLastError = true, CharSet = CharSet.Unicode)]",
+    "    public static extern bool CredWriteW([In] ref CREDENTIAL userCredential, [In] uint flags);",
+    "    public static bool Write(string target, string user, string secret) {",
+    "        byte[] byteArray = Encoding.UTF8.GetBytes(secret);",
+    "        CREDENTIAL cred = new CREDENTIAL();",
+    "        cred.Flags = 0;",
+    "        cred.Type = 1;",
+    "        cred.TargetName = Marshal.StringToCoTaskMemUni(target);",
+    "        cred.UserName = Marshal.StringToCoTaskMemUni(user);",
+    "        cred.CredentialBlobSize = (uint)byteArray.Length;",
+    "        cred.CredentialBlob = Marshal.AllocCoTaskMem(byteArray.Length);",
+    "        Marshal.Copy(byteArray, 0, cred.CredentialBlob, byteArray.Length);",
+    "        cred.Persist = 2;",
+    "        try { return CredWriteW(ref cred, 0); }",
+    "        finally {",
+    "            if (cred.TargetName != IntPtr.Zero) Marshal.FreeCoTaskMem(cred.TargetName);",
+    "            if (cred.UserName != IntPtr.Zero) Marshal.FreeCoTaskMem(cred.UserName);",
+    "            if (cred.CredentialBlob != IntPtr.Zero) Marshal.FreeCoTaskMem(cred.CredentialBlob);",
+    "        }",
+    "    }",
+    "}",
+    "'@ -ErrorAction SilentlyContinue",
+    "  [void][AgyWinCredRestart]::Write('gemini:antigravity', 'antigravity', [string]$cfg.tokenContent)",
+    "}",
+    "$env:APPDATA = [string]$cfg.appDataDir",
+    "$env:LOCALAPPDATA = [string]$cfg.localAppDataDir",
+    "if ($cfg.isIsolated) {",
+    "  $env:USERPROFILE = [string]$cfg.isoHomeDir",
+    "  $env:HOME = [string]$cfg.isoHomeDir",
+    "  $env:SSH_TTY = '1'",
+    "  $env:AGY_REAL_USERPROFILE = [string]$cfg.realHomeDir",
+    "  $env:AGY_RELAY_INSTANCE_ID = [string]$cfg.instanceId",
+    "  $env:AGY_RELAY_INSTANCE_USER_DATA_DIR = [string]$cfg.userDataDir",
+    "  $env:PLUGIN_SWITCHER_DISABLE_8088 = '1'",
+    "  $dataArg = \"--user-data-dir=$($cfg.userDataDir)\"",
+    "  Start-Process -FilePath ([string]$cfg.exePath) -WorkingDirectory ([string]$cfg.exeDir) -ArgumentList @($dataArg) -WindowStyle Normal",
+    "} else {",
+    "  $env:USERPROFILE = [string]$cfg.realHomeDir",
+    "  $env:HOME = [string]$cfg.realHomeDir",
+    "  Remove-Item Env:\\SSH_TTY -ErrorAction SilentlyContinue",
+    "  Remove-Item Env:\\AGY_REAL_USERPROFILE -ErrorAction SilentlyContinue",
+    "  Remove-Item Env:\\AGY_RELAY_INSTANCE_ID -ErrorAction SilentlyContinue",
+    "  Remove-Item Env:\\AGY_RELAY_INSTANCE_USER_DATA_DIR -ErrorAction SilentlyContinue",
+    "  Remove-Item Env:\\PLUGIN_SWITCHER_DISABLE_8088 -ErrorAction SilentlyContinue",
+    "  Start-Process -FilePath ([string]$cfg.exePath) -WorkingDirectory ([string]$cfg.exeDir) -WindowStyle Normal",
+    "}"
+  ].join("\r\n");
+  fs.writeFileSync(scriptPath, psScript, "utf8");
+
+  try {
+    const escapedScript = scriptPath.replace(/'/g, "''");
+    const escapedCfg = configPath.replace(/'/g, "''");
+    const wmiCmd = `$cmdLine = "powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File \`"${escapedScript}\`" -ConfigPath \`"${escapedCfg}\`""; Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $cmdLine } | Out-Null`;
+    execFileSync(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", wmiCmd],
+      { encoding: "utf8", timeout: 5000, windowsHide: true }
+    );
+    return true;
+  } catch {
+    try {
+      const child = spawn(
+        "powershell.exe",
+        ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-File", scriptPath, "-ConfigPath", configPath],
+        { detached: true, stdio: "ignore", windowsHide: true }
+      );
+      child.unref();
+      return true;
+    } catch {
+      return false;
+    }
+  }
 }
 
 async function fetchWindowActiveConvIdViaCdp(port) {

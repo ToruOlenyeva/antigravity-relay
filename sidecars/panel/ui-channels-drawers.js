@@ -676,16 +676,7 @@ function buildAccountCardElement(acc, activeEmail, activeGcp) {
     curTag.className = "badge";
     curTag.textContent = t.currentBadge;
     rightBadges.appendChild(curTag);
-  } else if (isLockedByOtherWindow) {
-    const lockedBtn = document.createElement("button");
-    lockedBtn.className = "secondary small";
-    lockedBtn.style.opacity = "0.75";
-    lockedBtn.textContent = isActiveInOtherWindow ? t.otherWindowActiveBadge : t.otherWindowLockedBtn;
-    lockedBtn.onclick = () => {
-      showToast(isGcpChannel ? t.toastLockedGcpInOtherWindow : t.toastLockedPersonalInOtherWindow);
-    };
-    rightBadges.appendChild(lockedBtn);
-  } else {
+  } else if (!isLockedByOtherWindow) {
     const switchBtn = document.createElement("button");
     switchBtn.className = "small";
     switchBtn.disabled = Boolean(switchingAccountId);

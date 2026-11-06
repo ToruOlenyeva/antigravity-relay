@@ -102,13 +102,13 @@ function renderTelemetryConvSelector(tel, viewedItem, isProjectTotalView) {
 
   for (const c of convList) {
     const sigDisp = getSignatureBadgeDisplay(c.signatureStatus, t);
-    const activePrefix = c.isCurrentActive ? `[${t.telemetryConvCurrentTag || "当前"}] ` : "";
     const tokSuffix = Number(c.sessionTotalTokens || 0) > 0 ? ` · ${formatCompactTokenCount(c.sessionTotalTokens)} tok` : "";
     options.push({
       value: c.fullConversationId || c.conversationId,
-      label: `${activePrefix}${c.title || c.conversationId}${tokSuffix}`,
+      label: `${c.title || c.conversationId}${tokSuffix}`,
       badgeText: sigDisp.shortText,
-      badgeType: sigDisp.pillType
+      badgeType: sigDisp.pillType,
+      isCurrentActive: Boolean(c.isCurrentActive)
     });
   }
 
@@ -121,7 +121,8 @@ function renderTelemetryConvSelector(tel, viewedItem, isProjectTotalView) {
       value: "__PROJECT_TOTAL__",
       label: `${t.telemetryProjectTotalOpt || "当前项目全部会话汇总"} (${projPrefix}${convList.length} ${t.telemetryConvCountSuffix || "个会话"})${tokSuffix}`,
       badgeText: projSigDisp.shortText,
-      badgeType: projSigDisp.pillType
+      badgeType: projSigDisp.pillType,
+      isCurrentActive: false
     });
   }
 
@@ -141,6 +142,10 @@ function renderTelemetryConvSelector(tel, viewedItem, isProjectTotalView) {
 
   const leftWrap = document.createElement("div");
   leftWrap.className = "active-email-wrap";
+
+  const triggerDot = document.createElement("span");
+  triggerDot.className = "status-dot" + (activeOpt.isCurrentActive ? " online" : "");
+  leftWrap.appendChild(triggerDot);
 
   if (activeOpt.badgeText) {
     const b = document.createElement("span");
@@ -172,6 +177,10 @@ function renderTelemetryConvSelector(tel, viewedItem, isProjectTotalView) {
 
     const itemLeft = document.createElement("div");
     itemLeft.className = "active-email-wrap";
+
+    const itemDot = document.createElement("span");
+    itemDot.className = "status-dot" + (opt.isCurrentActive ? " online" : "");
+    itemLeft.appendChild(itemDot);
 
     if (opt.badgeText) {
       const b = document.createElement("span");
