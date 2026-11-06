@@ -98,8 +98,44 @@ function renderTelemetryConvSelector(tel, viewedItem, isProjectTotalView) {
   if (convList.length === 0 && !tel.conversationId) return;
 
   const projName = tel.projectName || tel.projectTotal?.projectName || "";
-  const options = [];
 
+  if (isProjectTotalView) {
+    const pt = tel.projectTotal || viewedItem || {};
+    const projSigDisp = getSignatureBadgeDisplay(pt.signatureStatus || tel.signatureStatus, t);
+    const projPrefix = projName ? `${projName} · ` : "";
+    const convCount = Math.max(1, convList.length || Number(pt.conversationCount || 1));
+    const tokSuffix = Number(pt.sessionTotalTokens || 0) > 0
+      ? ` · ${formatCompactTokenCount(pt.sessionTotalTokens)} tok`
+      : "";
+
+    const summaryBar = document.createElement("div");
+    summaryBar.className = "telemetry-project-summary-bar";
+
+    const leftWrap = document.createElement("div");
+    leftWrap.className = "active-email-wrap";
+
+    const dot = document.createElement("span");
+    dot.className = "status-dot online";
+    leftWrap.appendChild(dot);
+
+    if (projSigDisp.shortText) {
+      const b = document.createElement("span");
+      b.className = "channel-type-badge " + (projSigDisp.pillType || "personal");
+      b.textContent = projSigDisp.shortText;
+      leftWrap.appendChild(b);
+    }
+
+    const textEl = document.createElement("span");
+    textEl.className = "dropdown-trigger-text";
+    textEl.textContent = `${t.telemetryProjectTotalOpt || "当前项目全部会话汇总"} (${projPrefix}${convCount} ${t.telemetryConvCountSuffix || "个会话"})${tokSuffix}`;
+    leftWrap.appendChild(textEl);
+
+    summaryBar.appendChild(leftWrap);
+    mount.appendChild(summaryBar);
+    return;
+  }
+
+  const options = [];
   for (const c of convList) {
     const sigDisp = getSignatureBadgeDisplay(c.signatureStatus, t);
     const tokSuffix = Number(c.sessionTotalTokens || 0) > 0 ? ` · ${formatCompactTokenCount(c.sessionTotalTokens)} tok` : "";
@@ -112,25 +148,9 @@ function renderTelemetryConvSelector(tel, viewedItem, isProjectTotalView) {
     });
   }
 
-  if (convList.length > 1 && tel.projectTotal) {
-    const pt = tel.projectTotal;
-    const projSigDisp = getSignatureBadgeDisplay(pt.signatureStatus, t);
-    const projPrefix = projName ? `${projName} · ` : "";
-    const tokSuffix = Number(pt.sessionTotalTokens || 0) > 0 ? ` · ${formatCompactTokenCount(pt.sessionTotalTokens)} tok` : "";
-    options.push({
-      value: "__PROJECT_TOTAL__",
-      label: `${t.telemetryProjectTotalOpt || "当前项目全部会话汇总"} (${projPrefix}${convList.length} ${t.telemetryConvCountSuffix || "个会话"})${tokSuffix}`,
-      badgeText: projSigDisp.shortText,
-      badgeType: projSigDisp.pillType,
-      isCurrentActive: false
-    });
-  }
-
   if (options.length === 0) return;
 
-  const selectedVal = isProjectTotalView
-    ? "__PROJECT_TOTAL__"
-    : (viewedItem.fullConversationId || viewedItem.conversationId || options[0].value);
+  const selectedVal = viewedItem.fullConversationId || viewedItem.conversationId || options[0].value;
   const activeOpt = options.find((o) => o.value === selectedVal) || options[0];
 
   const wrapper = document.createElement("div");
@@ -228,6 +248,11 @@ function renderTelemetryConvSelector(tel, viewedItem, isProjectTotalView) {
   mount.appendChild(wrapper);
 }
 
+function toggleTelemetryScopeMode() {
+  isTelemetryProjectTotalMode = !isTelemetryProjectTotalMode;
+  renderSessionTelemetry();
+}
+
 function renderSessionTelemetry() {
   const mount = document.getElementById("sessionTelemetryMount");
   if (!mount) return;
@@ -236,13 +261,12 @@ function renderSessionTelemetry() {
   const tel = state.telemetry || {};
   const convList = Array.isArray(tel.projectConversations) ? tel.projectConversations : [];
 
-  let isProjectTotalView = false;
+  const isProjectTotalView = Boolean(isTelemetryProjectTotalMode && tel.projectTotal);
   let viewedItem = tel;
 
-  if (selectedTelemetryConvId === "__PROJECT_TOTAL__" && tel.projectTotal && convList.length > 1) {
-    isProjectTotalView = true;
+  if (isProjectTotalView) {
     viewedItem = tel.projectTotal;
-  } else if (selectedTelemetryConvId) {
+  } else if (selectedTelemetryConvId && selectedTelemetryConvId !== "__PROJECT_TOTAL__") {
     const matched = convList.find(
       (c) => c.fullConversationId === selectedTelemetryConvId || c.conversationId === selectedTelemetryConvId
     );
@@ -254,6 +278,20 @@ function renderSessionTelemetry() {
     }
   } else {
     viewedItem = convList.find((c) => c.isCurrentActive) || convList[0] || tel;
+  }
+
+  const telTitleEl = document.getElementById("secTelemetryTitle");
+  if (telTitleEl) {
+    telTitleEl.textContent = isProjectTotalView
+      ? (t.secTelemetryProjectTitle || t.secTelemetryTitle)
+      : t.secTelemetryTitle;
+  }
+  const scopeBtn = document.getElementById("btnToggleTelemetryScope");
+  if (scopeBtn) {
+    scopeBtn.textContent = isProjectTotalView
+      ? (t.btnSwitchToSessionStats || "会话统计")
+      : (t.btnSwitchToProjectTotal || "项目汇总");
+    scopeBtn.classList.toggle("active-toggle", isProjectTotalView);
   }
 
   // 渲染顶栏当前查看会话的签名来源徽章（GCP 签名 / 个人签名 / 混合冲突 / 无签名）

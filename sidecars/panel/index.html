@@ -45,7 +45,7 @@
     <div class="quota-list" id="quotaGroupsContainer"></div>
   </div>
 
-  <!-- 2. 当前会话统计（独立板块：展示本实例当前项目会话细分、会话签名识别与清除签名） -->
+  <!-- 2. 当前会话统计（独立板块：展示本实例当前项目会话细分、项目汇总按钮切换、会话签名识别与清除签名） -->
   <div class="section-card">
     <div class="section-header">
       <div class="telemetry-header-left">
@@ -53,6 +53,7 @@
         <span id="telemetrySigBadgeMount"></span>
       </div>
       <div class="btn-group">
+        <button class="secondary small" id="btnToggleTelemetryScope" onclick="toggleTelemetryScopeMode()">项目汇总</button>
         <button class="secondary small" id="btnScrubSignatures" onclick="toggleScrubSignaturesDrawer()">清除签名</button>
       </div>
     </div>

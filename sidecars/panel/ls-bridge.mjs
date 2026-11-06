@@ -28,6 +28,7 @@ const {
   readInstanceToken,
   writeInstanceCredentialAndAwaitSync,
   syncInstanceAppStorage,
+  syncInstanceStateVscdb,
   buildCleanChannelToken,
   parseLsLogInfo,
   listRunningLanguageServerProcesses,
@@ -469,7 +470,7 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
     );
     const desiredProxyMode = (!isLiveGcp && hasActivePersonalRouting) ? "local_proxy" : "direct";
     const localProxyUrl = getActiveCloudCodeProxyUrl(cfg);
-    const targetUrl = desiredProxyMode === "local_proxy" ? localProxyUrl : "https://cloudcode-pa.googleapis.com";
+    const targetUrl = desiredProxyMode === "local_proxy" ? localProxyUrl : "https://daily-cloudcode-pa.googleapis.com";
     if (
       instMeta.cloudCodeProxyPid !== ls.pid ||
       instMeta.cloudCodeProxyMode !== desiredProxyMode ||
@@ -753,7 +754,21 @@ export async function switchBillingProjectInstant(projectId, opts = {}) {
 
   if (cred) {
     const cleanedCred = buildCleanChannelToken(cred, cleanId, location);
-    writeWinCredToken(cleanedCred);
+    if (ctx.isIsolatedInstance && ctx.userDataDir) {
+      writeInstanceTokenFile(ctx.userDataDir, cleanedCred);
+    } else {
+      writeWinCredToken(cleanedCred);
+    }
+    syncInstanceAppStorage(
+      ctx.userDataDir,
+      activeEmail,
+      Boolean(cleanId),
+      Boolean(ctx.isIsolatedInstance),
+      cleanId,
+      gcpBillingMode,
+      gcpLocation
+    );
+    syncInstanceStateVscdb(ctx.userDataDir, cleanedCred, activeEmail, cleanId);
   }
 
   cfg.__meta__.lastAppliedGcpProject = cleanId;
@@ -944,8 +959,25 @@ export async function switchActiveGoogleAccount(accountId, opts = {}) {
     ctx.userDataDir,
     target.email,
     Boolean(targetProject),
-    Boolean(ctx.isIsolatedInstance)
+    Boolean(ctx.isIsolatedInstance),
+    targetProject,
+    targetBillingMode,
+    targetLocation
   );
+  syncInstanceStateVscdb(
+    ctx.userDataDir,
+    tokenToWrite,
+    target.email,
+    targetProject
+  );
+  instMeta.cloudCodeProxyMode = (!targetProject && hasActivePersonalRouting) ? "local_proxy" : "direct";
+  instMeta.cloudCodeProxyUrl = (!targetProject && hasActivePersonalRouting)
+    ? localProxyUrl
+    : "https://daily-cloudcode-pa.googleapis.com";
+  if (!ctx.isIsolatedInstance) {
+    cfg.__meta__.cloudCodeProxyMode = instMeta.cloudCodeProxyMode;
+    cfg.__meta__.cloudCodeProxyUrl = instMeta.cloudCodeProxyUrl;
+  }
   cfg.__meta__.lastRoutedChannelId = target.id;
   cfg.__meta__.convLastChannelMap = {};
   writeRelayConfig(cfg);
@@ -973,6 +1005,8 @@ export async function switchActiveGoogleAccount(accountId, opts = {}) {
   const restartCtx = { ...ctx };
   await restartCurrentAntigravityInstance(restartCtx, {
     tokenObj: tokenToWrite,
+    email: target.email,
+    gcpProjectId: targetProject,
     lsPid: Number(currentLs?.pid || 0)
   }).catch(() => {});
 

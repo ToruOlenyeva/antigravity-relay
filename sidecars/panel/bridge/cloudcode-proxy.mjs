@@ -456,20 +456,19 @@ const CLOUDCODE_PROXY_CANDIDATE_PORTS = [8091, 8092, 8093, 8094, 8095, 8096, 809
 globalThis.__agyCloudCodeProxyHandler = proxyCloudCodeRequest;
 
 export function getActiveCloudCodeProxyUrl(cfg = null) {
-  const sidecarPort = Number(process.env.ANTIGRAVITY_SIDECAR_WEB_PORT || 0);
-  if (sidecarPort > 1024 && sidecarPort !== 8089) {
-    return `http://127.0.0.1:${sidecarPort}`;
-  }
-  if (globalThis.__agyCloudCodeProxyUrl) {
+  if (
+    globalThis.__agyCloudCodeProxyUrl &&
+    /^http:\/\/127\.0\.0\.1:809\d$/i.test(globalThis.__agyCloudCodeProxyUrl)
+  ) {
     return globalThis.__agyCloudCodeProxyUrl;
   }
   const ctx = resolveCurrentInstanceContext();
   const instSaved = cfg ? String(getInstanceMeta(cfg, ctx)?.cloudCodeProxyUrl || "").trim() : "";
-  if (/^http:\/\/127\.0\.0\.1:\d+$/i.test(instSaved)) {
+  if (/^http:\/\/127\.0\.0\.1:809\d$/i.test(instSaved)) {
     return instSaved;
   }
   const saved = !ctx.isIsolatedInstance ? String(cfg?.__meta__?.cloudCodeProxyUrl || "").trim() : "";
-  if (/^http:\/\/127\.0\.0\.1:\d+$/i.test(saved)) {
+  if (/^http:\/\/127\.0\.0\.1:809\d$/i.test(saved)) {
     return saved;
   }
   return ctx.isIsolatedInstance ? "http://127.0.0.1:8092" : "http://127.0.0.1:8091";
@@ -511,36 +510,34 @@ function checkExistingRelayProxyOnPort(port) {
 
 function persistAndSyncProxyUrl(proxyUrl) {
   if (!proxyUrl) return;
-  const sidecarPort = Number(process.env.ANTIGRAVITY_SIDECAR_WEB_PORT || 0);
-  const effectiveUrl = (sidecarPort > 1024 && sidecarPort !== 8089)
-    ? `http://127.0.0.1:${sidecarPort}`
-    : proxyUrl;
+  const effectiveUrl = proxyUrl;
   globalThis.__agyCloudCodeProxyUrl = effectiveUrl;
   try {
     const cfg = readRelayConfig();
     const ctx = resolveCurrentInstanceContext();
     const instMeta = getInstanceMeta(cfg, ctx);
+    const isLiveGcp = Boolean(instMeta.lastAppliedGcpProject || (!ctx.isIsolatedInstance && cfg.__meta__?.lastAppliedGcpProject));
+    const hasActivePersonalRouting = !isLiveGcp && Object.values(cfg.routing?.models || {}).some(
+      (v) => typeof v === "string" && v !== "follow_current" && v.trim() !== ""
+    );
+    const desiredUrl = (!isLiveGcp && hasActivePersonalRouting)
+      ? effectiveUrl
+      : "https://daily-cloudcode-pa.googleapis.com";
     let changed = false;
-    if (instMeta.cloudCodeProxyUrl !== effectiveUrl) {
-      instMeta.cloudCodeProxyUrl = effectiveUrl;
+    if (instMeta.cloudCodeProxyUrl !== desiredUrl) {
+      instMeta.cloudCodeProxyUrl = desiredUrl;
       changed = true;
     }
-    if (!ctx.isIsolatedInstance && cfg.__meta__.cloudCodeProxyUrl !== effectiveUrl) {
-      cfg.__meta__.cloudCodeProxyUrl = effectiveUrl;
+    if (!ctx.isIsolatedInstance && cfg.__meta__.cloudCodeProxyUrl !== desiredUrl) {
+      cfg.__meta__.cloudCodeProxyUrl = desiredUrl;
       changed = true;
     }
     if (changed) {
       writeRelayConfig(cfg);
     }
-    const isLiveGcp = Boolean(instMeta.lastAppliedGcpProject);
-    const hasActivePersonalRouting = !isLiveGcp && Object.values(cfg.routing?.models || {}).some(
-      (v) => typeof v === "string" && v !== "follow_current" && v.trim() !== ""
-    );
-    if (!isLiveGcp && hasActivePersonalRouting) {
-      const ls = discoverLanguageServer(false);
-      if (ls) {
-        callLsRpc(ls, "SetCloudCodeURL", { url: effectiveUrl }).catch(() => {});
-      }
+    const ls = discoverLanguageServer(false);
+    if (ls) {
+      callLsRpc(ls, "SetCloudCodeURL", { url: desiredUrl }).catch(() => {});
     }
   } catch {}
 }

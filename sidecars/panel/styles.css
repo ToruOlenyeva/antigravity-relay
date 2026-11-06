@@ -920,6 +920,27 @@ button.danger:hover {
   margin-bottom: 4px;
 }
 
+.telemetry-project-summary-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 33px;
+  padding: 0 10px;
+  margin-bottom: 4px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--text-main);
+}
+
+button.secondary.small.active-toggle {
+  background: rgba(0, 122, 204, 0.14);
+  border-color: rgba(0, 122, 204, 0.45);
+  color: var(--primary);
+  font-weight: 600;
+}
+
 .telemetry-card {
   display: flex;
   flex-direction: column;

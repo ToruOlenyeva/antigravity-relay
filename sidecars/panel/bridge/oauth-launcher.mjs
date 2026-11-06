@@ -28,6 +28,8 @@ import {
   writeWinCredToken,
   writeInstanceTokenFile,
   syncInstanceAppStorage,
+  buildStateVscdbSyncPayload,
+  syncInstanceStateVscdb,
   buildCleanChannelToken,
   refreshOAuthAccessToken,
   inspectActiveFieldInstances
@@ -273,11 +275,59 @@ export async function restartCurrentAntigravityInstance(ctx = null, opts = {}) {
     ? getInstanceTokenFilePath(userDataDir)
     : JETSKI_TOKEN_FILE;
   const tokenContent = opts?.tokenObj ? JSON.stringify(opts.tokenObj) : "";
+  const stateVscdbPath = userDataDir ? path.join(userDataDir, "User", "globalStorage", "state.vscdb") : "";
+  const vscdbPayload = opts?.tokenObj
+    ? buildStateVscdbSyncPayload(opts.tokenObj, opts.email || "", opts.gcpProjectId || "")
+    : null;
 
   const geminiDir = path.join(HOME_DIR, ".gemini");
   fs.mkdirSync(geminiDir, { recursive: true });
   const configPath = path.join(geminiDir, `agy-relay-restart-${safeId}.json`);
   const scriptPath = path.join(geminiDir, `agy-relay-restart-${safeId}.ps1`);
+  const vscdbSyncScriptPath = path.join(geminiDir, "agy-relay-sync-vscdb.mjs");
+
+  const vscdbSyncMjs = [
+    'import fs from "node:fs";',
+    'import { DatabaseSync } from "node:sqlite";',
+    'const cfgPath = process.argv[2] || "";',
+    'if (!cfgPath || !fs.existsSync(cfgPath)) process.exit(0);',
+    'try {',
+    '  const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));',
+    '  const dbPath = String(cfg.stateVscdbPath || "");',
+    '  const p = cfg.vscdbPayload;',
+    '  if (dbPath && p && fs.existsSync(dbPath)) {',
+    '    const db = new DatabaseSync(dbPath);',
+    '    try {',
+    '      db.exec("CREATE TABLE IF NOT EXISTS ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)");',
+    '      const upsert = db.prepare("INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)");',
+    '      if (p.oauthTokenB64) upsert.run("antigravityUnifiedStateSync.oauthToken", p.oauthTokenB64);',
+    '      if (p.userStatusB64) upsert.run("antigravityUnifiedStateSync.userStatus", p.userStatusB64);',
+    '      if (p.isGcp && p.enterprisePrefsB64) {',
+    '        upsert.run("antigravityUnifiedStateSync.enterprisePreferences", p.enterprisePrefsB64);',
+    '      } else {',
+    '        db.prepare("DELETE FROM ItemTable WHERE key = ?").run("antigravityUnifiedStateSync.enterprisePreferences");',
+    '      }',
+    '      let authObj = { name: p.email ? p.email.split("@")[0] : "User", email: p.email || "", apiKey: p.accessToken || "" };',
+    '      try {',
+    '        const row = db.prepare("SELECT value FROM ItemTable WHERE key = ?").get("antigravityAuthStatus");',
+    '        if (row && row.value) {',
+    '          const parsed = JSON.parse(String(row.value));',
+    '          if (parsed && typeof parsed === "object") {',
+    '            authObj = { ...parsed, email: p.email || parsed.email || "", apiKey: p.accessToken || parsed.apiKey || "" };',
+    '            delete authObj.userStatusProtoBinaryBase64;',
+    '          }',
+    '        }',
+    '      } catch {}',
+    '      upsert.run("antigravityAuthStatus", JSON.stringify(authObj));',
+    '    } finally {',
+    '      db.close();',
+    '    }',
+    '  }',
+    '} catch {}'
+  ].join("\n");
+  try {
+    fs.writeFileSync(vscdbSyncScriptPath, vscdbSyncMjs, "utf8");
+  } catch {}
 
   const restartCfg = {
     isIsolated,
@@ -289,6 +339,10 @@ export async function restartCurrentAntigravityInstance(ctx = null, opts = {}) {
     localAppDataDir: process.env.LOCALAPPDATA || path.join(HOME_DIR, "AppData", "Local"),
     exePath,
     exeDir: path.dirname(exePath),
+    nodeExePath: process.execPath,
+    vscdbSyncScriptPath,
+    stateVscdbPath,
+    vscdbPayload,
     lsPid: Number(opts?.lsPid || 0),
     appStoragePath,
     appStorageContent,
@@ -346,7 +400,7 @@ export async function restartCurrentAntigravityInstance(ctx = null, opts = {}) {
     "  Stop-Process -Id $pidArray -Force -ErrorAction SilentlyContinue",
     "  Wait-Process -Id $pidArray -Timeout 3 -ErrorAction SilentlyContinue",
     "}",
-    "Start-Sleep -Milliseconds 380",
+    "Start-Sleep -Milliseconds 420",
     "if ($cfg.appStoragePath -and $cfg.appStorageContent) {",
     "  [System.IO.File]::WriteAllText([string]$cfg.appStoragePath, [string]$cfg.appStorageContent, $utf8NoBom)",
     "}",
@@ -358,6 +412,12 @@ export async function restartCurrentAntigravityInstance(ctx = null, opts = {}) {
     "  if ($cfg.isIsolated -or [System.IO.File]::Exists([string]$cfg.tokenFilePath)) {",
     "    [System.IO.File]::WriteAllText([string]$cfg.tokenFilePath, [string]$cfg.tokenContent, $utf8NoBom)",
     "  }",
+    "}",
+    "if ($cfg.vscdbSyncScriptPath -and [System.IO.File]::Exists([string]$cfg.vscdbSyncScriptPath)) {",
+    "  $nodeCmd = if ($cfg.nodeExePath -and [System.IO.File]::Exists([string]$cfg.nodeExePath)) { [string]$cfg.nodeExePath } else { 'node' }",
+    "  $env:ELECTRON_RUN_AS_NODE = '1'",
+    "  & $nodeCmd ([string]$cfg.vscdbSyncScriptPath) $ConfigPath | Out-Null",
+    "  Remove-Item Env:\\ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue",
     "}",
     "if (-not $cfg.isIsolated -and $cfg.tokenContent) {",
     "  Add-Type -TypeDefinition @'",
@@ -1072,7 +1132,21 @@ export async function launchIsolatedAntigravityInstance(accountId) {
     if (fs.existsSync(srcWinState) && !fs.existsSync(dstWinState)) {
       fs.copyFileSync(srcWinState, dstWinState);
     }
-    syncInstanceAppStorage(instanceUserDataDir, target.email, Boolean(targetProject), true);
+    const srcStateVscdb = path.join(mainAppDataDir, "User", "globalStorage", "state.vscdb");
+    const dstStateVscdb = path.join(instanceGlobalStorageDir, "state.vscdb");
+    if (fs.existsSync(srcStateVscdb) && !fs.existsSync(dstStateVscdb)) {
+      fs.copyFileSync(srcStateVscdb, dstStateVscdb);
+    }
+    syncInstanceAppStorage(
+      instanceUserDataDir,
+      target.email,
+      Boolean(targetProject),
+      true,
+      targetProject,
+      targetBillingMode,
+      targetLocation
+    );
+    syncInstanceStateVscdb(instanceUserDataDir, tokenToWrite, target.email, targetProject);
   } catch {}
 
   const launchedAt = Date.now();

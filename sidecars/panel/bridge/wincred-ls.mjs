@@ -4,6 +4,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import { DatabaseSync } from "node:sqlite";
 import {
   APP_DATA_DIR,
   INSTANCES_ROOT_DIR,
@@ -452,7 +453,15 @@ export async function writeInstanceCredentialAndAwaitSync(
   );
 }
 
-export function syncInstanceAppStorage(userDataDir, email, isGcp = false, isIsolated = false) {
+export function syncInstanceAppStorage(
+  userDataDir,
+  email,
+  isGcp = false,
+  isIsolated = false,
+  gcpProjectId = "",
+  gcpBillingMode = "agent_platform",
+  gcpLocation = "global"
+) {
   if (!userDataDir) return;
   try {
     fs.mkdirSync(userDataDir, { recursive: true });
@@ -487,13 +496,157 @@ export function syncInstanceAppStorage(userDataDir, email, isGcp = false, isIsol
     }
     storageObj["ide-install-wizard-shown"] = "true";
     storageObj["didAskForNotificationPermission"] = "true";
-    if (email) {
-      storageObj["agy.onboarding.lastLoginUsername"] = String(email).trim();
+    const cleanEmail = String(email || "").trim();
+    if (cleanEmail) {
+      storageObj["agy.onboarding.lastLoginUsername"] = cleanEmail;
+      storageObj["jetski.onboarding.lastLoginUsername"] = cleanEmail;
     }
     storageObj["agy.onboarding.lastLoginIsGcpTos"] = isGcp ? "true" : "false";
     storageObj["agy.onboarding.lastLoginStrategy"] = isGcp ? "gcp" : "google";
+    storageObj["jetski.onboarding.lastLoginIsGcpTos"] = Boolean(isGcp);
+    const cleanPid = isGcp ? String(gcpProjectId || "").trim() : "";
+    if (cleanPid) {
+      storageObj["jetski.gcp.projectId"] = cleanPid;
+      storageObj["jetski.gcp.billingMode"] = gcpBillingMode || "agent_platform";
+      storageObj["jetski.gcp.location"] = gcpLocation || "global";
+    } else {
+      delete storageObj["jetski.gcp.projectId"];
+      delete storageObj["jetski.gcp.billingMode"];
+      delete storageObj["jetski.gcp.location"];
+    }
     fs.writeFileSync(appStoragePath, JSON.stringify(storageObj, null, 2), "utf8");
   } catch {}
+}
+
+function encodeProtoVarint(val) {
+  let v = BigInt(val >= 0 ? val : 0);
+  const bytes = [];
+  while (v > 0x7fn) {
+    bytes.push(Number((v & 0x7fn) | 0x80n));
+    v >>= 7n;
+  }
+  bytes.push(Number(v & 0x7fn));
+  return Buffer.from(bytes);
+}
+
+function encodeProtoTag(fieldNumber, wireType) {
+  return encodeProtoVarint((fieldNumber << 3) | wireType);
+}
+
+function encodeProtoBytesField(fieldNumber, buf) {
+  const data = Buffer.isBuffer(buf) ? buf : Buffer.from(String(buf || ""), "utf8");
+  return Buffer.concat([encodeProtoTag(fieldNumber, 2), encodeProtoVarint(data.length), data]);
+}
+
+function encodeProtoStringField(fieldNumber, str) {
+  return encodeProtoBytesField(fieldNumber, Buffer.from(String(str || ""), "utf8"));
+}
+
+function encodeProtoTimestampField(fieldNumber, unixSeconds) {
+  const tsBody = Buffer.concat([encodeProtoTag(1, 0), encodeProtoVarint(Math.max(1, Math.floor(Number(unixSeconds) || 0)))]);
+  return encodeProtoBytesField(fieldNumber, tsBody);
+}
+
+function buildTopicMapEntryBuffer(keyStr, innerBytes) {
+  const innerB64 = Buffer.from(innerBytes).toString("base64");
+  const valWrapper = encodeProtoStringField(1, innerB64);
+  const entry = Buffer.concat([
+    encodeProtoStringField(1, keyStr),
+    encodeProtoBytesField(2, valWrapper)
+  ]);
+  return encodeProtoBytesField(1, entry);
+}
+
+export function buildStateVscdbSyncPayload(tokenObj, email = "", gcpProjectId = "") {
+  const cleanEmail = String(email || tokenObj?.id_token_email || "").trim();
+  const cleanPid = String(gcpProjectId || tokenObj?.project_id || "").trim();
+  const accessToken = String(tokenObj?.token?.access_token || "").trim();
+  const refreshToken = String(tokenObj?.token?.refresh_token || "").trim();
+  const expiryStr = String(tokenObj?.token?.expiry || "").trim();
+  const parsedMs = expiryStr ? new Date(expiryStr).getTime() : 0;
+  const expirySec = Number.isFinite(parsedMs) && parsedMs > 0
+    ? Math.floor(parsedMs / 1000)
+    : Math.floor(Date.now() / 1000) + 3500;
+
+  const oauthParts = [
+    encodeProtoStringField(1, accessToken),
+    encodeProtoStringField(2, "Bearer"),
+    encodeProtoStringField(3, refreshToken),
+    encodeProtoTimestampField(4, expirySec)
+  ];
+  const oauthTopicBuf = buildTopicMapEntryBuffer("oauthTokenInfoSentinelKey", Buffer.concat(oauthParts));
+  const oauthTokenB64 = oauthTopicBuf.toString("base64");
+
+  const userStatusInner = cleanEmail ? encodeProtoStringField(7, cleanEmail) : Buffer.alloc(0);
+  const userStatusTopicBuf = buildTopicMapEntryBuffer("userStatusSentinelKey", userStatusInner);
+  const userStatusB64 = userStatusTopicBuf.toString("base64");
+
+  let enterprisePrefsB64 = "";
+  if (cleanPid) {
+    const entTopicBuf = buildTopicMapEntryBuffer("enterpriseGcpProjectId", Buffer.from(cleanPid, "utf8"));
+    enterprisePrefsB64 = entTopicBuf.toString("base64");
+  }
+
+  return {
+    email: cleanEmail,
+    gcpProjectId: cleanPid,
+    isGcp: Boolean(cleanPid),
+    accessToken,
+    oauthTokenB64,
+    userStatusB64,
+    enterprisePrefsB64
+  };
+}
+
+export function syncInstanceStateVscdb(userDataDir, tokenObj, email = "", gcpProjectId = "") {
+  if (!userDataDir || !tokenObj) return false;
+  try {
+    const dbPath = path.join(userDataDir, "User", "globalStorage", "state.vscdb");
+    if (!fs.existsSync(dbPath)) return false;
+    const payload = buildStateVscdbSyncPayload(tokenObj, email, gcpProjectId);
+    const db = new DatabaseSync(dbPath);
+    try {
+      db.exec("CREATE TABLE IF NOT EXISTS ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)");
+      const upsert = db.prepare("INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)");
+      if (payload.oauthTokenB64) {
+        upsert.run("antigravityUnifiedStateSync.oauthToken", payload.oauthTokenB64);
+      }
+      if (payload.userStatusB64) {
+        upsert.run("antigravityUnifiedStateSync.userStatus", payload.userStatusB64);
+      }
+      if (payload.isGcp && payload.enterprisePrefsB64) {
+        upsert.run("antigravityUnifiedStateSync.enterprisePreferences", payload.enterprisePrefsB64);
+      } else {
+        db.prepare("DELETE FROM ItemTable WHERE key = ?").run("antigravityUnifiedStateSync.enterprisePreferences");
+      }
+
+      let authStatusObj = {
+        name: payload.email ? payload.email.split("@")[0] : "User",
+        email: payload.email,
+        apiKey: payload.accessToken
+      };
+      try {
+        const row = db.prepare("SELECT value FROM ItemTable WHERE key = ?").get("antigravityAuthStatus");
+        if (row && row.value) {
+          const parsed = JSON.parse(String(row.value));
+          if (parsed && typeof parsed === "object") {
+            authStatusObj = {
+              ...parsed,
+              email: payload.email || parsed.email || "",
+              apiKey: payload.accessToken || parsed.apiKey || ""
+            };
+            delete authStatusObj.userStatusProtoBinaryBase64;
+          }
+        }
+      } catch {}
+      upsert.run("antigravityAuthStatus", JSON.stringify(authStatusObj));
+    } finally {
+      db.close();
+    }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function sanitizeAllIsolatedInstancesAppStorage() {
@@ -506,11 +659,21 @@ export function sanitizeAllIsolatedInstancesAppStorage() {
       const instDir = path.join(INSTANCES_ROOT_DIR, d.name);
       const desc = readInstanceDescriptor(instDir);
       if (desc && desc.email) {
-        syncInstanceAppStorage(instDir, desc.email, Boolean(desc.gcpProjectId), true);
         const chId = desc.activeChannelId || (desc.gcpProjectId ? `${desc.email}#gcp:${desc.gcpProjectId}` : `${desc.email}#personal`);
-        const chTok = cfg?.__meta__?.channelTokensById?.[chId] || cfg?.accounts?.[chId]?.storedToken;
+        const accObj = cfg?.accounts?.[chId];
+        syncInstanceAppStorage(
+          instDir,
+          desc.email,
+          Boolean(desc.gcpProjectId),
+          true,
+          desc.gcpProjectId || "",
+          accObj?.gcpBillingMode || "agent_platform",
+          accObj?.gcpLocation || "global"
+        );
+        const chTok = cfg?.__meta__?.channelTokensById?.[chId] || accObj?.storedToken;
         if (chTok) {
           writeInstanceTokenFile(instDir, chTok);
+          syncInstanceStateVscdb(instDir, chTok, desc.email, desc.gcpProjectId || "");
         } else {
           ensureInstanceIsolatedHome(instDir);
         }
@@ -557,7 +720,7 @@ export function buildCleanChannelToken(baseToken, targetProject = "", targetLoca
     next.project_id = cleanPid;
     next.region = cleanLoc;
   } else {
-    delete next.auth_method;
+    next.auth_method = "consumer";
     delete next.project_id;
     delete next.region;
   }
@@ -1096,10 +1259,12 @@ export function scheduleDetachedLanguageServerRestart(
       writeWinCredToken(tokenToLock);
     }
     if (activeLs) {
-      const sidecarPort = Number(process.env.ANTIGRAVITY_SIDECAR_WEB_PORT || 0);
-      const ownSidecarUrl = (sidecarPort > 1024 && sidecarPort !== 8089) ? `http://127.0.0.1:${sidecarPort}` : "";
-      const savedProxy = ownSidecarUrl || proxyUrlHint || globalThis.__agyCloudCodeProxyUrl || "http://127.0.0.1:8091";
-      const targetUrl = isGcpTarget ? "https://daily-cloudcode-pa.googleapis.com" : savedProxy;
+      const validProxyHint = /^http:\/\/127\.0\.0\.1:809\d$/i.test(String(proxyUrlHint || "").trim())
+        ? String(proxyUrlHint).trim()
+        : "";
+      const targetUrl = isGcpTarget
+        ? "https://daily-cloudcode-pa.googleapis.com"
+        : (validProxyHint || "https://daily-cloudcode-pa.googleapis.com");
       callLsRpc(activeLs, "SetCloudCodeURL", { url: targetUrl }).catch(() => {});
       if (restoreCredAfterSwitch) {
         try {

@@ -281,7 +281,7 @@ function resolveHookInstanceMeta(relayCfg) {
 async function ensureLocalCloudCodeProxyMounted(lsTarget, relayCfg, instMeta = null) {
   if (!lsTarget || !lsTarget.port || !lsTarget.csrf) return false;
   const savedProxyUrl = String(instMeta?.cloudCodeProxyUrl || relayCfg?.__meta__?.cloudCodeProxyUrl || "").trim();
-  const proxyUrl = /^http:\/\/127\.0\.0\.1:\d+$/i.test(savedProxyUrl) ? savedProxyUrl : "http://127.0.0.1:8091";
+  const proxyUrl = /^http:\/\/127\.0\.0\.1:809\d$/i.test(savedProxyUrl) ? savedProxyUrl : "http://127.0.0.1:8091";
   const payload = Buffer.from(JSON.stringify({ url: proxyUrl }), "utf-8");
   const primaryProto = lsTarget.protocol || "http";
   const ok = await sendLsRpcMethod(
