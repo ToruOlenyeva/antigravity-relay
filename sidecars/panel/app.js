@@ -18,6 +18,8 @@ let state = {
 
 // 顶部「账户模型额度」当前选中的查看通道 ID（空字符串表示跟随当前激活通道）
 let selectedQuotaChannelId = "";
+// 第 2 板块「当前会话统计」当前选中的查看会话 ID（空字符串表示跟随当前活跃会话，__PROJECT_TOTAL__ 表示项目全部会话汇总）
+let selectedTelemetryConvId = "";
 // 当前处于待二次确认删除状态的通道 ID
 let pendingDeleteAccountId = "";
 let pendingDeleteTimer = null;
@@ -833,18 +835,31 @@ function applyGcpInputProject() {
   switchBillingProject(val);
 }
 
-async function handleManualScrubSignatures() {
+async function handleManualScrubSignatures(mode = "mismatched") {
   try {
+    const tel = state.telemetry || {};
+    const targetConvId =
+      (selectedTelemetryConvId && selectedTelemetryConvId !== "__PROJECT_TOTAL__")
+        ? selectedTelemetryConvId
+        : (tel.fullConversationId || tel.conversationId || "");
     const res = await fetch("/api/scrub-signatures", {
       method: "POST",
-      headers: { "Content-Type": "application/json" }
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        mode: mode === "current" ? "current" : "mismatched",
+        conversationId: targetConvId
+      })
     });
     const data = await res.json();
     if (data.snapshot) {
       state = data.snapshot;
       renderAll();
     }
-    showToast(`${I18N[currentLang].toastSignaturesScrubbed}${data.scrubbedCount ?? 0}`);
+    const t = I18N[currentLang];
+    const toastPrefix = mode === "current"
+      ? (t.toastScrubbedCurrent || t.toastSignaturesScrubbed)
+      : (t.toastScrubbedMismatched || t.toastSignaturesScrubbed);
+    showToast(`${toastPrefix}${data.scrubbedCount ?? 0}`);
   } catch (e) {}
 }
 

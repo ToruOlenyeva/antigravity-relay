@@ -329,10 +329,18 @@ async function requestHandler(req, res) {
     }
   }
 
-  // 5-0. 手动一键清除全盘历史会话中的思维签名（用于用户按需手动修复跨通道报错）
+  // 5-0. 手动清除会话思维签名（支持仅清除当前会话 current 与全项目扫描清除不匹配签名 mismatched 两种模式）
   if (req.method === "POST" && pathname === "/api/scrub-signatures") {
     try {
-      const result = await lsBridge.manualScrubAllSignatures();
+      const body = await readJsonBody(req).catch(() => ({}));
+      const preSnap = latestSnapshot || await lsBridge.fetchLiveSystemSnapshot(false);
+      const activeIsGcp = Boolean(preSnap?.activeAccount?.gcpProjectId);
+      const targetConvId = body?.conversationId || preSnap?.telemetry?.fullConversationId || preSnap?.telemetry?.conversationId || "";
+      const result = await lsBridge.manualScrubAllSignatures({
+        mode: body?.mode || "mismatched",
+        conversationId: targetConvId,
+        activeIsGcp
+      });
       const snap = await lsBridge.fetchLiveSystemSnapshot(false);
       broadcastSnapshot(snap);
       return sendJson(res, 200, { success: true, ...result, snapshot: snap });

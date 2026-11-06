@@ -123,14 +123,24 @@ function renderScrubSignaturesDrawer() {
   const actionRow = document.createElement("div");
   actionRow.className = "gcp-config-row";
   actionRow.style.justifyContent = "flex-end";
+  actionRow.style.flexWrap = "wrap";
 
-  const confirmBtn = document.createElement("button");
-  confirmBtn.className = "danger small";
-  confirmBtn.textContent = t.btnConfirmScrub;
-  confirmBtn.onclick = async () => {
+  const currentOnlyBtn = document.createElement("button");
+  currentOnlyBtn.className = "secondary small";
+  currentOnlyBtn.textContent = t.btnScrubCurrentConv || "仅清除当前会话";
+  currentOnlyBtn.onclick = async () => {
     isScrubSigsDrawerOpen = false;
     renderScrubSignaturesDrawer();
-    await handleManualScrubSignatures();
+    await handleManualScrubSignatures("current");
+  };
+
+  const scanMismatchBtn = document.createElement("button");
+  scanMismatchBtn.className = "danger small";
+  scanMismatchBtn.textContent = t.btnScrubProjectMismatched || "全项目扫描清除不匹配签名";
+  scanMismatchBtn.onclick = async () => {
+    isScrubSigsDrawerOpen = false;
+    renderScrubSignaturesDrawer();
+    await handleManualScrubSignatures("mismatched");
   };
 
   const cancelBtn = document.createElement("button");
@@ -141,7 +151,8 @@ function renderScrubSignaturesDrawer() {
     renderScrubSignaturesDrawer();
   };
 
-  actionRow.appendChild(confirmBtn);
+  actionRow.appendChild(currentOnlyBtn);
+  actionRow.appendChild(scanMismatchBtn);
   actionRow.appendChild(cancelBtn);
   drawer.appendChild(actionRow);
 }

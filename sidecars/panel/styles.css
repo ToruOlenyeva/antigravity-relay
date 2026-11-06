@@ -860,7 +860,66 @@ button.danger:hover {
   z-index: 1000;
 }
 
-/* 对话算力遥测统计条 (三格总览 + 本会话按模型细分列表) */
+/* 对话算力遥测统计条 (顶栏签名状态徽章 + 项目会话细分选择器 + 三格总览 + 本会话按模型细分列表) */
+.telemetry-header-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.telemetry-sig-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 9.5px;
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.telemetry-sig-badge.gcp {
+  background: rgba(16, 185, 129, 0.14);
+  color: #10b981;
+  border: 1px solid rgba(16, 185, 129, 0.28);
+}
+
+.telemetry-sig-badge.personal {
+  background: rgba(59, 130, 246, 0.14);
+  color: #3b82f6;
+  border: 1px solid rgba(59, 130, 246, 0.28);
+}
+
+.telemetry-sig-badge.none {
+  background: var(--bg-base);
+  color: var(--text-muted);
+  border: 1px solid var(--border-subtle);
+}
+
+.telemetry-sig-badge.mismatched {
+  background: rgba(245, 158, 11, 0.16);
+  color: #f59e0b;
+  border: 1px solid rgba(245, 158, 11, 0.42);
+}
+
+.channel-type-badge.mismatch {
+  background: rgba(245, 158, 11, 0.18);
+  color: #f59e0b;
+  border: 1px solid rgba(245, 158, 11, 0.4);
+}
+
+.channel-type-badge.none {
+  background: var(--bg-surface);
+  color: var(--text-muted);
+  border: 1px solid var(--border-subtle);
+}
+
+.telemetry-conv-dropdown {
+  margin-bottom: 4px;
+}
+
 .telemetry-card {
   display: flex;
   flex-direction: column;

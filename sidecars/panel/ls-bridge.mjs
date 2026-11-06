@@ -704,7 +704,7 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
       return (a.gcpProjectId || "").localeCompare(b.gcpProjectId || "");
     });
 
-  const telemetry = await computeSessionTelemetrySnapshot(cfg, ctx);
+  const telemetry = await computeSessionTelemetrySnapshot(cfg, ctx, Boolean(displayAccount?.gcpProjectId));
   const instanceStatus = inspectActiveFieldInstances(cfg, ctx);
 
   return {

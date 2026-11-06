@@ -5,6 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { execFileSync, spawn } from "node:child_process";
+import { DatabaseSync } from "node:sqlite";
 import {
   HOME_DIR,
   readRelayConfig,
@@ -14,6 +15,7 @@ import {
   getInstanceMeta,
   ensureInstanceIsolatedHome
 } from "../store.mjs";
+import { inspectConversationSignatureStatus } from "./signature-scrub.mjs";
 import {
   AGY_OAUTH_CLIENT_ID,
   AGY_OAUTH_CLIENT_SECRET,
@@ -312,14 +314,208 @@ function parseSettingsChangeModels(contentStr, knownDict) {
   };
 }
 
-export async function computeSessionTelemetrySnapshot(cfgInput = null, instanceCtx = null) {
+const convTranscriptCache = new Map();
+
+function extractProjectNameFromWorkspaceUris(rawUris) {
+  if (!rawUris || typeof rawUris !== "string") return "";
+  try {
+    const arr = JSON.parse(rawUris);
+    if (Array.isArray(arr) && arr.length > 0) {
+      const first = decodeURIComponent(String(arr[0] || "")).replace(/\\/g, "/").replace(/\/+$/, "");
+      const base = first.split("/").pop() || "";
+      return base;
+    }
+  } catch {}
+  return "";
+}
+
+function parseSingleConversationTranscript(convId, brainDir, knownDict, fallbackModel = "Gemini 4 Argon") {
+  const cleanId = String(convId || "").trim();
+  const emptyStat = {
+    sessionInputTokens: 0,
+    sessionCacheTokens: 0,
+    sessionOutputTokens: 0,
+    sessionTotalTokens: 0,
+    lastInputTokens: 0,
+    lastCacheTokens: 0,
+    lastContextTokens: 0,
+    lastOutputTokens: 0,
+    cacheHitPct: 0,
+    turnCount: 0,
+    checkpointCount: 0,
+    checkpointTokens: 0,
+    byModel: []
+  };
+  if (!cleanId) return emptyStat;
+  const logPath = path.join(brainDir, cleanId, ".system_generated", "logs", "transcript.jsonl");
+  if (!fs.existsSync(logPath)) return emptyStat;
+
+  let st = null;
+  try {
+    st = fs.statSync(logPath);
+  } catch {
+    return emptyStat;
+  }
+
+  const cached = convTranscriptCache.get(cleanId);
+  if (cached && cached.mtimeMs === st.mtimeMs && cached.size === st.size) {
+    return cached.data;
+  }
+
+  let sessionInputTokens = 0;
+  let sessionCacheTokens = 0;
+  let sessionOutputTokens = 0;
+  let lastInputTokens = 0;
+  let lastCacheTokens = 0;
+  let lastOutputTokens = 0;
+  let turnCount = 0;
+  let checkpointCount = 0;
+  let checkpointTokens = 0;
+  const modelMap = new Map();
+
+  try {
+    const rawText = fs.readFileSync(logPath, "utf8");
+    const lines = rawText.split(/\r?\n/).filter(Boolean);
+    const rows = [];
+    let initialBeforeChangeModel = "";
+
+    for (const line of lines) {
+      try {
+        const r = JSON.parse(line);
+        rows.push(r);
+        if (!initialBeforeChangeModel && typeof r.content === "string" && r.content.includes("<USER_SETTINGS_CHANGE>")) {
+          const parsed = parseSettingsChangeModels(r.content, knownDict);
+          if (parsed && parsed.fromModel) {
+            initialBeforeChangeModel = parsed.fromModel;
+          }
+        }
+      } catch {}
+    }
+
+    let currentModel = initialBeforeChangeModel || fallbackModel || "Gemini 4 Argon";
+    let currentTurnEstIn = 0;
+
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      const stepType = String(row.type || "");
+      const contentStr = typeof row.content === "string" ? row.content : JSON.stringify(row.content || "");
+      const thinkingStr = typeof row.thinking === "string" ? row.thinking : "";
+      const toolsStr = row.tool_calls ? JSON.stringify(row.tool_calls) : "";
+
+      if (contentStr.includes("<USER_SETTINGS_CHANGE>")) {
+        const parsed = parseSettingsChangeModels(contentStr, knownDict);
+        if (parsed && parsed.toModel) {
+          currentModel = parsed.toModel;
+        }
+      }
+
+      if (stepType === "USER_INPUT") {
+        currentTurnEstIn = estimateTokensFromString(contentStr);
+      } else if (stepType === "PLANNER_RESPONSE" || stepType === "CHECKPOINT") {
+        const hasOfficial =
+          typeof row.input_tokens === "number" ||
+          typeof row.output_tokens === "number" ||
+          typeof row.cache_read_tokens === "number";
+        const inTok = hasOfficial ? Number(row.input_tokens || 0) : currentTurnEstIn;
+        const cacheTok = hasOfficial ? Number(row.cache_read_tokens || 0) : 0;
+        const outTok = hasOfficial
+          ? Number(row.output_tokens || 0)
+          : (estimateTokensFromString(contentStr) + estimateTokensFromString(thinkingStr) + estimateTokensFromString(toolsStr));
+
+        if (inTok > 0 || outTok > 0 || cacheTok > 0) {
+          sessionInputTokens += inTok;
+          sessionCacheTokens += cacheTok;
+          sessionOutputTokens += outTok;
+
+          if (stepType === "CHECKPOINT") {
+            checkpointCount += 1;
+            checkpointTokens += inTok + outTok;
+          } else {
+            lastInputTokens = inTok;
+            lastCacheTokens = cacheTok;
+            lastOutputTokens = outTok;
+            turnCount++;
+          }
+
+          const modelKey = currentModel || "Gemini 4 Argon";
+          if (!modelMap.has(modelKey)) {
+            modelMap.set(modelKey, {
+              modelName: modelKey,
+              turns: 0,
+              inputTokens: 0,
+              cacheTokens: 0,
+              outputTokens: 0,
+              lastUsedIndex: i
+            });
+          }
+          const mStat = modelMap.get(modelKey);
+          if (stepType === "PLANNER_RESPONSE") {
+            mStat.turns += 1;
+          }
+          mStat.inputTokens += inTok;
+          mStat.cacheTokens += cacheTok;
+          mStat.outputTokens += outTok;
+          mStat.lastUsedIndex = i;
+        }
+      }
+    }
+  } catch {}
+
+  const lastContextTokens = (lastInputTokens || 0) + (lastCacheTokens || 0);
+  const sessionTotalTokens = sessionInputTokens + sessionOutputTokens;
+  const cacheHitPct = (sessionInputTokens + sessionCacheTokens) > 0
+    ? Math.round((sessionCacheTokens / (sessionInputTokens + sessionCacheTokens)) * 100)
+    : 0;
+
+  const byModel = Array.from(modelMap.values())
+    .map((m) => ({
+      modelName: m.modelName,
+      turns: m.turns,
+      inputTokens: m.inputTokens,
+      cacheTokens: m.cacheTokens,
+      outputTokens: m.outputTokens,
+      totalTokens: m.inputTokens + m.outputTokens,
+      cacheHitPct: (m.inputTokens + m.cacheTokens) > 0 ? Math.round((m.cacheTokens / (m.inputTokens + m.cacheTokens)) * 100) : 0,
+      lastUsedIndex: m.lastUsedIndex
+    }))
+    .sort((a, b) => b.lastUsedIndex - a.lastUsedIndex)
+    .map(({ lastUsedIndex, ...rest }) => rest);
+
+  const data = {
+    sessionInputTokens,
+    sessionCacheTokens,
+    sessionOutputTokens,
+    sessionTotalTokens,
+    lastInputTokens: lastInputTokens || 0,
+    lastCacheTokens: lastCacheTokens || 0,
+    lastContextTokens,
+    lastOutputTokens: lastOutputTokens || 0,
+    cacheHitPct,
+    turnCount,
+    checkpointCount,
+    checkpointTokens,
+    byModel
+  };
+
+  convTranscriptCache.set(cleanId, {
+    mtimeMs: st.mtimeMs,
+    size: st.size,
+    data
+  });
+  return data;
+}
+
+export async function computeSessionTelemetrySnapshot(cfgInput = null, instanceCtx = null, activeIsGcpInput = undefined) {
   const cfg = cfgInput || readRelayConfig();
   const ctx = instanceCtx || resolveCurrentInstanceContext();
   const instMeta = getInstanceMeta(cfg, ctx);
+  const activeIsGcp = activeIsGcpInput !== undefined
+    ? Boolean(activeIsGcpInput)
+    : Boolean(instMeta.lastAppliedGcpProject || (!ctx.isIsolatedInstance && cfg.__meta__?.lastAppliedGcpProject));
   const knownDict = buildKnownTelemetryModelDict(cfg);
   const brainDir = path.join(HOME_DIR, ".gemini", "antigravity", "brain");
 
-  // 1. 优先通过当前窗口专属 CDP 端口直读正在打开的会话路由 (/c/<convId>)，次选当前窗口专属 language_server.log 尾部会话 ID
+  // 1. 优先通过当前实例专属 CDP 端口直读正在打开的会话路由 (/c/<convId>)，次选当前实例专属 language_server.log 尾部会话 ID
   const cdpPort = discoverInstanceCdpPort(ctx);
   const cdpConvId = await fetchWindowActiveConvIdViaCdp(cdpPort);
   const logFallback = extractFallbackConvAndModelFromLsLog(ctx.lsLogFile, knownDict);
@@ -333,7 +529,7 @@ export async function computeSessionTelemetrySnapshot(cfgInput = null, instanceC
     targetLogPath = "";
   }
 
-  // 仅当主窗口尚未从 CDP/日志解析出会话时，回退至 brain 下最新会话；多开独立窗口严禁盲抓全局最新会话防跨窗口串数
+  // 仅当主实例尚未从 CDP/日志解析出会话时，回退至 brain 下最新会话；多开独立实例严禁盲抓全局最新会话防跨实例串数
   if (!targetLogPath && !ctx.isIsolatedInstance) {
     let latestMtime = 0;
     try {
@@ -355,134 +551,217 @@ export async function computeSessionTelemetrySnapshot(cfgInput = null, instanceC
     } catch {}
   }
 
-  if (targetConvId) {
-    instMeta.lastActiveConvId = targetConvId;
-  }
+  // 2. 读取官方 conversation_summaries.db，关联当前会话所属项目下的全部会话与标题
+  const sumDbPath = path.join(HOME_DIR, ".gemini", "antigravity", "conversation_summaries.db");
+  let projectId = "";
+  let projectName = "";
+  let mainTargetConvId = targetConvId;
+  let projectMainRows = [];
 
-  let sessionInputTokens = 0;
-  let sessionCacheTokens = 0;
-  let sessionOutputTokens = 0;
-  let lastInputTokens = 0;
-  let lastCacheTokens = 0;
-  let lastOutputTokens = 0;
-  let turnCount = 0;
-  let checkpointCount = 0;
-  let checkpointTokens = 0;
-  const modelMap = new Map();
-
-  if (targetLogPath && fs.existsSync(targetLogPath)) {
-    try {
-      const rawText = fs.readFileSync(targetLogPath, "utf8");
-      const lines = rawText.split(/\r?\n/).filter(Boolean);
-      const rows = [];
-      let initialBeforeChangeModel = "";
-
-      for (const line of lines) {
-        try {
-          const r = JSON.parse(line);
-          rows.push(r);
-          if (!initialBeforeChangeModel && typeof r.content === "string" && r.content.includes("<USER_SETTINGS_CHANGE>")) {
-            const parsed = parseSettingsChangeModels(r.content, knownDict);
-            if (parsed && parsed.fromModel) {
-              initialBeforeChangeModel = parsed.fromModel;
+  try {
+    if (fs.existsSync(sumDbPath)) {
+      const sumDb = new DatabaseSync(sumDbPath);
+      try {
+        if (targetConvId) {
+          const curRow = sumDb
+            .prepare("SELECT conversation_id, title, project_id, workspace_uris, parent_conversation_id, nesting_depth, step_count, last_modified_time FROM conversation_summaries WHERE conversation_id = ?")
+            .get(targetConvId);
+          if (curRow) {
+            projectId = String(curRow.project_id || "").trim();
+            projectName = extractProjectNameFromWorkspaceUris(curRow.workspace_uris);
+            if (Number(curRow.nesting_depth || 0) > 0 && curRow.parent_conversation_id) {
+              mainTargetConvId = String(curRow.parent_conversation_id).trim();
             }
-          }
-        } catch {}
-      }
-
-      let currentModel = initialBeforeChangeModel || logFallback.lastModel || "Gemini 4 Argon";
-      let currentTurnEstIn = 0;
-
-      for (let i = 0; i < rows.length; i++) {
-        const row = rows[i];
-        const stepType = String(row.type || "");
-        const contentStr = typeof row.content === "string" ? row.content : JSON.stringify(row.content || "");
-        const thinkingStr = typeof row.thinking === "string" ? row.thinking : "";
-        const toolsStr = row.tool_calls ? JSON.stringify(row.tool_calls) : "";
-
-        if (contentStr.includes("<USER_SETTINGS_CHANGE>")) {
-          const parsed = parseSettingsChangeModels(contentStr, knownDict);
-          if (parsed && parsed.toModel) {
-            currentModel = parsed.toModel;
           }
         }
-
-        if (stepType === "USER_INPUT") {
-          currentTurnEstIn = estimateTokensFromString(contentStr);
-        } else if (stepType === "PLANNER_RESPONSE" || stepType === "CHECKPOINT") {
-          const hasOfficial =
-            typeof row.input_tokens === "number" ||
-            typeof row.output_tokens === "number" ||
-            typeof row.cache_read_tokens === "number";
-          const inTok = hasOfficial ? Number(row.input_tokens || 0) : currentTurnEstIn;
-          const cacheTok = hasOfficial ? Number(row.cache_read_tokens || 0) : 0;
-          const outTok = hasOfficial
-            ? Number(row.output_tokens || 0)
-            : (estimateTokensFromString(contentStr) + estimateTokensFromString(thinkingStr) + estimateTokensFromString(toolsStr));
-
-          if (inTok > 0 || outTok > 0 || cacheTok > 0) {
-            sessionInputTokens += inTok;
-            sessionCacheTokens += cacheTok;
-            sessionOutputTokens += outTok;
-
-            if (stepType === "CHECKPOINT") {
-              checkpointCount += 1;
-              checkpointTokens += inTok + outTok;
-            } else {
-              lastInputTokens = inTok;
-              lastCacheTokens = cacheTok;
-              lastOutputTokens = outTok;
-              turnCount++;
-            }
-
-            const modelKey = currentModel || "Gemini 4 Argon";
-            if (!modelMap.has(modelKey)) {
-              modelMap.set(modelKey, {
-                modelName: modelKey,
-                turns: 0,
-                inputTokens: 0,
-                cacheTokens: 0,
-                outputTokens: 0,
-                lastUsedIndex: i
-              });
-            }
-            const mStat = modelMap.get(modelKey);
-            if (stepType === "PLANNER_RESPONSE") {
-              mStat.turns += 1;
-            }
-            mStat.inputTokens += inTok;
-            mStat.cacheTokens += cacheTok;
-            mStat.outputTokens += outTok;
-            mStat.lastUsedIndex = i;
+        if (projectId) {
+          projectMainRows = sumDb
+            .prepare("SELECT conversation_id, title, project_id, workspace_uris, parent_conversation_id, nesting_depth, step_count, last_modified_time FROM conversation_summaries WHERE project_id = ? AND nesting_depth = 0 ORDER BY last_modified_time DESC LIMIT 25")
+            .all(projectId);
+          if (!projectName && projectMainRows.length > 0) {
+            projectName = extractProjectNameFromWorkspaceUris(projectMainRows[0].workspace_uris);
+          }
+        } else if (mainTargetConvId) {
+          const singleRow = sumDb
+            .prepare("SELECT conversation_id, title, project_id, workspace_uris, parent_conversation_id, nesting_depth, step_count, last_modified_time FROM conversation_summaries WHERE conversation_id = ?")
+            .get(mainTargetConvId);
+          if (singleRow) {
+            projectMainRows = [singleRow];
+            projectName = extractProjectNameFromWorkspaceUris(singleRow.workspace_uris);
           }
         }
+      } finally {
+        sumDb.close();
       }
-    } catch {}
+    }
+  } catch {}
+
+  if (mainTargetConvId) {
+    targetConvId = mainTargetConvId;
+    instMeta.lastActiveConvId = mainTargetConvId;
   }
 
-  const lastContextTokens = (lastInputTokens || 0) + (lastCacheTokens || 0);
-  const sessionTotalTokens = sessionInputTokens + sessionOutputTokens;
-  const cacheHitPct = (sessionInputTokens + sessionCacheTokens) > 0
-    ? Math.round((sessionCacheTokens / (sessionInputTokens + sessionCacheTokens)) * 100)
+  if (projectMainRows.length === 0 && targetConvId) {
+    projectMainRows = [
+      {
+        conversation_id: targetConvId,
+        title: targetConvId.slice(0, 8),
+        project_id: projectId,
+        workspace_uris: "",
+        parent_conversation_id: "",
+        nesting_depth: 0,
+        step_count: 0,
+        last_modified_time: ""
+      }
+    ];
+  }
+
+  const fallbackModel = logFallback.lastModel || "Gemini 4 Argon";
+  const projectConversations = [];
+  let projInputTokens = 0;
+  let projCacheTokens = 0;
+  let projOutputTokens = 0;
+  let projTurnCount = 0;
+  let projCheckpointCount = 0;
+  let projCheckpointTokens = 0;
+  const projModelMap = new Map();
+  let projHasGcpSig = false;
+  let projHasPersonalSig = false;
+  let projMismatchedCount = 0;
+
+  for (let idx = 0; idx < projectMainRows.length; idx++) {
+    const r = projectMainRows[idx];
+    const cid = String(r.conversation_id || "").trim();
+    if (!cid) continue;
+    const tStat = parseSingleConversationTranscript(cid, brainDir, knownDict, fallbackModel);
+    const sigStat = inspectConversationSignatureStatus(cid, activeIsGcp);
+    if (sigStat.hasGcpSig) projHasGcpSig = true;
+    if (sigStat.hasPersonalSig) projHasPersonalSig = true;
+    if (sigStat.mismatched) projMismatchedCount += 1;
+
+    projInputTokens += tStat.sessionInputTokens;
+    projCacheTokens += tStat.sessionCacheTokens;
+    projOutputTokens += tStat.sessionOutputTokens;
+    projTurnCount += tStat.turnCount;
+    projCheckpointCount += tStat.checkpointCount;
+    projCheckpointTokens += tStat.checkpointTokens;
+
+    for (const m of tStat.byModel) {
+      if (!projModelMap.has(m.modelName)) {
+        projModelMap.set(m.modelName, {
+          modelName: m.modelName,
+          turns: 0,
+          inputTokens: 0,
+          cacheTokens: 0,
+          outputTokens: 0,
+          orderIdx: idx
+        });
+      }
+      const pm = projModelMap.get(m.modelName);
+      pm.turns += m.turns;
+      pm.inputTokens += m.inputTokens;
+      pm.cacheTokens += m.cacheTokens;
+      pm.outputTokens += m.outputTokens;
+    }
+
+    const rawTitle = String(r.title || "").trim();
+    projectConversations.push({
+      fullConversationId: cid,
+      conversationId: cid.slice(0, 8),
+      title: rawTitle || cid.slice(0, 8),
+      isCurrentActive: cid === targetConvId,
+      lastModifiedTime: r.last_modified_time || "",
+      signatureStatus: {
+        sigType: sigStat.sigType,
+        hasGcpSig: sigStat.hasGcpSig,
+        hasPersonalSig: sigStat.hasPersonalSig,
+        mismatched: sigStat.mismatched
+      },
+      ...tStat
+    });
+  }
+
+  const activeConvItem =
+    projectConversations.find((c) => c.fullConversationId === targetConvId) ||
+    projectConversations[0] ||
+    {
+      fullConversationId: targetConvId || "",
+      conversationId: targetConvId ? targetConvId.slice(0, 8) : "",
+      title: targetConvId ? targetConvId.slice(0, 8) : "",
+      isCurrentActive: true,
+      signatureStatus: inspectConversationSignatureStatus(targetConvId, activeIsGcp),
+      ...parseSingleConversationTranscript(targetConvId, brainDir, knownDict, fallbackModel)
+    };
+
+  const projTotalTokens = projInputTokens + projOutputTokens;
+  const projCacheHitPct = (projInputTokens + projCacheTokens) > 0
+    ? Math.round((projCacheTokens / (projInputTokens + projCacheTokens)) * 100)
     : 0;
-
-  const byModel = Array.from(modelMap.values())
+  const projByModel = Array.from(projModelMap.values())
     .map((m) => ({
-      modelName: m.modelName, turns: m.turns, inputTokens: m.inputTokens,
-      cacheTokens: m.cacheTokens, outputTokens: m.outputTokens,
+      modelName: m.modelName,
+      turns: m.turns,
+      inputTokens: m.inputTokens,
+      cacheTokens: m.cacheTokens,
+      outputTokens: m.outputTokens,
       totalTokens: m.inputTokens + m.outputTokens,
-      cacheHitPct: (m.inputTokens + m.cacheTokens) > 0 ? Math.round((m.cacheTokens / (m.inputTokens + m.cacheTokens)) * 100) : 0,
-      lastUsedIndex: m.lastUsedIndex
+      cacheHitPct: (m.inputTokens + m.cacheTokens) > 0 ? Math.round((m.cacheTokens / (m.inputTokens + m.cacheTokens)) * 100) : 0
     }))
-    .sort((a, b) => b.lastUsedIndex - a.lastUsedIndex)
-    .map(({ lastUsedIndex, ...rest }) => rest);
+    .sort((a, b) => b.totalTokens - a.totalTokens);
+
+  let projSigType = "none";
+  if (projHasGcpSig && projHasPersonalSig) projSigType = "mixed";
+  else if (projHasGcpSig) projSigType = "gcp";
+  else if (projHasPersonalSig) projSigType = "personal";
+
+  const projectTotal = {
+    projectId,
+    projectName: projectName || "",
+    conversationCount: projectConversations.length,
+    lastInputTokens: activeConvItem.lastInputTokens || 0,
+    lastCacheTokens: activeConvItem.lastCacheTokens || 0,
+    lastContextTokens: activeConvItem.lastContextTokens || 0,
+    lastOutputTokens: activeConvItem.lastOutputTokens || 0,
+    sessionInputTokens: projInputTokens,
+    sessionCacheTokens: projCacheTokens,
+    sessionOutputTokens: projOutputTokens,
+    sessionTotalTokens: projTotalTokens,
+    cacheHitPct: projCacheHitPct,
+    turnCount: projTurnCount,
+    checkpointCount: projCheckpointCount,
+    checkpointTokens: projCheckpointTokens,
+    byModel: projByModel,
+    signatureStatus: {
+      sigType: projSigType,
+      hasGcpSig: projHasGcpSig,
+      hasPersonalSig: projHasPersonalSig,
+      mismatched: projMismatchedCount > 0,
+      mismatchedCount: projMismatchedCount
+    }
+  };
 
   return {
-    conversationId: targetConvId ? targetConvId.slice(0, 8) : "",
-    lastInputTokens: lastInputTokens || 0, lastCacheTokens: lastCacheTokens || 0,
-    lastContextTokens, lastOutputTokens: lastOutputTokens || 0,
-    sessionInputTokens, sessionCacheTokens, sessionOutputTokens, sessionTotalTokens,
-    cacheHitPct, turnCount, checkpointCount, checkpointTokens, byModel,
+    fullConversationId: activeConvItem.fullConversationId,
+    conversationId: activeConvItem.conversationId,
+    title: activeConvItem.title,
+    projectId,
+    projectName: projectName || "",
+    signatureStatus: activeConvItem.signatureStatus,
+    lastInputTokens: activeConvItem.lastInputTokens || 0,
+    lastCacheTokens: activeConvItem.lastCacheTokens || 0,
+    lastContextTokens: activeConvItem.lastContextTokens || 0,
+    lastOutputTokens: activeConvItem.lastOutputTokens || 0,
+    sessionInputTokens: activeConvItem.sessionInputTokens || 0,
+    sessionCacheTokens: activeConvItem.sessionCacheTokens || 0,
+    sessionOutputTokens: activeConvItem.sessionOutputTokens || 0,
+    sessionTotalTokens: activeConvItem.sessionTotalTokens || 0,
+    cacheHitPct: activeConvItem.cacheHitPct || 0,
+    turnCount: activeConvItem.turnCount || 0,
+    checkpointCount: activeConvItem.checkpointCount || 0,
+    checkpointTokens: activeConvItem.checkpointTokens || 0,
+    byModel: activeConvItem.byModel || [],
+    projectConversations,
+    projectTotal,
     source: "official_transcript"
   };
 }

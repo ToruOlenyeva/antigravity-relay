@@ -45,21 +45,32 @@
     <div class="quota-list" id="quotaGroupsContainer"></div>
   </div>
 
-  <!-- 2. 当前会话统计（独立板块：展示本窗口当前会话的输出速度、本轮用词、累计 Token 与按模型细分） -->
+  <!-- 2. 当前会话统计（独立板块：展示本实例当前项目会话细分、会话签名识别与清除签名） -->
   <div class="section-card">
     <div class="section-header">
-      <span class="section-title" id="secTelemetryTitle">当前会话统计</span>
+      <div class="telemetry-header-left">
+        <span class="section-title" id="secTelemetryTitle">当前会话统计</span>
+        <span id="telemetrySigBadgeMount"></span>
+      </div>
+      <div class="btn-group">
+        <button class="secondary small" id="btnScrubSignatures" onclick="toggleScrubSignaturesDrawer()">清除签名</button>
+      </div>
     </div>
+
+    <!-- 手动清除思维签名选择抽屉（提供仅清除当前会话与全项目扫描清除不匹配签名两种模式） -->
+    <div class="gcp-drawer" id="scrubSigsDrawer" style="display: none;"></div>
+
+    <!-- 项目内会话细分切换选择器 -->
+    <div id="telemetryConvSelectorMount"></div>
 
     <div id="sessionTelemetryMount"></div>
   </div>
 
-  <!-- 2. 通道与账号管理（个人账号通道与 GCP 计费通道分组展示） -->
+  <!-- 3. 通道与账号管理（个人账号通道与 GCP 计费通道分组展示） -->
   <div class="section-card">
     <div class="section-header">
       <span class="section-title" id="secAccountsTitle">通道与账号管理</span>
       <div class="btn-group">
-        <button class="secondary small" id="btnScrubSignatures" onclick="toggleScrubSignaturesDrawer()">清除签名</button>
         <button class="secondary small" id="btnToggleMultiInstance" onclick="toggleMultiInstanceDrawer()">+ 多开实例</button>
         <button class="secondary small" id="btnCaptureCurrent" onclick="captureCurrentAccount()">收录当前</button>
         <button class="small" id="btnAddOAuthAccount" onclick="toggleAddGcpDrawer()">+ 添加账号</button>
@@ -71,9 +82,6 @@
       <span id="oauthBannerText">已在浏览器打开官方登录页</span>
       <button class="danger small" id="btnCancelOAuth" onclick="cancelBrowserLogin()">取消</button>
     </div>
-
-    <!-- 手动清除思维签名确认抽屉 -->
-    <div class="gcp-drawer" id="scrubSigsDrawer" style="display: none;"></div>
 
     <!-- 互补通道多开独立实例抽屉（个人通道下选 GCP 新开，GCP 通道下选个人号新开） -->
     <div class="gcp-drawer" id="multiInstanceDrawer" style="display: none;"></div>
