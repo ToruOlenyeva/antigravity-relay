@@ -356,7 +356,6 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
       );
 
       if (isCrossPersonalRoute) {
-        strippedSigCount = stripThoughtSignaturesFromJson(bodyClone);
         const targetToken = await getValidPersonalAccessToken(cfg, routedTargetAcc);
         if (targetToken) {
           outHeaders["authorization"] = `Bearer ${targetToken}`;

@@ -282,23 +282,39 @@ async function ensureLocalCloudCodeProxyMounted(lsTarget, relayCfg, instMeta = n
   if (!lsTarget || !lsTarget.port || !lsTarget.csrf) return false;
   const savedProxyUrl = String(instMeta?.cloudCodeProxyUrl || relayCfg?.__meta__?.cloudCodeProxyUrl || "").trim();
   const proxyUrl = /^http:\/\/127\.0\.0\.1:809\d$/i.test(savedProxyUrl) ? savedProxyUrl : "http://127.0.0.1:8091";
+  if (
+    instMeta &&
+    instMeta.cloudCodeProxyMode === "local_proxy" &&
+    Number(instMeta.cloudCodeProxyPid || 0) > 0 &&
+    Number(instMeta.cloudCodeProxyPid) === Number(lsTarget.pid || 0) &&
+    instMeta.cloudCodeProxyUrl === proxyUrl
+  ) {
+    return true;
+  }
   const payload = Buffer.from(JSON.stringify({ url: proxyUrl }), "utf-8");
   const primaryProto = lsTarget.protocol || "http";
-  const ok = await sendLsRpcMethod(
+  let ok = await sendLsRpcMethod(
     { hostname: lsTarget.hostname, port: lsTarget.port, protocol: primaryProto, csrf: lsTarget.csrf },
     "SetCloudCodeURL",
     payload
   );
-  if (ok) return true;
-  const fallbackPort = lsTarget.altPort && lsTarget.altPort !== lsTarget.port ? lsTarget.altPort : lsTarget.port;
-  const fallbackProto = lsTarget.altPort && lsTarget.altPort !== lsTarget.port
-    ? (lsTarget.altProtocol || (primaryProto === "http" ? "https" : "http"))
-    : (primaryProto === "http" ? "https" : "http");
-  return sendLsRpcMethod(
-    { hostname: lsTarget.hostname, port: fallbackPort, protocol: fallbackProto, csrf: lsTarget.csrf },
-    "SetCloudCodeURL",
-    payload
-  );
+  if (!ok) {
+    const fallbackPort = lsTarget.altPort && lsTarget.altPort !== lsTarget.port ? lsTarget.altPort : lsTarget.port;
+    const fallbackProto = lsTarget.altPort && lsTarget.altPort !== lsTarget.port
+      ? (lsTarget.altProtocol || (primaryProto === "http" ? "https" : "http"))
+      : (primaryProto === "http" ? "https" : "http");
+    ok = await sendLsRpcMethod(
+      { hostname: lsTarget.hostname, port: fallbackPort, protocol: fallbackProto, csrf: lsTarget.csrf },
+      "SetCloudCodeURL",
+      payload
+    );
+  }
+  if (ok && instMeta) {
+    instMeta.cloudCodeProxyMode = "local_proxy";
+    instMeta.cloudCodeProxyUrl = proxyUrl;
+    if (lsTarget.pid) instMeta.cloudCodeProxyPid = lsTarget.pid;
+  }
+  return ok;
 }
 
 function normalizeBaseModelFamily(rawModelStr) {
