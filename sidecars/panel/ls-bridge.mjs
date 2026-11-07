@@ -470,7 +470,8 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
     );
     const desiredProxyMode = (!isLiveGcp && hasActivePersonalRouting) ? "local_proxy" : "direct";
     const localProxyUrl = getActiveCloudCodeProxyUrl(cfg);
-    const targetUrl = desiredProxyMode === "local_proxy" ? localProxyUrl : "https://cloudcode-pa.googleapis.com";
+    const directUpstreamUrl = isLiveGcp ? "https://cloudcode-pa.googleapis.com" : "https://daily-cloudcode-pa.googleapis.com";
+    const targetUrl = desiredProxyMode === "local_proxy" ? localProxyUrl : directUpstreamUrl;
     if (desiredProxyMode === "local_proxy") {
       if (
         instMeta.cloudCodeProxyPid !== ls.pid ||

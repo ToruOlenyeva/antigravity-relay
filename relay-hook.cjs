@@ -221,7 +221,7 @@ function resolveBestAvailableChannelSpec(baseModelName, relayCfg) {
     const dual = extractModelDualQuotaForHook(acc, matched, baseModelName);
     if (dual.weeklyPct <= 0 || dual.fiveHourPct <= 0) continue;
 
-    const weeklyLow = dual.weeklyPct < thresholdPct;
+    const weeklyLow = dual.weeklyPct <= thresholdPct;
     const effectiveWeeklyResetMs = dual.weeklyResetMs + (weeklyLow ? WEEK_PENALTY_MS : 0);
     const fiveHourAboveThreshold = dual.fiveHourPct > thresholdPct;
 

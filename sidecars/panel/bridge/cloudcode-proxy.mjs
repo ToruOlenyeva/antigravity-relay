@@ -14,7 +14,8 @@ import {
 import {
   normalizeAccountChannels,
   findStoredTokenForEmail,
-  probeChannelQuotaSnapshot
+  probeChannelQuotaSnapshot,
+  callCloudCodeApi
 } from "./quota-probe.mjs";
 
 export function stripThoughtSignaturesFromJson(node) {
@@ -42,12 +43,12 @@ export function resolveBaseModelFamilyFromId(rawModelStr, cfg) {
   if (!s) return "";
   const lower = s.toLowerCase();
   if (/argon|m417|m418|m419/i.test(lower)) return "Gemini 4 Argon";
-  if (/3[._-]8[._-]flash|m420|m421|m422/i.test(lower)) return "Gemini 3.8 Flash";
+  if (/3[._-]8[._-]flash|m318|m319|m320|m420|m421|m422/i.test(lower)) return "Gemini 3.8 Flash";
   if (/3[._-]7[._-]flash|m55|m62|m63/i.test(lower)) return "Gemini 3.7 Flash";
   if (/3[._-]6[._-]flash|m51|m60|m61/i.test(lower)) return "Gemini 3.6 Flash";
   if (/3[._-]1[._-]pro|m36|m37/i.test(lower)) return "Gemini 3.1 Pro";
-  if (/opus[._-\s]*5[._-]5|m409|m410|m411|m412/i.test(lower)) return "Claude Opus 5.5";
-  if (/sonnet[._-\s]*5[._-]5|m413|m414|m415|m416/i.test(lower)) return "Claude Sonnet 5.5";
+  if (/opus[._-\s]*5[._-]5|m400|m401|m402|m409|m410|m411|m412/i.test(lower)) return "Claude Opus 5.5";
+  if (/sonnet[._-\s]*5[._-]5|m403|m404|m405|m413|m414|m415|m416/i.test(lower)) return "Claude Sonnet 5.5";
   if (/sonnet[._-\s]*4[._-]6/i.test(lower)) return "Claude Sonnet 4.6 (Thinking)";
   if (/opus[._-\s]*4[._-]6/i.test(lower)) return "Claude Opus 4.6 (Thinking)";
   if (/gpt[._-\s]*oss/i.test(lower)) return "GPT-OSS 120B";
@@ -62,6 +63,65 @@ export function resolveBaseModelFamilyFromId(rawModelStr, cfg) {
     }
   }
   return s.replace(/\s*\((Low|Medium|High|Max)\)\s*$/i, "").trim();
+}
+
+const CONSUMER_MODEL_ID_MAP = {
+  "gemini-4-argon-high": "MODEL_PLACEHOLDER_M417",
+  "gemini-4-argon-medium": "MODEL_PLACEHOLDER_M418",
+  "gemini-4-argon-low": "MODEL_PLACEHOLDER_M419",
+  "gemini-4-argon": "MODEL_PLACEHOLDER_M418",
+  "gemini-3.8-flash-high": "MODEL_PLACEHOLDER_M318",
+  "gemini-3.8-flash-medium": "MODEL_PLACEHOLDER_M319",
+  "gemini-3.8-flash-low": "MODEL_PLACEHOLDER_M320",
+  "gemini-3.8-flash": "MODEL_PLACEHOLDER_M318",
+  "claude-opus-5-5-low": "MODEL_PLACEHOLDER_M400",
+  "claude-opus-5-5-medium": "MODEL_PLACEHOLDER_M401",
+  "claude-opus-5-5-high": "MODEL_PLACEHOLDER_M402",
+  "claude-opus-5-5": "MODEL_PLACEHOLDER_M401",
+  "claude-sonnet-5-5-low": "MODEL_PLACEHOLDER_M403",
+  "claude-sonnet-5-5-medium": "MODEL_PLACEHOLDER_M404",
+  "claude-sonnet-5-5-high": "MODEL_PLACEHOLDER_M405",
+  "claude-sonnet-5-5": "MODEL_PLACEHOLDER_M404",
+  "gpt-oss-120b-medium": "MODEL_OPENAI_GPT_OSS_120B_MEDIUM",
+  "gpt-oss-120b": "MODEL_OPENAI_GPT_OSS_120B_MEDIUM"
+};
+
+export function normalizeConsumerModelId(rawModelStr) {
+  const s = String(rawModelStr || "").trim();
+  if (!s) return s;
+  const mapped = CONSUMER_MODEL_ID_MAP[s.toLowerCase()];
+  return mapped || s;
+}
+
+export async function ensurePersonalCompanionProjectId(cfg, acc, accessToken) {
+  if (!acc) return "";
+  const existing = String(acc.companionProjectId || acc.cachedQuota?.companionProjectId || "").trim();
+  if (existing) {
+    if (!acc.companionProjectId) acc.companionProjectId = existing;
+    return existing;
+  }
+  if (!accessToken) return "";
+  try {
+    const loadResp = await callCloudCodeApi("/v1internal:loadCodeAssist", accessToken, {
+      metadata: { ideType: "JETSKI", pluginType: "GEMINI" }
+    });
+    if (loadResp.status === 200 && loadResp.data) {
+      const pid = String(
+        loadResp.data.cloudaicompanionProject?.id ||
+        loadResp.data.cloudaicompanionProject ||
+        ""
+      ).trim();
+      if (pid) {
+        acc.companionProjectId = pid;
+        if (acc.cachedQuota && typeof acc.cachedQuota === "object") {
+          acc.cachedQuota.companionProjectId = pid;
+        }
+        writeRelayConfig(cfg);
+        return pid;
+      }
+    }
+  } catch {}
+  return "";
 }
 
 const WEEK_PENALTY_MS = 7 * 24 * 3600 * 1000;
@@ -117,17 +177,18 @@ export function extractModelDualQuota(acc, matched, baseFamily) {
   };
 }
 
-export function selectBestPersonalChannelForModel(baseFamily, cfg) {
+export function selectBestPersonalChannelForModel(baseFamily, cfg, excludedIds = null) {
   const accounts = Object.values(cfg?.accounts || {});
   const activeEmail = (cfg?.__meta__?.activeEmail || "").trim();
   const activeChannelId = activeEmail ? `${activeEmail}#personal` : "";
   const thresholdPct = Number(cfg?.routing?.lowQuotaThresholdPct ?? 5);
   const targetLower = (baseFamily || "").toLowerCase();
+  const excludeSet = excludedIds instanceof Set ? excludedIds : new Set(Array.isArray(excludedIds) ? excludedIds : []);
   const candidates = [];
 
   for (const acc of accounts) {
     const isGcp = acc.channelType === "gcp" || Boolean(acc.gcpProjectId);
-    if (isGcp) continue;
+    if (isGcp || excludeSet.has(acc.id)) continue;
     const models = acc?.cachedQuota?.availableModels || [];
     const matched = models.find((m) => {
       const id = (m.modelId || m.label || "").toLowerCase();
@@ -138,7 +199,7 @@ export function selectBestPersonalChannelForModel(baseFamily, cfg) {
     const dual = extractModelDualQuota(acc, matched, baseFamily);
     if (dual.weeklyPct <= 0 || dual.fiveHourPct <= 0) continue;
 
-    const weeklyLow = dual.weeklyPct < thresholdPct;
+    const weeklyLow = dual.weeklyPct <= thresholdPct;
     const effectiveWeeklyResetMs = dual.weeklyResetMs + (weeklyLow ? WEEK_PENALTY_MS : 0);
     const fiveHourAboveThreshold = dual.fiveHourPct > thresholdPct;
 
@@ -228,19 +289,16 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
   const instMeta = getInstanceMeta(cfg, ctx);
   const isGenerateEndpoint = /^\/v1internal:(streamGenerateContent|generateContent|countTokens)\b/i.test(reqUrl);
   const isFetchModelsEndpoint = /^\/v1internal:fetchAvailableModels\b/i.test(reqUrl);
-  const isPersonalControlEndpoint = !isGenerateEndpoint && /^\/v1internal:/i.test(reqUrl);
+  const isLoadCodeAssistEndpoint = /^\/v1internal:loadCodeAssist\b/i.test(reqUrl);
+  const upstreamHostname = "daily-cloudcode-pa.googleapis.com";
 
-  const outHeaders = {};
+  const baseHeaders = {};
   for (const [k, v] of Object.entries(req.headers || {})) {
     const lk = k.toLowerCase();
     if (lk === "host" || lk === "connection" || lk === "content-length") continue;
-    outHeaders[k] = v;
+    baseHeaders[k] = v;
   }
-  outHeaders["Host"] = "cloudcode-pa.googleapis.com";
-
-  let outBodyBuf = rawBodyBuf || Buffer.alloc(0);
-  let routedTargetAcc = null;
-  let strippedSigCount = 0;
+  baseHeaders["Host"] = upstreamHostname;
 
   const descId = ctx.isIsolatedInstance ? String(ctx.descriptor?.activeChannelId || "").trim() : "";
   const descTs = ctx.isIsolatedInstance ? Math.max(Number(ctx.descriptor?.switchedAt || 0), Number(ctx.descriptor?.launchedAt || 0)) : 0;
@@ -252,204 +310,292 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
     ? cfg.accounts[activeChannelId]
     : null;
 
-  if (isGenerateEndpoint && outBodyBuf.length > 0) {
-    try {
-      const bodyJson = JSON.parse(outBodyBuf.toString("utf8"));
-      const rawModel = String(bodyJson.model || cfg.__meta__?.lastRoutedModel || "").trim();
-      const baseFamily = resolveBaseModelFamilyFromId(rawModel, cfg);
-      const routeMap = cfg.routing?.models || {};
-      const routeSpec = routeMap[baseFamily] || routeMap[rawModel] || "follow_current";
+  let parsedBodyJson = null;
+  let rawModel = "";
+  let baseFamily = "";
+  let routeSpec = "follow_current";
 
+  if (isGenerateEndpoint && rawBodyBuf && rawBodyBuf.length > 0) {
+    try {
+      parsedBodyJson = JSON.parse(rawBodyBuf.toString("utf8"));
+      rawModel = String(parsedBodyJson.model || cfg.__meta__?.lastRoutedModel || "").trim();
+      baseFamily = resolveBaseModelFamilyFromId(rawModel, cfg);
+      const routeMap = cfg.routing?.models || {};
+      routeSpec = routeMap[baseFamily] || routeMap[rawModel] || "follow_current";
+      if (parsedBodyJson.model) {
+        parsedBodyJson.model = normalizeConsumerModelId(parsedBodyJson.model);
+      }
+    } catch {}
+  }
+
+  const excludedIds = new Set();
+
+  const prepareAttemptPayload = async () => {
+    const outHeaders = { ...baseHeaders };
+    let outBodyBuf = rawBodyBuf || Buffer.alloc(0);
+    let routedTargetAcc = null;
+    let strippedSigCount = 0;
+
+    if (isGenerateEndpoint && parsedBodyJson) {
+      const bodyClone = JSON.parse(JSON.stringify(parsedBodyJson));
       if (routeSpec === "auto_poll") {
-        routedTargetAcc = selectBestPersonalChannelForModel(baseFamily, cfg) || activePersonalAcc;
+        routedTargetAcc = selectBestPersonalChannelForModel(baseFamily, cfg, excludedIds) || (!excludedIds.has(activePersonalAcc?.id) ? activePersonalAcc : null);
       } else if (typeof routeSpec === "string" && routeSpec.startsWith("account:")) {
         const refId = routeSpec.slice(8).trim();
         const candidateAcc = cfg.accounts?.[refId];
-        if (candidateAcc && candidateAcc.channelType !== "gcp" && !candidateAcc.gcpProjectId) {
+        if (candidateAcc && candidateAcc.channelType !== "gcp" && !candidateAcc.gcpProjectId && !excludedIds.has(candidateAcc.id)) {
           routedTargetAcc = candidateAcc;
         }
+      } else if (activePersonalAcc && !excludedIds.has(activePersonalAcc.id)) {
+        routedTargetAcc = activePersonalAcc;
       }
 
       const isCrossPersonalRoute = Boolean(
         routedTargetAcc &&
-        activePersonalAcc &&
-        routedTargetAcc.id !== activePersonalAcc.id
+        (!activePersonalAcc || routedTargetAcc.id !== activePersonalAcc.id)
       );
 
       if (isCrossPersonalRoute) {
-        strippedSigCount = stripThoughtSignaturesFromJson(bodyJson);
+        strippedSigCount = stripThoughtSignaturesFromJson(bodyClone);
         const targetToken = await getValidPersonalAccessToken(cfg, routedTargetAcc);
         if (targetToken) {
           outHeaders["authorization"] = `Bearer ${targetToken}`;
           delete outHeaders["Authorization"];
           delete outHeaders["x-goog-user-project"];
           delete outHeaders["X-Goog-User-Project"];
-          if (routedTargetAcc.companionProjectId) {
-            bodyJson.project = routedTargetAcc.companionProjectId;
-          } else if (bodyJson.project && activePersonalAcc?.companionProjectId && bodyJson.project === activePersonalAcc.companionProjectId) {
-            delete bodyJson.project;
+          const targetCompanionPid = await ensurePersonalCompanionProjectId(cfg, routedTargetAcc, targetToken);
+          if (targetCompanionPid) {
+            bodyClone.project = targetCompanionPid;
+          } else {
+            delete bodyClone.project;
           }
           cfg.__meta__.lastRoutedChannelId = routedTargetAcc.id;
           cfg.__meta__.lastProxyHit = {
             at: new Date().toISOString(),
             endpoint: reqUrl,
             rawModel,
+            mappedModel: bodyClone.model || rawModel,
             baseFamily,
             routeSpec,
             targetChannelId: routedTargetAcc.id,
             targetEmail: routedTargetAcc.email,
+            targetCompanionProject: targetCompanionPid || "",
             strippedSignatures: strippedSigCount
           };
           writeRelayConfig(cfg);
         }
-        outBodyBuf = Buffer.from(JSON.stringify(bodyJson), "utf8");
+      } else if (activePersonalAcc) {
+        const activeCompanionPid = String(activePersonalAcc.companionProjectId || activePersonalAcc.cachedQuota?.companionProjectId || "").trim();
+        if (activeCompanionPid && (!bodyClone.project || bodyClone.project !== activeCompanionPid)) {
+          bodyClone.project = activeCompanionPid;
+        }
       }
-    } catch {}
-  }
+      outBodyBuf = Buffer.from(JSON.stringify(bodyClone), "utf8");
+    }
 
-  outHeaders["Content-Length"] = outBodyBuf.length;
+    outHeaders["Content-Length"] = outBodyBuf.length;
+    return { outHeaders, outBodyBuf, routedTargetAcc };
+  };
+
   const reqStartAt = Date.now();
   const isStreamOrGenerate = /^\/v1internal:(streamGenerateContent|generateContent)\b/i.test(reqUrl);
 
-  await new Promise((resolve) => {
-    const upReq = https.request(
-      {
-        hostname: "cloudcode-pa.googleapis.com",
-        port: 443,
-        path: reqUrl,
-        method: req.method || "POST",
-        headers: outHeaders,
-        timeout: 120000
-      },
-      (upRes) => {
-        if (isFetchModelsEndpoint && upRes.statusCode === 200 && !upRes.headers["content-encoding"]) {
-          const chunks = [];
-          upRes.on("data", (c) => chunks.push(c));
-          upRes.on("end", () => {
-            let respBuf = Buffer.concat(chunks);
-            try {
-              const respJson = JSON.parse(respBuf.toString("utf8"));
-              if (respJson?.models && typeof respJson.models === "object") {
-                const routeMap = cfg.routing?.models || {};
-                let modified = false;
-                for (const [mKey, mObj] of Object.entries(respJson.models)) {
-                  if (!mObj || typeof mObj !== "object" || /disabled$/i.test(mKey)) continue;
-                  const baseFamily = resolveBaseModelFamilyFromId(mKey, cfg);
-                  const rSpec = routeMap[baseFamily] || routeMap[mKey] || "follow_current";
-                  let tAcc = null;
-                  if (rSpec === "auto_poll") {
-                    tAcc = selectBestPersonalChannelForModel(baseFamily, cfg);
-                  } else if (typeof rSpec === "string" && rSpec.startsWith("account:")) {
-                    tAcc = cfg.accounts?.[rSpec.slice(8).trim()] || null;
+  const executeUpstreamAttempt = async (attemptIdx) => {
+    const { outHeaders, outBodyBuf, routedTargetAcc } = await prepareAttemptPayload();
+
+    return new Promise((resolve) => {
+      const upReq = https.request(
+        {
+          hostname: upstreamHostname,
+          port: 443,
+          path: reqUrl,
+          method: req.method || "POST",
+          headers: outHeaders,
+          timeout: 120000
+        },
+        (upRes) => {
+          if (
+            isGenerateEndpoint &&
+            upRes.statusCode === 429 &&
+            routeSpec === "auto_poll" &&
+            routedTargetAcc?.id &&
+            attemptIdx < 3
+          ) {
+            excludedIds.add(routedTargetAcc.id);
+            const nextCandidate = selectBestPersonalChannelForModel(baseFamily, cfg, excludedIds);
+            if (nextCandidate) {
+              upRes.resume();
+              setTimeout(() => {
+                probeChannelQuotaSnapshot(routedTargetAcc.id).catch(() => {});
+              }, 500);
+              executeUpstreamAttempt(attemptIdx + 1).then(resolve);
+              return;
+            }
+          }
+
+          if (isLoadCodeAssistEndpoint && upRes.statusCode === 200 && !upRes.headers["content-encoding"]) {
+            const chunks = [];
+            upRes.on("data", (c) => chunks.push(c));
+            upRes.on("end", () => {
+              const respBuf = Buffer.concat(chunks);
+              try {
+                const respJson = JSON.parse(respBuf.toString("utf8"));
+                const cPid = String(
+                  respJson?.cloudaicompanionProject?.id ||
+                  respJson?.cloudaicompanionProject ||
+                  ""
+                ).trim();
+                if (cPid && activePersonalAcc) {
+                  activePersonalAcc.companionProjectId = cPid;
+                  if (activePersonalAcc.cachedQuota && typeof activePersonalAcc.cachedQuota === "object") {
+                    activePersonalAcc.cachedQuota.companionProjectId = cPid;
                   }
-                  if (tAcc && tAcc.channelType !== "gcp" && !tAcc.gcpProjectId) {
-                    const matchedModel = (tAcc.cachedQuota?.availableModels || []).find(
-                      (item) => (item.modelId || item.label || "").toLowerCase() === baseFamily.toLowerCase()
-                    );
-                    if (matchedModel && matchedModel.remainingPct > 0) {
-                      if (!mObj.quotaInfo) mObj.quotaInfo = {};
-                      mObj.quotaInfo.remainingFraction = Math.min(1, matchedModel.remainingPct / 100);
-                      if (matchedModel.resetTime) mObj.quotaInfo.resetTime = matchedModel.resetTime;
-                      modified = true;
+                  writeRelayConfig(cfg);
+                }
+              } catch {}
+              const respHeaders = { ...upRes.headers, "content-length": String(respBuf.length) };
+              delete respHeaders["transfer-encoding"];
+              delete respHeaders["Transfer-Encoding"];
+              res.writeHead(upRes.statusCode || 200, respHeaders);
+              res.end(respBuf);
+              resolve();
+            });
+            return;
+          }
+
+          if (isFetchModelsEndpoint && upRes.statusCode === 200 && !upRes.headers["content-encoding"]) {
+            const chunks = [];
+            upRes.on("data", (c) => chunks.push(c));
+            upRes.on("end", () => {
+              let respBuf = Buffer.concat(chunks);
+              try {
+                const respJson = JSON.parse(respBuf.toString("utf8"));
+                if (respJson?.models && typeof respJson.models === "object") {
+                  const routeMap = cfg.routing?.models || {};
+                  let modified = false;
+                  for (const [mKey, mObj] of Object.entries(respJson.models)) {
+                    if (!mObj || typeof mObj !== "object" || /disabled$/i.test(mKey)) continue;
+                    const mFamily = resolveBaseModelFamilyFromId(mKey, cfg);
+                    const rSpec = routeMap[mFamily] || routeMap[mKey] || "follow_current";
+                    let tAcc = null;
+                    if (rSpec === "auto_poll") {
+                      tAcc = selectBestPersonalChannelForModel(mFamily, cfg);
+                    } else if (typeof rSpec === "string" && rSpec.startsWith("account:")) {
+                      tAcc = cfg.accounts?.[rSpec.slice(8).trim()] || null;
+                    }
+                    if (tAcc && tAcc.channelType !== "gcp" && !tAcc.gcpProjectId) {
+                      const matchedModel = (tAcc.cachedQuota?.availableModels || []).find(
+                        (item) => (item.modelId || item.label || "").toLowerCase() === mFamily.toLowerCase()
+                      );
+                      if (matchedModel && matchedModel.remainingPct > 0) {
+                        if (!mObj.quotaInfo) mObj.quotaInfo = {};
+                        mObj.quotaInfo.remainingFraction = Math.min(1, matchedModel.remainingPct / 100);
+                        if (matchedModel.resetTime) mObj.quotaInfo.resetTime = matchedModel.resetTime;
+                        modified = true;
+                      }
                     }
                   }
+                  if (modified) {
+                    respBuf = Buffer.from(JSON.stringify(respJson), "utf8");
+                  }
                 }
-                if (modified) {
-                  respBuf = Buffer.from(JSON.stringify(respJson), "utf8");
+              } catch {}
+              const respHeaders = { ...upRes.headers, "content-length": String(respBuf.length) };
+              delete respHeaders["transfer-encoding"];
+              delete respHeaders["Transfer-Encoding"];
+              res.writeHead(upRes.statusCode || 200, respHeaders);
+              res.end(respBuf);
+              resolve();
+            });
+            return;
+          }
+
+          res.writeHead(upRes.statusCode || 200, upRes.headers);
+          let firstChunkAt = 0;
+          const streamSampleChunks = [];
+          let streamSampleLen = 0;
+          upRes.on("data", (chunk) => {
+            if (!firstChunkAt) firstChunkAt = Date.now();
+            if (isStreamOrGenerate && !upRes.headers["content-encoding"] && streamSampleLen < 524288) {
+              streamSampleChunks.push(chunk);
+              streamSampleLen += chunk.length;
+            }
+            try { res.write(chunk); } catch {}
+          });
+          upRes.on("end", () => {
+            try { res.end(); } catch {}
+            if (isStreamOrGenerate && streamSampleChunks.length > 0) {
+              try {
+                const endAt = Date.now();
+                const text = Buffer.concat(streamSampleChunks).toString("utf8");
+                const promptMatches = [...text.matchAll(/"promptTokenCount"\s*:\s*(\d+)/g)];
+                const candMatches = [...text.matchAll(/"candidatesTokenCount"\s*:\s*(\d+)/g)];
+                const thoughtMatches = [...text.matchAll(/"thoughtsTokenCount"\s*:\s*(\d+)/g)];
+                const totalMatches = [...text.matchAll(/"totalTokenCount"\s*:\s*(\d+)/g)];
+                const inTok = promptMatches.length > 0 ? Number(promptMatches[promptMatches.length - 1][1]) : 0;
+                const candTok = candMatches.length > 0 ? Number(candMatches[candMatches.length - 1][1]) : 0;
+                const thTok = thoughtMatches.length > 0 ? Number(thoughtMatches[thoughtMatches.length - 1][1]) : 0;
+                const totTok = totalMatches.length > 0 ? Number(totalMatches[totalMatches.length - 1][1]) : (inTok + candTok + thTok);
+                const outTok = (candTok + thTok) > 0 ? (candTok + thTok) : Math.max(0, Math.round(text.length / 12));
+                const elapsedSec = Math.max(0.25, (endAt - (firstChunkAt || reqStartAt)) / 1000);
+                const speed = Math.round((outTok / elapsedSec) * 10) / 10;
+                if (outTok > 0 && speed > 0) {
+                  const freshCfg = readRelayConfig();
+                  if (!freshCfg.__meta__) freshCfg.__meta__ = {};
+                  const prevTel = freshCfg.__meta__.telemetry || {};
+                  const prevSamples = Number(prevTel.proxySampleCount || 0);
+                  const prevAvg = Number(prevTel.proxyAvgTokPerSec || speed);
+                  const nextAvg = Math.round((((prevAvg * prevSamples) + speed) / (prevSamples + 1)) * 10) / 10;
+                  freshCfg.__meta__.telemetry = {
+                    ...prevTel,
+                    lastTokPerSec: speed,
+                    proxyAvgTokPerSec: nextAvg,
+                    proxySampleCount: prevSamples + 1,
+                    lastInputTokens: inTok,
+                    lastOutputTokens: outTok,
+                    lastTotalTokens: totTok || (inTok + outTok),
+                    updatedAt: Date.now()
+                  };
+                  writeRelayConfig(freshCfg);
                 }
-              }
-            } catch {}
-            const respHeaders = { ...upRes.headers, "content-length": String(respBuf.length) };
-            res.writeHead(upRes.statusCode || 200, respHeaders);
-            res.end(respBuf);
+              } catch {}
+            }
+            if (routedTargetAcc?.id && isStreamOrGenerate) {
+              setTimeout(() => {
+                probeChannelQuotaSnapshot(routedTargetAcc.id).catch(() => {});
+              }, 2000);
+            }
             resolve();
           });
-          return;
         }
-
-        res.writeHead(upRes.statusCode || 200, upRes.headers);
-        let firstChunkAt = 0;
-        const streamSampleChunks = [];
-        let streamSampleLen = 0;
-        upRes.on("data", (chunk) => {
-          if (!firstChunkAt) firstChunkAt = Date.now();
-          if (isStreamOrGenerate && !upRes.headers["content-encoding"] && streamSampleLen < 524288) {
-            streamSampleChunks.push(chunk);
-            streamSampleLen += chunk.length;
-          }
-          try { res.write(chunk); } catch {}
-        });
-        upRes.on("end", () => {
+      );
+      upReq.on("error", (err) => {
+        if (!res.headersSent) {
+          res.writeHead(502, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: err.message }));
+        } else {
           try { res.end(); } catch {}
-          if (isStreamOrGenerate && streamSampleChunks.length > 0) {
-            try {
-              const endAt = Date.now();
-              const text = Buffer.concat(streamSampleChunks).toString("utf8");
-              const promptMatches = [...text.matchAll(/"promptTokenCount"\s*:\s*(\d+)/g)];
-              const candMatches = [...text.matchAll(/"candidatesTokenCount"\s*:\s*(\d+)/g)];
-              const thoughtMatches = [...text.matchAll(/"thoughtsTokenCount"\s*:\s*(\d+)/g)];
-              const totalMatches = [...text.matchAll(/"totalTokenCount"\s*:\s*(\d+)/g)];
-              const inTok = promptMatches.length > 0 ? Number(promptMatches[promptMatches.length - 1][1]) : 0;
-              const candTok = candMatches.length > 0 ? Number(candMatches[candMatches.length - 1][1]) : 0;
-              const thTok = thoughtMatches.length > 0 ? Number(thoughtMatches[thoughtMatches.length - 1][1]) : 0;
-              const totTok = totalMatches.length > 0 ? Number(totalMatches[totalMatches.length - 1][1]) : (inTok + candTok + thTok);
-              const outTok = (candTok + thTok) > 0 ? (candTok + thTok) : Math.max(0, Math.round(text.length / 12));
-              const elapsedSec = Math.max(0.25, (endAt - (firstChunkAt || reqStartAt)) / 1000);
-              const speed = Math.round((outTok / elapsedSec) * 10) / 10;
-              if (outTok > 0 && speed > 0) {
-                const freshCfg = readRelayConfig();
-                if (!freshCfg.__meta__) freshCfg.__meta__ = {};
-                const prevTel = freshCfg.__meta__.telemetry || {};
-                const prevSamples = Number(prevTel.proxySampleCount || 0);
-                const prevAvg = Number(prevTel.proxyAvgTokPerSec || speed);
-                const nextAvg = Math.round((((prevAvg * prevSamples) + speed) / (prevSamples + 1)) * 10) / 10;
-                freshCfg.__meta__.telemetry = {
-                  ...prevTel,
-                  lastTokPerSec: speed,
-                  proxyAvgTokPerSec: nextAvg,
-                  proxySampleCount: prevSamples + 1,
-                  lastInputTokens: inTok,
-                  lastOutputTokens: outTok,
-                  lastTotalTokens: totTok || (inTok + outTok),
-                  updatedAt: Date.now()
-                };
-                writeRelayConfig(freshCfg);
-              }
-            } catch {}
-          }
-          if (routedTargetAcc?.id && isStreamOrGenerate) {
-            setTimeout(() => {
-              probeChannelQuotaSnapshot(routedTargetAcc.id).catch(() => {});
-            }, 2000);
-          }
-          resolve();
-        });
+        }
+        resolve();
+      });
+      upReq.on("timeout", () => {
+        upReq.destroy();
+        if (!res.headersSent) {
+          res.writeHead(504, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Upstream CloudCode timeout" }));
+        } else {
+          try { res.end(); } catch {}
+        }
+        resolve();
+      });
+      if (outBodyBuf.length > 0) {
+        upReq.write(outBodyBuf);
       }
-    );
-    upReq.on("error", (err) => {
-      if (!res.headersSent) {
-        res.writeHead(502, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: err.message }));
-      } else {
-        try { res.end(); } catch {}
-      }
-      resolve();
+      upReq.end();
     });
-    upReq.on("timeout", () => {
-      upReq.destroy();
-      if (!res.headersSent) {
-        res.writeHead(504, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "Upstream CloudCode timeout" }));
-      } else {
-        try { res.end(); } catch {}
-      }
-      resolve();
-    });
-    if (outBodyBuf.length > 0) {
-      upReq.write(outBodyBuf);
-    }
-    upReq.end();
-  });
+  };
+
+  await executeUpstreamAttempt(0);
 }
 
 const CLOUDCODE_PROXY_CANDIDATE_PORTS = [8091, 8092, 8093, 8094, 8095, 8096, 8097, 8098, 8099, 0];
@@ -521,7 +667,8 @@ function persistAndSyncProxyUrl(proxyUrl) {
       (v) => typeof v === "string" && v !== "follow_current" && v.trim() !== ""
     );
     const isLocalProxy = !isLiveGcp && hasActivePersonalRouting;
-    const desiredUrl = isLocalProxy ? effectiveUrl : "https://cloudcode-pa.googleapis.com";
+    const directUpstreamUrl = isLiveGcp ? "https://cloudcode-pa.googleapis.com" : "https://daily-cloudcode-pa.googleapis.com";
+    const desiredUrl = isLocalProxy ? effectiveUrl : directUpstreamUrl;
     const prevMode = instMeta.cloudCodeProxyMode;
     let changed = false;
     if (instMeta.cloudCodeProxyUrl !== desiredUrl) {

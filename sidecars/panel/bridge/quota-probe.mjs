@@ -575,6 +575,7 @@ export function normalizeAccountChannels(cfg) {
           gcpProjectId: "",
           gcpBillingMode: "",
           gcpLocation: "",
+          companionProjectId: item.companionProjectId || item.cachedQuota?.companionProjectId || "",
           savedAt: item.savedAt || new Date().toISOString(),
           storedToken: baseToken
         };
@@ -1410,6 +1411,10 @@ export async function probeChannelQuotaSnapshot(channelId) {
       const personalHasValidGroups = !isGcp && Array.isArray(parsed?.quotaGroups) && parsed.quotaGroups.length > 0;
       if (parsed && (personalHasValidGroups || (isGcp && parsed.availableModels.length > 0))) {
         if (!isGcp) {
+          if (probeRes.companionPid) {
+            acc.companionProjectId = probeRes.companionPid;
+            parsed.companionProjectId = probeRes.companionPid;
+          }
           if (parsed.tierCode) {
             acc.tierCode = parsed.tierCode;
             acc.tierName = parsed.tierName || acc.tierName;
