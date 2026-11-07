@@ -66,24 +66,19 @@ export function resolveBaseModelFamilyFromId(rawModelStr, cfg) {
 }
 
 const CONSUMER_MODEL_ID_MAP = {
-  "gemini-4-argon-high": "MODEL_PLACEHOLDER_M417",
-  "gemini-4-argon-medium": "MODEL_PLACEHOLDER_M418",
-  "gemini-4-argon-low": "MODEL_PLACEHOLDER_M419",
-  "gemini-4-argon": "MODEL_PLACEHOLDER_M418",
-  "gemini-3.8-flash-high": "MODEL_PLACEHOLDER_M318",
-  "gemini-3.8-flash-medium": "MODEL_PLACEHOLDER_M319",
-  "gemini-3.8-flash-low": "MODEL_PLACEHOLDER_M320",
-  "gemini-3.8-flash": "MODEL_PLACEHOLDER_M318",
-  "claude-opus-5-5-low": "MODEL_PLACEHOLDER_M400",
-  "claude-opus-5-5-medium": "MODEL_PLACEHOLDER_M401",
-  "claude-opus-5-5-high": "MODEL_PLACEHOLDER_M402",
-  "claude-opus-5-5": "MODEL_PLACEHOLDER_M401",
-  "claude-sonnet-5-5-low": "MODEL_PLACEHOLDER_M403",
-  "claude-sonnet-5-5-medium": "MODEL_PLACEHOLDER_M404",
-  "claude-sonnet-5-5-high": "MODEL_PLACEHOLDER_M405",
-  "claude-sonnet-5-5": "MODEL_PLACEHOLDER_M404",
-  "gpt-oss-120b-medium": "MODEL_OPENAI_GPT_OSS_120B_MEDIUM",
-  "gpt-oss-120b": "MODEL_OPENAI_GPT_OSS_120B_MEDIUM"
+  "model_placeholder_m417": "gemini-4-argon-high",
+  "model_placeholder_m418": "gemini-4-argon-medium",
+  "model_placeholder_m419": "gemini-4-argon-low",
+  "model_placeholder_m318": "gemini-3.8-flash-high",
+  "model_placeholder_m319": "gemini-3.8-flash-medium",
+  "model_placeholder_m320": "gemini-3.8-flash-low",
+  "model_placeholder_m400": "claude-opus-5-5-low",
+  "model_placeholder_m401": "claude-opus-5-5-medium",
+  "model_placeholder_m402": "claude-opus-5-5-high",
+  "model_placeholder_m403": "claude-sonnet-5-5-low",
+  "model_placeholder_m404": "claude-sonnet-5-5-medium",
+  "model_placeholder_m405": "claude-sonnet-5-5-high",
+  "model_openai_gpt_oss_120b_medium": "gpt-oss-120b-medium"
 };
 
 export function normalizeConsumerModelId(rawModelStr) {
@@ -299,6 +294,11 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
     baseHeaders[k] = v;
   }
   baseHeaders["Host"] = upstreamHostname;
+  const incomingUa = String(baseHeaders["user-agent"] || baseHeaders["User-Agent"] || "");
+  if (!incomingUa || !/aidev_client|antigravity\/hub/i.test(incomingUa)) {
+    delete baseHeaders["User-Agent"];
+    baseHeaders["user-agent"] = "antigravity/hub/2.29.0 (aidev_client; os_type=windows; arch=amd64; cl=1009437749)";
+  }
 
   const descId = ctx.isIsolatedInstance ? String(ctx.descriptor?.activeChannelId || "").trim() : "";
   const descTs = ctx.isIsolatedInstance ? Math.max(Number(ctx.descriptor?.switchedAt || 0), Number(ctx.descriptor?.launchedAt || 0)) : 0;
