@@ -26,6 +26,7 @@ antigravity-relay/
 ├── sidecars/
 │   └── panel/                   # Native build-free decoupled Sidecar panel
 │       ├── bridge/              # Cohesive backend domain sub-modules
+│       │   ├── channel-catalog.mjs # Five-tier detection, model catalog & normalization
 │       │   ├── cloudcode-proxy.mjs # Local transparent proxy & dual-bucket routing
 │       │   ├── oauth-launcher.mjs  # Isolated OAuth, multi-instance launcher & telemetry
 │       │   ├── quota-probe.mjs     # Official dynamic model whitelist & quota probes

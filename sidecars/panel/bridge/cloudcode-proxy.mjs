@@ -483,13 +483,15 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
                       tAcc = cfg.accounts?.[rSpec.slice(8).trim()] || null;
                     }
                     if (tAcc && tAcc.channelType !== "gcp" && !tAcc.gcpProjectId) {
+                      const curFraction = mObj.quotaInfo?.remainingFraction !== undefined
+                        ? Number(mObj.quotaInfo.remainingFraction)
+                        : (mObj.quotaInfo?.resetTime ? 0 : 1);
                       const matchedModel = (tAcc.cachedQuota?.availableModels || []).find(
                         (item) => (item.modelId || item.label || "").toLowerCase() === mFamily.toLowerCase()
                       );
-                      if (matchedModel && matchedModel.remainingPct > 0) {
+                      if (curFraction <= 0 && matchedModel && matchedModel.remainingPct > 0) {
                         if (!mObj.quotaInfo) mObj.quotaInfo = {};
-                        mObj.quotaInfo.remainingFraction = Math.min(1, matchedModel.remainingPct / 100);
-                        if (matchedModel.resetTime) mObj.quotaInfo.resetTime = matchedModel.resetTime;
+                        mObj.quotaInfo.remainingFraction = 0.01;
                         modified = true;
                       }
                     }

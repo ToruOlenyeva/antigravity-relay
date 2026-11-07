@@ -26,6 +26,7 @@ antigravity-relay/
 ├── sidecars/
 │   └── panel/                   # 原生免构建前后端物理分离 Sidecar 面板
 │       ├── bridge/              # 后端高内聚业务子模块目录
+│       │   ├── channel-catalog.mjs # 五大通道等级判定、动态模型目录与凭据归一化
 │       │   ├── cloudcode-proxy.mjs # 本地透明反向代理与双层重置算力路由
 │       │   ├── oauth-launcher.mjs  # 旁路 OAuth 登录、多开隔离实例与会话遥测
 │       │   ├── quota-probe.mjs     # 官方动态模型白名单与三配额池探针引擎

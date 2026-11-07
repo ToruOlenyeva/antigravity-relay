@@ -73,6 +73,10 @@ import {
   hasActiveOAuthSession
 } from "./bridge/oauth-launcher.mjs";
 
+import {
+  addOrUpdatePersonalChannelCard
+} from "./bridge/channel-catalog.mjs";
+
 export {
   readWinCredToken,
   writeWinCredToken,
@@ -92,40 +96,9 @@ export {
   computeSessionTelemetrySnapshot,
   launchIsolatedAntigravityInstance,
   cancelIsolatedOAuthFlow,
-  startIsolatedOAuthFlow
+  startIsolatedOAuthFlow,
+  addOrUpdatePersonalChannelCard
 };
-
-export function addOrUpdatePersonalChannelCard(email) {
-  const cleanEmail = (email || "").trim();
-  if (!cleanEmail) return null;
-  const cfg = readRelayConfig();
-  normalizeAccountChannels(cfg);
-  const baseToken = findStoredTokenForEmail(cfg, cleanEmail, false) || readWinCredToken(false);
-  const personalKey = `${cleanEmail}#personal`;
-  if (Array.isArray(cfg.__meta__?.deletedChannelIds)) {
-    cfg.__meta__.deletedChannelIds = cfg.__meta__.deletedChannelIds.filter((id) => id !== personalKey);
-  }
-  const existing = cfg.accounts[personalKey];
-  cfg.accounts[personalKey] = {
-    ...existing,
-    id: personalKey,
-    alias: existing?.alias || cleanEmail,
-    email: cleanEmail,
-    channelType: "personal",
-    tierName: existing?.tierName && !/agent\s*platform|enterprise|gcp/i.test(existing.tierName)
-      ? existing.tierName
-      : "Google AI Pro",
-    gcpProjectId: "",
-    gcpBillingMode: "",
-    gcpLocation: "",
-    savedAt: existing?.savedAt || new Date().toISOString(),
-    storedToken: baseToken
-      ? buildCleanChannelToken(baseToken, "", "")
-      : (existing?.storedToken || null)
-  };
-  writeRelayConfig(cfg);
-  return cfg.accounts[personalKey];
-}
 
 export function addOrUpdateGcpChannelCard(email, projectId, opts = {}) {
   const cleanEmail = (email || "").trim();
@@ -635,28 +608,6 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
     ? pinnedChannelId
     : detectedChannelId;
 
-  if (!activeGcpProject && (quotaGroups.length === 0 || availableModels.length === 0) && detectedChannelId && cfg.accounts[detectedChannelId]) {
-    const cachedGroups = (cfg.accounts[detectedChannelId].cachedQuota?.quotaGroups || []).filter((g) => isValidOfficialQuotaGroup(g));
-    const cachedModels = (cfg.accounts[detectedChannelId].cachedQuota?.availableModels || []).filter((m) => !isGcpOnlyModel(m.label || ""));
-    if (cachedGroups.length > 0 && cachedModels.length > 0 && !forceWinCred) {
-      quotaGroups = cachedGroups;
-      if (availableModels.length === 0) availableModels = cachedModels;
-    } else {
-      await probeChannelQuotaSnapshot(detectedChannelId).catch(() => {});
-      const freshCfg = readRelayConfig();
-      const probed = freshCfg?.accounts?.[detectedChannelId]?.cachedQuota;
-      if (probed) {
-        cfg.accounts[detectedChannelId].cachedQuota = probed;
-        if (Array.isArray(probed.quotaGroups) && probed.quotaGroups.length > 0) {
-          quotaGroups = probed.quotaGroups.filter((g) => isValidOfficialQuotaGroup(g));
-        }
-        if (availableModels.length === 0 && Array.isArray(probed.availableModels) && probed.availableModels.length > 0) {
-          availableModels = probed.availableModels;
-        }
-      }
-    }
-  }
-
   if (availableModels.length > 0 && effectiveClientModels.length > 0 && activeGcpProject) {
     if (!cfg.__meta__.liveTierModels || typeof cfg.__meta__.liveTierModels !== "object") {
       cfg.__meta__.liveTierModels = {};
@@ -668,19 +619,43 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
     }));
   }
 
-  if (detectedChannelId && cfg.accounts[detectedChannelId] && (quotaGroups.length > 0 || availableModels.length > 0 || activeGcpProject)) {
+  if (activeGcpProject && detectedChannelId && cfg.accounts[detectedChannelId]) {
     cfg.accounts[detectedChannelId].cachedQuota = {
       tierCode: liveTierInfo.tierCode,
       tierName: liveTierInfo.tierName,
       hasArgonAccess: hasLiveArgonAccess,
       isPaidProOrUltra: isLivePaidProOrUltra,
-      isGcpUnlimited: Boolean(activeGcpProject),
-      quotaGroups,
+      isGcpUnlimited: true,
+      quotaGroups: [],
       availableModels: availableModels.length > 0
         ? availableModels
         : (cfg.accounts[detectedChannelId].cachedQuota?.availableModels || []),
+      probedVia: "language_server_rpc",
       updatedAt: Date.now()
     };
+  }
+  if (!activeGcpProject && detectedChannelId && cfg.accounts[detectedChannelId]) {
+    const detCached = cfg.accounts[detectedChannelId].cachedQuota;
+    const detCachedAt = Number(detCached?.updatedAt || 0);
+    if (forceWinCred || detCached?.probedVia !== "cloudcode_http" || !detCached?.quotaGroups?.length || (Date.now() - detCachedAt > 45000)) {
+      await probeChannelQuotaSnapshot(detectedChannelId).catch(() => {});
+      const freshCfg = readRelayConfig();
+      const probed = freshCfg?.accounts?.[detectedChannelId]?.cachedQuota;
+      if (probed) {
+        cfg.accounts[detectedChannelId].cachedQuota = probed;
+        if (Array.isArray(probed.quotaGroups) && probed.quotaGroups.length > 0) {
+          quotaGroups = probed.quotaGroups;
+        }
+        if (Array.isArray(probed.availableModels) && probed.availableModels.length > 0) {
+          availableModels = probed.availableModels;
+        }
+      }
+    } else {
+      quotaGroups = detCached.quotaGroups;
+      if (Array.isArray(detCached.availableModels) && detCached.availableModels.length > 0) {
+        availableModels = detCached.availableModels;
+      }
+    }
   }
   if (activeChannelId && activeChannelId !== detectedChannelId && cfg.accounts[activeChannelId]) {
     const cachedAt = Number(cfg.accounts[activeChannelId].cachedQuota?.updatedAt || 0);
@@ -901,7 +876,8 @@ export async function switchActiveGoogleAccount(accountId, opts = {}) {
     (v) => typeof v === "string" && v !== "follow_current" && v.trim() !== ""
   );
   const localProxyUrl = getActiveCloudCodeProxyUrl(cfg);
-  const targetUrl = (!targetProject && hasActivePersonalRouting) ? localProxyUrl : "https://cloudcode-pa.googleapis.com";
+  const directUpstreamUrl = targetProject ? "https://cloudcode-pa.googleapis.com" : "https://daily-cloudcode-pa.googleapis.com";
+  const targetUrl = (!targetProject && hasActivePersonalRouting) ? localProxyUrl : directUpstreamUrl;
 
   const tokenToWrite = buildCleanChannelToken(baseToken, targetProject, targetLocation, true);
   target.storedToken = tokenToWrite;
