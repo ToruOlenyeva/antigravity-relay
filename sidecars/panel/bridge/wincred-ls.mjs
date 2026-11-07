@@ -730,6 +730,8 @@ export function buildCleanChannelToken(baseToken, targetProject = "", targetLoca
 let cachedLsInfo = null;
 let cachedLsInfoAt = 0;
 let cachedLsInstanceId = "";
+let cachedClientVersion = "";
+let cachedClientVersionAt = 0;
 
 export function parseLsLogInfo(customLogFile = "") {
   const ctx = resolveCurrentInstanceContext();
@@ -741,6 +743,7 @@ export function parseLsLogInfo(customLogFile = "") {
   let lastLocation = "";
   let lastUserTier = "";
   let enableBusinessLogin = null;
+  let lsVersion = "";
   try {
     if (fs.existsSync(targetLogFile)) {
       const logText = fs.readFileSync(targetLogFile, "utf8");
@@ -751,6 +754,15 @@ export function parseLsLogInfo(customLogFile = "") {
         pid = Number(lastPidMatch[1]);
         if (typeof lastPidMatch.index === "number") {
           activeSegment = logText.slice(lastPidMatch.index);
+        }
+      }
+      const verMatches = [...activeSegment.matchAll(/Language server version:\s*([0-9]+\.[0-9]+\.[0-9]+[^\s\r\n]*)/gi)];
+      if (verMatches.length > 0) {
+        lsVersion = (verMatches[verMatches.length - 1][1] || "").trim();
+      } else {
+        const allVerMatches = [...logText.matchAll(/Language server version:\s*([0-9]+\.[0-9]+\.[0-9]+[^\s\r\n]*)/gi)];
+        if (allVerMatches.length > 0) {
+          lsVersion = (allVerMatches[allVerMatches.length - 1][1] || "").trim();
         }
       }
       const httpsMatches = [...activeSegment.matchAll(/listening on \w+ port at (\d+) for HTTPS/gi)];
@@ -779,6 +791,10 @@ export function parseLsLogInfo(customLogFile = "") {
       }
     }
   } catch {}
+  if (lsVersion) {
+    cachedClientVersion = lsVersion;
+    cachedClientVersionAt = Date.now();
+  }
   return {
     pid,
     httpPort,
@@ -787,10 +803,56 @@ export function parseLsLogInfo(customLogFile = "") {
     lastLocation,
     lastUserTier,
     enableBusinessLogin,
+    lsVersion,
     instanceId: ctx.instanceId,
     isIsolatedInstance: ctx.isIsolatedInstance,
     logFile: targetLogFile
   };
+}
+
+export function getDetectedClientVersion(customLogFile = "") {
+  if (!customLogFile && cachedClientVersion && Date.now() - cachedClientVersionAt < 60000) {
+    return cachedClientVersion;
+  }
+  const info = parseLsLogInfo(customLogFile);
+  if (info.lsVersion) {
+    return info.lsVersion;
+  }
+  if (customLogFile && LS_LOG_FILE && customLogFile !== LS_LOG_FILE) {
+    const mainInfo = parseLsLogInfo(LS_LOG_FILE);
+    if (mainInfo.lsVersion) {
+      return mainInfo.lsVersion;
+    }
+  }
+  try {
+    const cfg = readRelayConfig();
+    const savedVer = String(cfg?.__meta__?.lastDetectedClientVersion || "").trim();
+    if (savedVer) {
+      cachedClientVersion = savedVer;
+      cachedClientVersionAt = Date.now();
+      return savedVer;
+    }
+  } catch {}
+  return cachedClientVersion || "2.29.0";
+}
+
+export function getCloudCodeUserAgent(customVersion = "") {
+  const ver = String(customVersion || getDetectedClientVersion() || "2.29.0").trim();
+  return `antigravity/hub/${ver} (aidev_client; os_type=windows; arch=amd64; cl=1009437749)`;
+}
+
+export function buildLoadCodeAssistMetadata(duetProject = "", customVersion = "") {
+  const ver = String(customVersion || getDetectedClientVersion() || "2.29.0").trim();
+  const meta = {
+    ideType: "JETSKI",
+    pluginType: "GEMINI",
+    ideVersion: ver
+  };
+  const cleanPid = String(duetProject || "").trim();
+  if (cleanPid) {
+    meta.duetProject = cleanPid;
+  }
+  return meta;
 }
 
 let cachedLsProcList = null;

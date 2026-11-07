@@ -77,9 +77,9 @@ antigravity-relay/
 
 ## 2. 全等级识别矩阵与三大配额池探针机制
 
-### 2.1 原生 CloudCode 请求头与三大配额池获取
-`ls-bridge.mjs` 向 `https://daily-cloudcode-pa.googleapis.com` 发起 `/v1internal:fetchAvailableModels` 与 `/v1internal:retrieveUserQuotaSummary` 请求时，严格携带与 `language_server.exe` 二进制完全一致的原生 `User-Agent`：
-- 仅在该原生请求头下，云端才会对付费 `Pro` 与 `Ultra` 账户完整下发 `Gemini Models`（5 小时 + 周限额）、`Claude and GPT Models`（5 小时 + 周限额）以及独立的第 3 配额组 `Gemini 4 Argon`（`bucketId: "gemini-argon-wtu-weekly"` 周限额）。
+### 2.1 动态客户端版本握手、个人双服独立账本（Prod / Daily）与三大配额池获取
+`wincred-ls.mjs` 与 `quota-probe.mjs` 实时从宿主 `language_server.log` 动态提取当前客户端版本号（如 `Language server version: 2.29.0`，随客户端升级自动同步，零硬编码），并在调用 `/v1internal:loadCodeAssist` 时携带完整 `{ ideType: "JETSKI", ideVersion: "<clientVersion>", pluginType: "GEMINI", platform: "WINDOWS_AMD64" }` 载荷获取个人账号专属私有伴生项目 ID（如 `rising-fact-p41fc`，彻底规避漏传版本导致的 `"aicode-consumers"` 免费降级池 429 陷阱）。在此基础上，每个个人账号天然拥有两套独立核算的官方配额账本，探针并发向 `https://cloudcode-pa.googleapis.com`（正式服 `prod`）与 `https://daily-cloudcode-pa.googleapis.com`（Daily 服 `daily`）发起 `/v1internal:fetchAvailableModels` 与 `/v1internal:retrieveUserQuotaSummary` 请求（GCP 计费通道则独立固定走 `cloudcode-pa.googleapis.com`）：
+- 仅在携带动态原生请求头与真实伴生项目 ID 下，正式服 `prod` 与 Daily 服 `daily` 均会对付费 `Pro` 与 `Ultra` 账户完整下发各自独立的三大配额组：`Gemini Models`（5 小时 + 周限额）、`Claude and GPT Models`（5 小时 + 周限额）以及 `Gemini 4 Argon`（`bucketId: "gemini-argon-wtu-weekly"` 周限额）与可用模型列表，缓存在 `acc.cachedQuotaByPool = { prod, daily }`，支持顶部面板一键切换查看。
 - 针对 Go `proto3` 零值序列化省略机制：当某个配额桶或模型的 `remainingFraction === undefined` 但存在 `resetTime` 时，系统精确判定为 `0%`（已耗尽），杜绝误判为 `100%`。
 
 ### 2.2 五大通道等级（`Free` / `Plus` / `Pro` / `Ultra` / `GCP`）与官方纯动态模型白名单
@@ -100,13 +100,13 @@ antigravity-relay/
    - Google Gemini 模型的思考签名（`thought_signature`）与生成该签名的通道类型（`personal` vs `gcp`）强绑定；系统在读取官方 `transcript.jsonl` 实时计算「会话统计 / 项目汇总」Token 账单时，同步检测各会话 `.db` 是否包含思考签名并结合 `signatureChannelMap` 标记 `GCP` / `个人` / `无签名` 徽章；
    - 面板「当前会话统计 / 项目汇总」卡片内置双模式「清除签名」下拉菜单：支持「仅清除当前会话签名」（`scope: "conversation"`）或「全项目扫描，清除与当前通道不匹配的遗留签名」（`scope: "project_mismatch"`），递归剥离 `~/.gemini/antigravity/conversations/<cascade_id>.db` 中的签名魔数头（`0x01 0x69 0x14 0x7d 0x13` 或 Base64 `AWkUfR` / `FpFH0T`），100% 保留聊天正文与工具调用记录。
 
-### 3.2 第二层：个人通道本地透明反向代理与免重载算力接力
-当主界面处于任意个人通道（`Free` / `Plus` / `Pro` / `Ultra`）时，底部「模型算力路由」在不重载界面的前提下实现跨个人账号算力接力（`GCP` 通道完全独立，不参与底部路由）：
-1. <b>动态挂载 `SetCloudCodeURL`</b>：Sidecar 与 `relay-hook.cjs` 自动向 `language_server.exe` 发送 `SetCloudCodeURL` RPC，将其上游地址指向本地透明代理 `http://127.0.0.1:<proxyPort>`（若切换到 `GCP` 主通道，则自动恢复为官方 `https://daily-cloudcode-pa.googleapis.com`）。
-2. <b>按模型动态替换 `Bearer Token` 与实时剥离 JSON 签名</b>：
+### 3.2 第二层：个人通道本地透明反向代理、双服切换与双层重置算力接力
+当主界面处于任意个人通道（`Free` / `Plus` / `Pro` / `Ultra`）时，底部「模型算力路由」在不重载界面的前提下实现跨个人账号及跨 `Prod / Daily` 双服的算力接力（`GCP` 通道完全独立，不参与底部个人池路由）：
+1. <b>常驻挂载 `SetCloudCodeURL` 本地透明代理</b>：在个人通道模式下，Sidecar 与 `relay-hook.cjs` 自动向 `language_server.exe` 发送 `SetCloudCodeURL` RPC，将其上游地址指向本地透明代理 `http://127.0.0.1:<proxyPort>`（若切换到 `GCP` 主通道，则自动恢复为官方 `https://cloudcode-pa.googleapis.com`）。
+2. <b>双服 `2N` 候选池 2 层自动轮询排序与动态 `Bearer Token` / `Host` 替换</b>：
    - 当 `language_server.exe` 发起 `/v1internal:streamGenerateContent` 或 `/v1internal:generateContent` 请求时，透明代理提取请求体中的 `model` 标识并映射为基础模型家族（如 `Gemini 4 Argon`、`Gemini 3.8 Flash`、`Claude Opus 5.5`）。
-   - 根据 `routing.models[family]` 配置（`follow_current`、`auto_poll` 或指定 `account:<email>#personal`），自动选出拥有该模型且配额大于 `0%` 的目标个人账号（`auto_poll` 优先选择重置时间最早的账号）。
-   - 在内存中将 HTTP 请求头替换为目标个人账号的 `Authorization: Bearer <AccessToken>`，同时调用 `stripThoughtSignaturesFromJson()` 递归剔除请求体 JSON 中的 `thoughtSignature` / `thought_signature` 字段后直连 `daily-cloudcode-pa.googleapis.com`，并在流式响应结束后 2 秒异步刷新目标账号配额。
+   - 根据 `routing.models[family]` 配置（`follow_current`、`auto_poll` 或指定 `account:<email>#personal`），`auto_poll` 将所有个人账号的 `prod` 与 `daily` 双账本共 `2N` 个独立算力桶纳入候选，先按 `5 小时限额 > 5%` 门控过滤，再严格执行<b>2 层排序（第 1 层按周限额重置时间升序，第 2 层按 5 小时限额重置时间升序）</b>选出最优 `(acc, pool)`。
+   - 在内存中将 HTTP 请求头替换为目标个人账号的 `Authorization: Bearer <AccessToken>`、将 `body.project` 替换为该账号真实的私有 `companionProjectId`，并按目标账本 `pool` 动态路由至 `cloudcode-pa.googleapis.com`（`prod`）或 `daily-cloudcode-pa.googleapis.com`（`daily`），流式响应结束后 2 秒异步刷新目标账号双服配额。
 3. <b>拦截 `/v1internal:fetchAvailableModels` 防止主账号 `0%` 锁死</b>：
    - 当当前登录的主个人账号某模型配额降至 `0%`（或如 `Plus` / `Free` 账号本身无 `Gemini 4 Argon` 额度），但用户在底部路由中已将该模型路由至其他有额度的个人账号（或开启 `auto_poll` 且池内其他个人账号有额度）时，透明代理在返回模型列表给 `language_server.exe` 前自动注入目标路由账号的剩余配额百分比，防止客户端前端将模型下拉项置灰锁死。
 
@@ -140,7 +140,8 @@ antigravity-relay/
 - <b>拉起独立多开实例</b>：`POST /api/launch-instance`（请求体：`{ "channelId": "user@gmail.com#gcp:my-proj" }`）
 - <b>双模式清除思考签名</b>：`POST /api/scrub-signatures`（请求体：`{ "scope": "conversation" | "project_mismatch", "conversationId": "<uuid>" }`）
 - <b>删除指定通道</b>：`POST /api/remove-account`（请求体：`{ "channelId": "user@gmail.com#personal" }`）
-- <b>查询非当前通道缓存配额</b>：`POST /api/probe-channel-quota`（请求体：`{ "channelId": "user@gmail.com#personal", "force": false }`）
+- <b>查询非当前通道双服缓存配额</b>：`POST /api/probe-channel-quota`（请求体：`{ "channelId": "user@gmail.com#personal" }`）
+- <b>切换个人通道官方配额账本（正式服 Prod / Daily 服）</b>：`POST /api/switch-quota-pool`（请求体：`{ "pool": "prod" | "daily" }`）
 
 ### 4.4 模型路由与国际化设置接口
 - <b>设置模型算力路由规则</b>：`POST /api/set-route`（请求体：`{ "targetType": "models", "key": "Gemini 3.8 Flash", "routeValue": "auto_poll" }`）

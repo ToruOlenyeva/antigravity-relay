@@ -411,6 +411,7 @@ function createDefaultConfig() {
     routing: {
       autoRelayOnLowQuota: true,
       lowQuotaThresholdPct: 5,
+      personalQuotaPool: "prod",
       models: {},
       gcpModels: {}
     },
@@ -466,6 +467,7 @@ function ensureConfigDefaults(cfg) {
   if (!cfg.routing || typeof cfg.routing !== "object") cfg.routing = {};
   if (cfg.routing.autoRelayOnLowQuota === undefined) cfg.routing.autoRelayOnLowQuota = true;
   if (!cfg.routing.lowQuotaThresholdPct) cfg.routing.lowQuotaThresholdPct = 5;
+  cfg.routing.personalQuotaPool = cfg.routing.personalQuotaPool === "daily" ? "daily" : "prod";
   if (!cfg.routing.models || typeof cfg.routing.models !== "object") cfg.routing.models = {};
   if (!cfg.routing.gcpModels || typeof cfg.routing.gcpModels !== "object") cfg.routing.gcpModels = {};
   delete cfg.routing.subagentDefaultTarget;
@@ -594,6 +596,23 @@ export function writeRelayConfig(cfg) {
                   memAcc.cachedQuota = diskAcc.cachedQuota;
                   if (diskAcc.tierCode) memAcc.tierCode = diskAcc.tierCode;
                   if (diskAcc.tierName) memAcc.tierName = diskAcc.tierName;
+                }
+                if (diskAcc.cachedQuotaByPool && typeof diskAcc.cachedQuotaByPool === "object") {
+                  if (!memAcc.cachedQuotaByPool || typeof memAcc.cachedQuotaByPool !== "object") {
+                    memAcc.cachedQuotaByPool = {};
+                  }
+                  for (const poolKey of ["prod", "daily"]) {
+                    const dPool = diskAcc.cachedQuotaByPool[poolKey];
+                    const mPool = memAcc.cachedQuotaByPool[poolKey];
+                    if (!dPool || typeof dPool !== "object") continue;
+                    const dUpd = Number(dPool.updatedAt || 0);
+                    const mUpd = Number(mPool?.updatedAt || 0);
+                    const dGroups = Array.isArray(dPool.quotaGroups) && dPool.quotaGroups.length > 0;
+                    const mGroups = Array.isArray(mPool?.quotaGroups) && mPool.quotaGroups.length > 0;
+                    if (!mPool || (dUpd > mUpd && (dGroups || !mGroups)) || (dGroups && !mGroups)) {
+                      memAcc.cachedQuotaByPool[poolKey] = dPool;
+                    }
+                  }
                 }
               }
             }

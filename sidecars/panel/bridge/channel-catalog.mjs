@@ -492,9 +492,19 @@ export function isInternalConsumerPoolProject(projectId) {
   return /^(aicode-consumers|rising-fact-[a-z0-9-]+|gen-lang-client-[a-z0-9-]+|cloud-ai-companion-[a-z0-9-]+)$/i.test(pid);
 }
 
+export function isDowngradedConsumerPoolProject(projectId) {
+  const pid = String(projectId || "").trim();
+  return !pid || /^aicode-consumers$/i.test(pid);
+}
+
+export function normalizePersonalQuotaPool(rawPool) {
+  return String(rawPool || "").trim().toLowerCase() === "daily" ? "daily" : "prod";
+}
+
 export function normalizeAccountChannels(cfg) {
   if (!cfg.accounts || typeof cfg.accounts !== "object") cfg.accounts = {};
   if (!Array.isArray(cfg.gcpProjects)) cfg.gcpProjects = [];
+  const activePool = normalizePersonalQuotaPool(cfg?.routing?.personalQuotaPool || cfg?.__meta__?.personalQuotaPool || "prod");
   const deletedSet = new Set(Array.isArray(cfg.__meta__?.deletedChannelIds) ? cfg.__meta__.deletedChannelIds : []);
   const nextAccounts = {};
 
@@ -529,6 +539,39 @@ export function normalizeAccountChannels(cfg) {
         cleanPersonalTier,
         item.tierCode || ""
       );
+      let cachedQuotaByPool = undefined;
+      if (!isGcp && !pid) {
+        cachedQuotaByPool = {};
+        const rawByPool = item.cachedQuotaByPool && typeof item.cachedQuotaByPool === "object"
+          ? item.cachedQuotaByPool
+          : {};
+        for (const pKey of ["prod", "daily"]) {
+          if (rawByPool[pKey] && typeof rawByPool[pKey] === "object") {
+            cachedQuotaByPool[pKey] = sanitizeCachedQuotaModels(
+              rawByPool[pKey],
+              false,
+              liveTierTemplate,
+              cleanPersonalTier,
+              item.tierCode || ""
+            );
+          }
+        }
+        if (cachedQuota && Array.isArray(cachedQuota.quotaGroups) && cachedQuota.quotaGroups.length > 0) {
+          const taggedPool = cachedQuota.quotaPool === "daily" ? "daily" : (cachedQuota.quotaPool === "prod" ? "prod" : activePool);
+          if (!cachedQuotaByPool[taggedPool]) {
+            cachedQuotaByPool[taggedPool] = cachedQuota;
+          }
+        }
+        if (cachedQuotaByPool[activePool]?.quotaGroups?.length) {
+          cachedQuota = cachedQuotaByPool[activePool];
+        } else if (cachedQuotaByPool.prod?.quotaGroups?.length) {
+          cachedQuota = cachedQuotaByPool.prod;
+        } else if (cachedQuotaByPool.daily?.quotaGroups?.length) {
+          cachedQuota = cachedQuotaByPool.daily;
+        }
+      }
+      const rawCompanionPid = String(item.companionProjectId || cachedQuota?.companionProjectId || "").trim();
+      const cleanCompanionPid = (!isGcp && !isDowngradedConsumerPoolProject(rawCompanionPid)) ? rawCompanionPid : "";
       const resolvedTierCode = isGcp && pid
         ? "GCP"
         : (cachedQuota?.tierCode || item.tierCode || (/ultra/i.test(cleanPersonalTier) ? "Ultra" : (/plus/i.test(cleanPersonalTier) ? "Plus" : (/free/i.test(cleanPersonalTier) ? "Free" : "Pro"))));
@@ -582,9 +625,11 @@ export function normalizeAccountChannels(cfg) {
         gcpProjectId: isGcp && pid ? pid : "",
         gcpBillingMode,
         gcpLocation,
+        companionProjectId: cleanCompanionPid,
         tierName: isGcp && pid ? cleanGcpTier : resolvedPersonalTierName,
         storedToken: isolatedChannelTok,
-        cachedQuota
+        cachedQuota,
+        ...(cachedQuotaByPool ? { cachedQuotaByPool } : {})
       };
       if (pid && !cfg.gcpProjects.includes(pid)) cfg.gcpProjects.push(pid);
     } else {
@@ -614,6 +659,7 @@ export function normalizeAccountChannels(cfg) {
       } else {
         const personalKey = `${email}#personal`;
         const baseToken = item.storedToken ? buildCleanChannelToken(item.storedToken, "", "") : null;
+        const rawComp = String(item.companionProjectId || item.cachedQuota?.companionProjectId || "").trim();
         nextAccounts[personalKey] = {
           id: personalKey,
           alias: item.alias || email,
@@ -623,7 +669,7 @@ export function normalizeAccountChannels(cfg) {
           gcpProjectId: "",
           gcpBillingMode: "",
           gcpLocation: "",
-          companionProjectId: item.companionProjectId || item.cachedQuota?.companionProjectId || "",
+          companionProjectId: isDowngradedConsumerPoolProject(rawComp) ? "" : rawComp,
           savedAt: item.savedAt || new Date().toISOString(),
           storedToken: baseToken
         };

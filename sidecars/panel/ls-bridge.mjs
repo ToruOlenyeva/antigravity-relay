@@ -50,7 +50,10 @@ import {
   findFirstGcpProjectForEmail,
   discoverGcpProjectsForAccount,
   probeChannelQuotaSnapshot,
-  probeAllChannelsQuotaSnapshot
+  probeAllChannelsQuotaSnapshot,
+  normalizePersonalQuotaPool,
+  getActivePersonalQuotaPool,
+  getDetectedClientVersion
 } from "./bridge/quota-probe.mjs";
 import {
   selectBestPersonalChannelForModel,
@@ -438,12 +441,9 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
       cfg.__meta__.lsRpcTarget = rpcTargetObj;
     }
 
-    const hasActivePersonalRouting = !isLiveGcp && Object.values(cfg.routing?.models || {}).some(
-      (v) => typeof v === "string" && v !== "follow_current" && v.trim() !== ""
-    );
-    const desiredProxyMode = (!isLiveGcp && hasActivePersonalRouting) ? "local_proxy" : "direct";
+    const desiredProxyMode = !isLiveGcp ? "local_proxy" : "direct";
     const localProxyUrl = getActiveCloudCodeProxyUrl(cfg);
-    const directUpstreamUrl = isLiveGcp ? "https://cloudcode-pa.googleapis.com" : "https://daily-cloudcode-pa.googleapis.com";
+    const directUpstreamUrl = "https://cloudcode-pa.googleapis.com";
     const targetUrl = desiredProxyMode === "local_proxy" ? localProxyUrl : directUpstreamUrl;
     if (desiredProxyMode === "local_proxy") {
       if (
@@ -714,6 +714,8 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
     lsOnline: Boolean(ls && userStatusResp),
     lsPid: ls?.pid || 0,
     lsPort: ls?.port || 0,
+    clientVersion: getDetectedClientVersion(ctx.lsLogFile),
+    personalQuotaPool: getActivePersonalQuotaPool(cfg),
     instance: instanceStatus,
     activeAccount: displayAccount,
     availableModels: displayModels,
@@ -725,6 +727,25 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
     oauthPending: hasActiveOAuthSession(),
     telemetry
   };
+}
+
+export async function switchPersonalQuotaPool(targetPool) {
+  const pool = normalizePersonalQuotaPool(targetPool);
+  const cfg = readRelayConfig();
+  if (!cfg.routing || typeof cfg.routing !== "object") {
+    cfg.routing = {};
+  }
+  cfg.routing.personalQuotaPool = pool;
+  normalizeAccountChannels(cfg);
+  writeRelayConfig(cfg);
+
+  const missingPoolIds = Object.values(cfg.accounts || {})
+    .filter((acc) => acc && acc.channelType !== "gcp" && !acc.gcpProjectId && !acc.cachedQuotaByPool?.[pool]?.quotaGroups?.length)
+    .map((acc) => acc.id);
+  for (const cid of missingPoolIds) {
+    await probeChannelQuotaSnapshot(cid).catch(() => {});
+  }
+  return { personalQuotaPool: pool };
 }
 
 export async function switchBillingProjectInstant(projectId, opts = {}) {
@@ -872,12 +893,9 @@ export async function switchActiveGoogleAccount(accountId, opts = {}) {
   }
 
   const currentLs = discoverLanguageServer(false);
-  const hasActivePersonalRouting = !targetProject && Object.values(cfg.routing?.models || {}).some(
-    (v) => typeof v === "string" && v !== "follow_current" && v.trim() !== ""
-  );
   const localProxyUrl = getActiveCloudCodeProxyUrl(cfg);
-  const directUpstreamUrl = targetProject ? "https://cloudcode-pa.googleapis.com" : "https://daily-cloudcode-pa.googleapis.com";
-  const targetUrl = (!targetProject && hasActivePersonalRouting) ? localProxyUrl : directUpstreamUrl;
+  const directUpstreamUrl = "https://cloudcode-pa.googleapis.com";
+  const targetUrl = !targetProject ? localProxyUrl : directUpstreamUrl;
 
   const tokenToWrite = buildCleanChannelToken(baseToken, targetProject, targetLocation, true);
   target.storedToken = tokenToWrite;
@@ -925,7 +943,7 @@ export async function switchActiveGoogleAccount(accountId, opts = {}) {
     target.email,
     targetProject
   );
-  instMeta.cloudCodeProxyMode = (!targetProject && hasActivePersonalRouting) ? "local_proxy" : "direct";
+  instMeta.cloudCodeProxyMode = !targetProject ? "local_proxy" : "direct";
   instMeta.cloudCodeProxyUrl = targetUrl;
   if (!ctx.isIsolatedInstance) {
     cfg.__meta__.cloudCodeProxyMode = instMeta.cloudCodeProxyMode;

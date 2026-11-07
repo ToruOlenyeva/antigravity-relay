@@ -87,10 +87,12 @@ function isRelayEnabledForPayload(payload) {
 
 const WEEK_PENALTY_MS = 7 * 24 * 3600 * 1000;
 
-function extractModelDualQuotaForHook(acc, matched, baseModelName) {
+function extractModelDualQuotaForHook(accOrQuota, matched, baseModelName) {
   const now = Date.now();
   const defaultWeeklyMs = now + WEEK_PENALTY_MS;
-  const groups = acc?.cachedQuota?.quotaGroups || [];
+  const groups = Array.isArray(accOrQuota?.quotaGroups)
+    ? accOrQuota.quotaGroups
+    : (accOrQuota?.cachedQuota?.quotaGroups || []);
   const clean = String(baseModelName || matched?.label || matched?.modelId || "").toLowerCase();
 
   let grp = null;
@@ -203,6 +205,7 @@ function resolveBestAvailableChannelSpec(baseModelName, relayCfg) {
   if (accounts.length === 0) return null;
   const activeEmail = (relayCfg?.__meta__?.activeEmail || "").trim();
   const activeChannelId = activeEmail ? `${activeEmail}#personal` : "";
+  const preferredPool = relayCfg?.routing?.personalQuotaPool === "daily" ? "daily" : "prod";
   const thresholdPct = Number(relayCfg?.routing?.lowQuotaThresholdPct ?? 5);
   const targetLower = (baseModelName || "").toLowerCase();
 
@@ -211,50 +214,59 @@ function resolveBestAvailableChannelSpec(baseModelName, relayCfg) {
   for (const acc of accounts) {
     const isGcp = acc.channelType === "gcp" || Boolean(acc.gcpProjectId);
     if (isGcp) continue;
-    const models = acc?.cachedQuota?.availableModels || [];
-    const matched = models.find((m) => {
-      const id = (m.modelId || m.label || "").toLowerCase();
-      if (id === targetLower) return true;
-      return Array.isArray(m.variantIds) && m.variantIds.some((v) => String(v).toLowerCase() === targetLower);
-    });
-    if (!matched && targetLower) continue;
-    const dual = extractModelDualQuotaForHook(acc, matched, baseModelName);
-    if (dual.weeklyPct <= 0 || dual.fiveHourPct <= 0) continue;
+    for (const poolKey of ["prod", "daily"]) {
+      const poolQuota = acc?.cachedQuotaByPool?.[poolKey] || (poolKey === preferredPool ? acc?.cachedQuota : null);
+      if (!poolQuota || typeof poolQuota !== "object") continue;
+      const models = poolQuota.availableModels || [];
+      const matched = models.find((m) => {
+        const id = (m.modelId || m.label || "").toLowerCase();
+        if (id === targetLower) return true;
+        return Array.isArray(m.variantIds) && m.variantIds.some((v) => String(v).toLowerCase() === targetLower);
+      });
+      if (!matched && targetLower) continue;
+      const dual = extractModelDualQuotaForHook(poolQuota, matched, baseModelName);
+      if (dual.weeklyPct <= 0 || dual.fiveHourPct <= 0) continue;
 
-    const weeklyLow = dual.weeklyPct <= thresholdPct;
-    const effectiveWeeklyResetMs = dual.weeklyResetMs + (weeklyLow ? WEEK_PENALTY_MS : 0);
-    const fiveHourAboveThreshold = dual.fiveHourPct > thresholdPct;
+      const weeklyLow = dual.weeklyPct <= thresholdPct;
+      const effectiveWeeklyResetMs = dual.weeklyResetMs + (weeklyLow ? WEEK_PENALTY_MS : 0);
+      const fiveHourAboveThreshold = dual.fiveHourPct > thresholdPct;
 
-    candidates.push({
-      acc,
-      weeklyPct: dual.weeklyPct,
-      fiveHourPct: dual.fiveHourPct,
-      fiveHourAboveThreshold,
-      effectiveWeeklyResetMs,
-      fiveHourResetMs: dual.fiveHourResetMs,
-      isCurrent: acc.id === activeChannelId,
-      sameEmail: acc.email === activeEmail
-    });
+      candidates.push({
+        acc,
+        pool: poolKey,
+        weeklyPct: dual.weeklyPct,
+        fiveHourPct: dual.fiveHourPct,
+        fiveHourAboveThreshold,
+        effectiveWeeklyResetMs,
+        fiveHourResetMs: dual.fiveHourResetMs,
+        isPreferredPool: poolKey === preferredPool,
+        isCurrent: acc.id === activeChannelId,
+        sameEmail: acc.email === activeEmail
+      });
+    }
   }
 
   if (candidates.length === 0) return null;
 
   candidates.sort((a, b) => {
-    // 1. 5小时限额门控：优先选 5小时限额 > 5% 的通道；当 A 达到 5小时限额 (<=5%) 时顺位切下一通道，重置后自动切回 A
+    // 1. 5小时限额门控：优先选 5小时限额 > 5% 的 (acc, pool) 桶；达到 5小时限额 (<=5%) 时退居队尾，重置后自动恢复
     if (a.fiveHourAboveThreshold !== b.fiveHourAboveThreshold) {
       return a.fiveHourAboveThreshold ? -1 : 1;
     }
-    // 2. 第一层排序：按周重置时间升序（若周限额 < 5%，重置时间 +7天 进入队尾）
+    // 2. 第一层排序（先周额度）：按周重置时间升序（若周限额 <= 5%，重置时间 +7天 进入队尾）
     if (Math.abs(a.effectiveWeeklyResetMs - b.effectiveWeeklyResetMs) > 120000) {
       return a.effectiveWeeklyResetMs - b.effectiveWeeklyResetMs;
     }
-    // 3. 第二层排序：周重置时间相近时，按 5小时重置时间升序
+    // 3. 第二层排序（再 5小时额度）：周重置时间相近时，按 5小时重置时间升序
     if (Math.abs(a.fiveHourResetMs - b.fiveHourResetMs) > 60000) {
       return a.fiveHourResetMs - b.fiveHourResetMs;
     }
+    if (b.weeklyPct !== a.weeklyPct) return b.weeklyPct - a.weeklyPct;
+    if (b.fiveHourPct !== a.fiveHourPct) return b.fiveHourPct - a.fiveHourPct;
+    if (a.isPreferredPool !== b.isPreferredPool) return a.isPreferredPool ? -1 : 1;
     if (a.isCurrent !== b.isCurrent) return a.isCurrent ? -1 : 1;
     if (a.sameEmail !== b.sameEmail) return a.sameEmail ? -1 : 1;
-    return b.weeklyPct - a.weeklyPct;
+    return 0;
   });
 
   return `account:${candidates[0].acc.id}`;
@@ -380,6 +392,10 @@ async function applyTargetRoute(targetSpec, relayCfg, baseModelName = "", rawMod
   relayCfg.__meta__.lastRoutedModel = rawModelName || baseModelName || "";
 
   if (!targetSpec || targetSpec === "follow_current") {
+    const lsTarget = activeMeta?.lsRpcTarget || relayCfg?.__meta__?.lsRpcTarget;
+    if (lsTarget) {
+      await ensureLocalCloudCodeProxyMounted(lsTarget, relayCfg, activeMeta);
+    }
     relayCfg.__meta__.lastRoutedChannelId = activeMeta?.activeChannelId || "";
     writeJsonSafe(relayConfigPath, relayCfg);
     return false;
@@ -389,6 +405,10 @@ async function applyTargetRoute(targetSpec, relayCfg, baseModelName = "", rawMod
   if (resolvedSpec === "auto_poll") {
     resolvedSpec = resolveBestAvailableChannelSpec(baseModelName, relayCfg) || "follow_current";
     if (resolvedSpec === "follow_current") {
+      const lsTarget = activeMeta?.lsRpcTarget || relayCfg?.__meta__?.lsRpcTarget;
+      if (lsTarget) {
+        await ensureLocalCloudCodeProxyMounted(lsTarget, relayCfg, activeMeta);
+      }
       relayCfg.__meta__.lastRoutedChannelId = activeMeta?.activeChannelId || "";
       writeJsonSafe(relayConfigPath, relayCfg);
       return false;
@@ -403,7 +423,7 @@ async function applyTargetRoute(targetSpec, relayCfg, baseModelName = "", rawMod
       return false;
     }
     const lsTarget = activeMeta?.lsRpcTarget || relayCfg?.__meta__?.lsRpcTarget;
-    if (lsTarget && acc.id !== activeMeta?.activeChannelId) {
+    if (lsTarget) {
       await ensureLocalCloudCodeProxyMounted(lsTarget, relayCfg, activeMeta);
     }
     relayCfg.__meta__.lastRoutedChannelId = acc.id;

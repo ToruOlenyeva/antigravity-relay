@@ -11,6 +11,9 @@ import {
   readWinCredToken,
   buildCleanChannelToken,
   parseLsLogInfo,
+  getDetectedClientVersion,
+  getCloudCodeUserAgent,
+  buildLoadCodeAssistMetadata,
   discoverLanguageServer,
   callLsRpc,
   refreshOAuthAccessToken
@@ -27,7 +30,9 @@ import {
   normalizeAccountChannels,
   findStoredTokenForEmail,
   findFirstGcpProjectForEmail,
-  isInternalConsumerPoolProject
+  isInternalConsumerPoolProject,
+  isDowngradedConsumerPoolProject,
+  normalizePersonalQuotaPool
 } from "./channel-catalog.mjs";
 
 export {
@@ -42,8 +47,25 @@ export {
   normalizeAccountChannels,
   findStoredTokenForEmail,
   findFirstGcpProjectForEmail,
-  isInternalConsumerPoolProject
+  isInternalConsumerPoolProject,
+  isDowngradedConsumerPoolProject,
+  normalizePersonalQuotaPool,
+  getDetectedClientVersion,
+  getCloudCodeUserAgent,
+  buildLoadCodeAssistMetadata
 };
+
+export function getActivePersonalQuotaPool(cfg = null) {
+  const c = cfg || readRelayConfig();
+  return normalizePersonalQuotaPool(c?.routing?.personalQuotaPool);
+}
+
+export function getCloudCodeHostnameForPool(pool = "prod", isGcp = false) {
+  if (isGcp) return "cloudcode-pa.googleapis.com";
+  return normalizePersonalQuotaPool(pool) === "daily"
+    ? "daily-cloudcode-pa.googleapis.com"
+    : "cloudcode-pa.googleapis.com";
+}
 
 function fetchCloudResourceProjects(accessToken, quotaProjectId = "") {
   return new Promise((resolve) => {
@@ -171,20 +193,21 @@ function readLocalGcloudProjectsForEmail(email) {
   return found;
 }
 
-export function callCloudCodeApi(endpointPath, accessToken, payloadObj = {}, extraHeaders = {}) {
+export function callCloudCodeApi(endpointPath, accessToken, payloadObj = {}, extraHeaders = {}, targetHostname = "") {
   return new Promise((resolve) => {
     if (!accessToken) return resolve({ status: 0, data: null });
+    const hostname = String(targetHostname || "").trim() || "cloudcode-pa.googleapis.com";
     const body = Buffer.from(JSON.stringify(payloadObj || {}), "utf8");
     const req = https.request(
       {
-        hostname: "daily-cloudcode-pa.googleapis.com",
+        hostname,
         port: 443,
         path: endpointPath,
         method: "POST",
         headers: {
           Authorization: `Bearer ${accessToken}`,
           "Content-Type": "application/json",
-          "User-Agent": "antigravity/hub/2.29.0 (aidev_client; os_type=windows; arch=amd64; cl=1009437749)",
+          "User-Agent": getCloudCodeUserAgent(),
           "Content-Length": body.length,
           ...extraHeaders
         },
@@ -215,7 +238,7 @@ export function callCloudCodeApi(endpointPath, accessToken, payloadObj = {}, ext
 
 function fetchCloudCodeCompanionProject(accessToken) {
   return callCloudCodeApi("/v1internal:loadCodeAssist", accessToken, {
-    metadata: { ideType: "JETSKI", pluginType: "GEMINI" }
+    metadata: buildLoadCodeAssistMetadata()
   }).then((res) => {
     if (res.status !== 200 || !res.data) return [];
     const pid = String(
@@ -612,27 +635,53 @@ export async function probeChannelQuotaSnapshot(channelId) {
     return acc.cachedQuota || null;
   }
 
-  const tryProbeWithToken = async (tok) => {
-    let companionPid = gcpPid;
-    const loadPayload = {
-      metadata: {
-        ideType: "JETSKI",
-        pluginType: "GEMINI"
+  const activePool = getActivePersonalQuotaPool(cfg);
+  const PROD_HOSTNAME = "cloudcode-pa.googleapis.com";
+  const DAILY_HOSTNAME = "daily-cloudcode-pa.googleapis.com";
+
+  const tryProbeSinglePersonalPool = async (tok, companionPid, hostName) => {
+    const reqPayload = companionPid ? { project: companionPid } : {};
+    let [modelsResp, quotaSummaryResp] = await Promise.all([
+      callCloudCodeApi("/v1internal:fetchAvailableModels", tok, reqPayload, {}, hostName),
+      callCloudCodeApi("/v1internal:retrieveUserQuotaSummary", tok, reqPayload, {}, hostName)
+    ]);
+    if (!quotaSummaryResp?.data?.groups?.length && companionPid) {
+      const fallbackQs = await callCloudCodeApi("/v1internal:retrieveUserQuotaSummary", tok, {}, {}, hostName);
+      if (fallbackQs?.data?.groups?.length) {
+        quotaSummaryResp = fallbackQs;
       }
-    };
-    if (gcpPid) {
-      loadPayload.cloudaicompanionProject = gcpPid;
-      loadPayload.metadata.duetProject = gcpPid;
     }
-    const loadResp = await callCloudCodeApi("/v1internal:loadCodeAssist", tok, loadPayload);
+    return { modelsResp, quotaSummaryResp };
+  };
+
+  const tryProbeWithToken = async (tok) => {
+    let companionPid = isGcp
+      ? gcpPid
+      : (!isDowngradedConsumerPoolProject(acc.companionProjectId) ? String(acc.companionProjectId || "").trim() : "");
+    const loadPayload = {
+      metadata: buildLoadCodeAssistMetadata(isGcp ? gcpPid : "")
+    };
+    if (isGcp && gcpPid) {
+      loadPayload.cloudaicompanionProject = gcpPid;
+    }
+    const loadResp = await callCloudCodeApi(
+      "/v1internal:loadCodeAssist",
+      tok,
+      loadPayload,
+      {},
+      PROD_HOSTNAME
+    );
     let userTier = "";
     if (loadResp.status === 200 && loadResp.data) {
-      if (!companionPid) {
-        companionPid = String(
+      if (!isGcp) {
+        const loadedPid = String(
           loadResp.data.cloudaicompanionProject?.id ||
           loadResp.data.cloudaicompanionProject ||
           ""
         ).trim();
+        if (loadedPid && !isDowngradedConsumerPoolProject(loadedPid)) {
+          companionPid = loadedPid;
+        }
       }
       const pTier = loadResp.data.paidTier || loadResp.data.currentTier || {};
       userTier = String(
@@ -642,21 +691,42 @@ export async function probeChannelQuotaSnapshot(channelId) {
       ).trim();
     }
 
-    const reqPayload = companionPid ? { project: companionPid } : {};
-
-    let [modelsResp, quotaSummaryResp] = await Promise.all([
-      callCloudCodeApi("/v1internal:fetchAvailableModels", tok, reqPayload),
-      !isGcp
-        ? callCloudCodeApi("/v1internal:retrieveUserQuotaSummary", tok, reqPayload)
-        : Promise.resolve({ status: 0, data: null })
-    ]);
-    if (!isGcp && (!quotaSummaryResp?.data?.groups?.length) && companionPid) {
-      const fallbackQs = await callCloudCodeApi("/v1internal:retrieveUserQuotaSummary", tok, {});
-      if (fallbackQs?.data?.groups?.length) {
-        quotaSummaryResp = fallbackQs;
-      }
+    if (isGcp) {
+      const reqPayload = companionPid ? { project: companionPid } : {};
+      const modelsResp = await callCloudCodeApi(
+        "/v1internal:fetchAvailableModels",
+        tok,
+        reqPayload,
+        {},
+        PROD_HOSTNAME
+      );
+      return {
+        loadResp,
+        modelsResp,
+        quotaSummaryResp: { status: 0, data: null },
+        companionPid,
+        userTier,
+        byPool: null
+      };
     }
-    return { loadResp, modelsResp, quotaSummaryResp, companionPid, userTier };
+
+    const [prodProbe, dailyProbe] = await Promise.all([
+      tryProbeSinglePersonalPool(tok, companionPid, PROD_HOSTNAME),
+      tryProbeSinglePersonalPool(tok, companionPid, DAILY_HOSTNAME)
+    ]);
+
+    const preferredProbe = activePool === "daily" ? dailyProbe : prodProbe;
+    return {
+      loadResp,
+      modelsResp: preferredProbe.modelsResp?.status === 200 ? preferredProbe.modelsResp : (prodProbe.modelsResp?.status === 200 ? prodProbe.modelsResp : dailyProbe.modelsResp),
+      quotaSummaryResp: preferredProbe.quotaSummaryResp,
+      companionPid,
+      userTier,
+      byPool: {
+        prod: prodProbe,
+        daily: dailyProbe
+      }
+    };
   };
 
   for (const baseToken of candidateTokenObjs) {
@@ -707,7 +777,62 @@ export async function probeChannelQuotaSnapshot(channelId) {
       } catch {}
     }
 
-    if (probeRes.modelsResp.status === 200 && probeRes.modelsResp.data) {
+    if (!isGcp && probeRes.byPool) {
+      if (!acc.cachedQuotaByPool || typeof acc.cachedQuotaByPool !== "object") {
+        acc.cachedQuotaByPool = {};
+      }
+      let anyPoolValid = false;
+      for (const [poolKey, poolData] of Object.entries(probeRes.byPool)) {
+        if (!poolData?.modelsResp?.data) continue;
+        const prevPoolQuota = acc.cachedQuotaByPool[poolKey] || acc.cachedQuota || null;
+        const parsedPool = parseCloudCodeModelsAndQuota(
+          poolData.modelsResp.data,
+          poolData.quotaSummaryResp?.data || null,
+          false,
+          probeRes.userTier,
+          prevPoolQuota,
+          []
+        );
+        if (parsedPool && Array.isArray(parsedPool.quotaGroups) && parsedPool.quotaGroups.length > 0) {
+          parsedPool.pool = poolKey;
+          parsedPool.upstreamHostname = poolKey === "daily" ? DAILY_HOSTNAME : PROD_HOSTNAME;
+          if (probeRes.companionPid) {
+            parsedPool.companionProjectId = probeRes.companionPid;
+          }
+          acc.cachedQuotaByPool[poolKey] = parsedPool;
+          anyPoolValid = true;
+        }
+      }
+      if (anyPoolValid) {
+        if (probeRes.companionPid && !isDowngradedConsumerPoolProject(probeRes.companionPid)) {
+          acc.companionProjectId = probeRes.companionPid;
+        }
+        const activeSnapshot =
+          acc.cachedQuotaByPool[activePool] ||
+          acc.cachedQuotaByPool.prod ||
+          acc.cachedQuotaByPool.daily ||
+          acc.cachedQuota;
+        if (activeSnapshot) {
+          acc.cachedQuota = activeSnapshot;
+          if (activeSnapshot.tierCode) {
+            acc.tierCode = activeSnapshot.tierCode;
+            acc.tierName = activeSnapshot.tierName || acc.tierName;
+          }
+        }
+        const cleanPersonalTok = buildCleanChannelToken(baseToken, "", "", false);
+        acc.storedToken = cleanPersonalTok;
+        if (!cfg.__meta__.channelTokensById || typeof cfg.__meta__.channelTokensById !== "object") {
+          cfg.__meta__.channelTokensById = {};
+        }
+        cfg.__meta__.channelTokensById[acc.id] = JSON.parse(JSON.stringify(cleanPersonalTok));
+        if (!cfg.__meta__.oauthTokensByEmail || typeof cfg.__meta__.oauthTokensByEmail !== "object") {
+          cfg.__meta__.oauthTokensByEmail = {};
+        }
+        cfg.__meta__.oauthTokensByEmail[acc.email] = JSON.parse(JSON.stringify(cleanPersonalTok));
+        writeRelayConfig(cfg);
+        return acc.cachedQuota;
+      }
+    } else if (probeRes.modelsResp.status === 200 && probeRes.modelsResp.data) {
       const parsed = parseCloudCodeModelsAndQuota(
         probeRes.modelsResp.data,
         probeRes.quotaSummaryResp?.data || null,
@@ -716,28 +841,7 @@ export async function probeChannelQuotaSnapshot(channelId) {
         acc.cachedQuota || null,
         []
       );
-      const personalHasValidGroups = !isGcp && Array.isArray(parsed?.quotaGroups) && parsed.quotaGroups.length > 0;
-      if (parsed && (personalHasValidGroups || (isGcp && parsed.availableModels.length > 0))) {
-        if (!isGcp) {
-          if (probeRes.companionPid) {
-            acc.companionProjectId = probeRes.companionPid;
-            parsed.companionProjectId = probeRes.companionPid;
-          }
-          if (parsed.tierCode) {
-            acc.tierCode = parsed.tierCode;
-            acc.tierName = parsed.tierName || acc.tierName;
-          }
-          const cleanPersonalTok = buildCleanChannelToken(baseToken, "", "", false);
-          acc.storedToken = cleanPersonalTok;
-          if (!cfg.__meta__.channelTokensById || typeof cfg.__meta__.channelTokensById !== "object") {
-            cfg.__meta__.channelTokensById = {};
-          }
-          cfg.__meta__.channelTokensById[acc.id] = JSON.parse(JSON.stringify(cleanPersonalTok));
-          if (!cfg.__meta__.oauthTokensByEmail || typeof cfg.__meta__.oauthTokensByEmail !== "object") {
-            cfg.__meta__.oauthTokensByEmail = {};
-          }
-          cfg.__meta__.oauthTokensByEmail[acc.email] = JSON.parse(JSON.stringify(cleanPersonalTok));
-        }
+      if (parsed && isGcp && parsed.availableModels.length > 0) {
         acc.cachedQuota = parsed;
         writeRelayConfig(cfg);
         return acc.cachedQuota;

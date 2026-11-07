@@ -1099,3 +1099,43 @@ button.secondary.small.active-toggle {
   gap: 5px;
   flex-wrap: wrap;
 }
+
+/* 个人通道雙官方配额账本（正式服 Prod / Daily 服）分段切换胶囊 */
+.quota-pool-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 6px;
+  background: var(--bg-base);
+  border: 1px solid var(--border-subtle);
+}
+
+.quota-pool-btn {
+  padding: 2px 8px;
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1.35;
+  border-radius: 4px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.14s ease;
+}
+
+.quota-pool-btn:hover {
+  color: var(--text-main);
+}
+
+.quota-pool-btn.active {
+  background: var(--accent-soft, rgba(59, 130, 246, 0.14));
+  color: var(--accent, #3b82f6);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+
+.personal-pool-models-bar {
+  margin-top: 8px;
+  padding-top: 7px;
+  border-top: 1px dashed var(--border-subtle);
+}

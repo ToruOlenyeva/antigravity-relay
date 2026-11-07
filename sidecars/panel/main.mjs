@@ -433,6 +433,19 @@ async function requestHandler(req, res) {
     }
   }
 
+  // 5e. 切换个人通道当前查看与优先路由的官方配额账本（prod: cloudcode-pa 正式服 / daily: daily-cloudcode-pa Daily 服）
+  if (req.method === "POST" && pathname === "/api/switch-quota-pool") {
+    try {
+      const { pool } = await readJsonBody(req).catch(() => ({}));
+      const result = await lsBridge.switchPersonalQuotaPool(pool || "prod");
+      const snap = await lsBridge.fetchLiveSystemSnapshot(false);
+      broadcastSnapshot(snap);
+      return sendJson(res, 200, { success: true, ...result, snapshot: snap });
+    } catch (err) {
+      return sendJson(res, 500, { success: false, error: err.message });
+    }
+  }
+
   // 6. 修改账号绑定的 GCP Project ID、计费模式、区域或备注
   if (req.method === "POST" && pathname === "/api/update-account") {
     try {
