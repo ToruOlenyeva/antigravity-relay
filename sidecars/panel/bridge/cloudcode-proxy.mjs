@@ -436,7 +436,7 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
           if (targetCompanionPid && !isDowngradedConsumerPoolProject(targetCompanionPid)) {
             bodyClone.project = targetCompanionPid;
           } else {
-            delete bodyClone.project;
+            bodyClone.project = "aicode-consumers";
           }
           cfg.__meta__.lastRoutedChannelId = routedTargetAcc.id;
           cfg.__meta__.lastRoutedPool = targetPool;
@@ -451,7 +451,7 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
             targetEmail: routedTargetAcc.email,
             targetPool,
             targetHostname,
-            targetCompanionProject: targetCompanionPid || "",
+            targetCompanionProject: bodyClone.project || "",
             strippedSignatures: strippedSigCount
           };
           writeRelayConfig(cfg);
@@ -464,8 +464,8 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
         }
         if (activeCompanionPid && !isDowngradedConsumerPoolProject(activeCompanionPid)) {
           bodyClone.project = activeCompanionPid;
-        } else if (isDowngradedConsumerPoolProject(bodyClone.project)) {
-          delete bodyClone.project;
+        } else if (!bodyClone.project) {
+          bodyClone.project = "aicode-consumers";
         }
         cfg.__meta__.lastRoutedChannelId = activePersonalAcc.id;
         cfg.__meta__.lastRoutedPool = targetPool;
