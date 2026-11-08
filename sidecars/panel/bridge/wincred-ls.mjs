@@ -846,7 +846,8 @@ export function buildLoadCodeAssistMetadata(duetProject = "", customVersion = ""
   const meta = {
     ideType: "JETSKI",
     pluginType: "GEMINI",
-    ideVersion: ver
+    ideVersion: ver,
+    platform: "WINDOWS_AMD64"
   };
   const cleanPid = String(duetProject || "").trim();
   if (cleanPid) {

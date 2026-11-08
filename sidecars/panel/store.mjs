@@ -597,6 +597,9 @@ export function writeRelayConfig(cfg) {
                   if (diskAcc.tierCode) memAcc.tierCode = diskAcc.tierCode;
                   if (diskAcc.tierName) memAcc.tierName = diskAcc.tierName;
                 }
+                if (diskAcc.companionProjectId && !memAcc.companionProjectId) {
+                  memAcc.companionProjectId = diskAcc.companionProjectId;
+                }
                 if (diskAcc.cachedQuotaByPool && typeof diskAcc.cachedQuotaByPool === "object") {
                   if (!memAcc.cachedQuotaByPool || typeof memAcc.cachedQuotaByPool !== "object") {
                     memAcc.cachedQuotaByPool = {};

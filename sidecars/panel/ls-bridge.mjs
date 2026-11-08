@@ -640,7 +640,16 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
     if (forceWinCred || detCached?.probedVia !== "cloudcode_http" || !detCached?.quotaGroups?.length || (Date.now() - detCachedAt > 45000)) {
       await probeChannelQuotaSnapshot(detectedChannelId).catch(() => {});
       const freshCfg = readRelayConfig();
-      const probed = freshCfg?.accounts?.[detectedChannelId]?.cachedQuota;
+      const freshAcc = freshCfg?.accounts?.[detectedChannelId];
+      const probed = freshAcc?.cachedQuota;
+      if (freshAcc) {
+        if (freshAcc.companionProjectId) {
+          cfg.accounts[detectedChannelId].companionProjectId = freshAcc.companionProjectId;
+        }
+        if (freshAcc.cachedQuotaByPool) {
+          cfg.accounts[detectedChannelId].cachedQuotaByPool = freshAcc.cachedQuotaByPool;
+        }
+      }
       if (probed) {
         cfg.accounts[detectedChannelId].cachedQuota = probed;
         if (Array.isArray(probed.quotaGroups) && probed.quotaGroups.length > 0) {
@@ -662,8 +671,17 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
     if (forceWinCred || !cfg.accounts[activeChannelId].cachedQuota?.quotaGroups?.length || (Date.now() - cachedAt > 45000)) {
       await probeChannelQuotaSnapshot(activeChannelId).catch(() => {});
       const freshCfg = readRelayConfig();
-      if (freshCfg?.accounts?.[activeChannelId]?.cachedQuota) {
-        cfg.accounts[activeChannelId].cachedQuota = freshCfg.accounts[activeChannelId].cachedQuota;
+      const freshActive = freshCfg?.accounts?.[activeChannelId];
+      if (freshActive) {
+        if (freshActive.companionProjectId) {
+          cfg.accounts[activeChannelId].companionProjectId = freshActive.companionProjectId;
+        }
+        if (freshActive.cachedQuotaByPool) {
+          cfg.accounts[activeChannelId].cachedQuotaByPool = freshActive.cachedQuotaByPool;
+        }
+        if (freshActive.cachedQuota) {
+          cfg.accounts[activeChannelId].cachedQuota = freshActive.cachedQuota;
+        }
       }
     }
   }
