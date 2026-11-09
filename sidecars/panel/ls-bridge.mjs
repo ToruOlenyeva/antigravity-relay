@@ -154,12 +154,13 @@ export function addOrUpdateGcpChannelCard(email, projectId, opts = {}) {
     projectName: projectName || existing?.projectName || cleanPid,
     savedAt: existing?.savedAt || new Date().toISOString(),
     storedToken: baseToken
-      ? {
-          ...baseToken,
-          auth_method: "gcp",
-          project_id: cleanPid,
-          region: gcpBillingMode === "agent_platform" ? gcpLocation : ""
-        }
+      ? buildCleanChannelToken(
+          baseToken,
+          cleanPid,
+          gcpBillingMode === "agent_platform" ? gcpLocation : "",
+          false,
+          gcpBillingMode
+        )
       : (existing?.storedToken || null),
     cachedQuota: gcpBillingMode === "agent_platform"
       ? {
@@ -232,7 +233,7 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
   const us = userStatusResp?.userStatus || {};
   const planStatus = us?.planStatus || {};
   const cascadeConfig = us?.cascadeModelConfigData || {};
-  const clientModelConfigs = cascadeConfig?.clientModelConfigs || [];
+  let clientModelConfigs = cascadeConfig?.clientModelConfigs || [];
 
   const lsEmail = (us.email || "").trim();
   const credEmail = (cred?.id_token_email || "").trim();
@@ -242,7 +243,7 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
 
   const tierIndicatesGcp = /agent\s*platform|enterprise/i.test(rawTierName);
   const credPid = String(cred?.project_id || "").trim();
-  const logPid = String(logInfo.lastProjectId || "").trim();
+  let logPid = String(logInfo.lastProjectId || "").trim();
   const instPinnedId = String(instMeta.activeChannelId || "").trim();
   const instPinnedAcc = instPinnedId ? cfg.accounts?.[instPinnedId] : null;
   const recentlySwitched = Boolean(instMeta.switchedAt && Date.now() - Number(instMeta.switchedAt) < 15000);
@@ -395,6 +396,9 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
         const existingGcp = cfg.accounts[gcpKey];
         const resolvedMode = activeGcpBillingMode || existingGcp?.gcpBillingMode || "agent_platform";
         const resolvedLoc = activeGcpLocation || existingGcp?.gcpLocation || "global";
+        const rawGcpBase = existingGcp?.storedToken?.token?.refresh_token
+          ? existingGcp.storedToken
+          : matchingCred;
         cfg.accounts[gcpKey] = {
           ...existingGcp,
           id: gcpKey,
@@ -407,16 +411,15 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
           gcpLocation: resolvedLoc,
           projectName: existingGcp?.projectName || activeGcpProject,
           savedAt: existingGcp?.savedAt || new Date().toISOString(),
-          storedToken: existingGcp?.storedToken?.token?.refresh_token
-            ? existingGcp.storedToken
-            : (matchingCred
-                ? {
-                    ...matchingCred,
-                    auth_method: "gcp",
-                    project_id: activeGcpProject,
-                    region: resolvedMode === "agent_platform" ? resolvedLoc : ""
-                  }
-                : null)
+          storedToken: rawGcpBase
+            ? buildCleanChannelToken(
+                rawGcpBase,
+                activeGcpProject,
+                resolvedMode === "agent_platform" ? resolvedLoc : "",
+                false,
+                resolvedMode
+              )
+            : null
         };
       }
       if (!cfg.gcpProjects.includes(activeGcpProject)) {
@@ -489,9 +492,51 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
     }
   }
 
-  const lsHasGcpModels = clientModelConfigs.some(
+  let lsHasGcpModels = clientModelConfigs.some(
     (m) => !isModelEntryRestrictedOrSunset(m) && isGcpOnlyModel(m.label || m.modelOrAlias?.model || "")
   );
+  if (
+    ls &&
+    isLiveGcp &&
+    activeGcpProject &&
+    activeGcpBillingMode === "agent_platform" &&
+    (!lsHasGcpModels || Boolean(logInfo.lastUserTier) || Boolean(cred?.user_tier)) &&
+    instMeta.lastValidateProjectPid !== ls.pid
+  ) {
+    instMeta.lastValidateProjectPid = ls.pid;
+    try {
+      if (cred && (cred.user_tier || cred.tier_display_name || cred.auth_method !== "gcp" || cred.project_id !== activeGcpProject)) {
+        const healedTok = buildCleanChannelToken(
+          cred,
+          activeGcpProject,
+          activeGcpLocation || "global",
+          false,
+          "agent_platform"
+        );
+        if (ctx.isIsolatedInstance && ctx.userDataDir) {
+          writeInstanceTokenFile(ctx.userDataDir, healedTok);
+        } else {
+          writeWinCredToken(healedTok);
+        }
+      }
+      await callLsRpc(ls, "ValidateProject", {
+        projectId: activeGcpProject,
+        location: activeGcpLocation || "global"
+      }).catch(() =>
+        callLsRpc(ls, "ValidateProject", { projectId: activeGcpProject }).catch(() => {})
+      );
+      logPid = activeGcpProject;
+      const refreshedStatus = await callLsRpc(ls, "GetUserStatus", {}).catch(() => null);
+      const refreshedModels = refreshedStatus?.userStatus?.cascadeModelConfigData?.clientModelConfigs;
+      if (Array.isArray(refreshedModels) && refreshedModels.length > 0) {
+        userStatusResp = refreshedStatus;
+        clientModelConfigs = refreshedModels;
+        lsHasGcpModels = clientModelConfigs.some(
+          (m) => !isModelEntryRestrictedOrSunset(m) && isGcpOnlyModel(m.label || m.modelOrAlias?.model || "")
+        );
+      }
+    } catch {}
+  }
   const lsModeMatches = Boolean(
     lsEmail &&
     lsEmail === activeEmail &&
@@ -565,7 +610,11 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
     }
   }
   let availableModels = Array.from(groupedModelMap.values());
-  if (availableModels.length === 0 && activeGcpProject && activeGcpBillingMode === "agent_platform") {
+  if (
+    activeGcpProject &&
+    activeGcpBillingMode === "agent_platform" &&
+    (availableModels.length === 0 || !availableModels.some((m) => isGcpOnlyModel(m.label || m.modelId || "")))
+  ) {
     availableModels = AGENT_PLATFORM_DEFAULT_MODELS.map((m) => ({ ...m, variantIds: [...m.variantIds] }));
   }
 
@@ -608,7 +657,7 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
     ? pinnedChannelId
     : detectedChannelId;
 
-  if (availableModels.length > 0 && effectiveClientModels.length > 0 && activeGcpProject) {
+  if (availableModels.length > 0 && effectiveClientModels.length > 0 && activeGcpProject && lsHasGcpModels) {
     if (!cfg.__meta__.liveTierModels || typeof cfg.__meta__.liveTierModels !== "object") {
       cfg.__meta__.liveTierModels = {};
     }
@@ -792,7 +841,7 @@ export async function switchBillingProjectInstant(projectId, opts = {}) {
   const location = cleanId ? (gcpBillingMode === "agent_platform" ? gcpLocation : "") : "";
 
   if (cred) {
-    const cleanedCred = buildCleanChannelToken(cred, cleanId, location);
+    const cleanedCred = buildCleanChannelToken(cred, cleanId, location, false, gcpBillingMode);
     if (ctx.isIsolatedInstance && ctx.userDataDir) {
       writeInstanceTokenFile(ctx.userDataDir, cleanedCred);
     } else {
@@ -832,13 +881,13 @@ export async function switchBillingProjectInstant(projectId, opts = {}) {
       projectName: existing?.projectName || cleanId,
       savedAt: existing?.savedAt || new Date().toISOString(),
       storedToken: baseToken
-        ? buildCleanChannelToken(baseToken, cleanId, location)
+        ? buildCleanChannelToken(baseToken, cleanId, location, false, gcpBillingMode)
         : existing?.storedToken || null
     };
   }
   writeRelayConfig(cfg);
 
-  if (ls) {
+  if (ls && cleanId) {
     try {
       await callLsRpc(ls, "ValidateProject", { projectId: cleanId, location });
     } catch {
@@ -929,7 +978,7 @@ export async function switchActiveGoogleAccount(accountId, opts = {}) {
   const directUpstreamUrl = "https://cloudcode-pa.googleapis.com";
   const targetUrl = !targetProject ? localProxyUrl : directUpstreamUrl;
 
-  const tokenToWrite = buildCleanChannelToken(baseToken, targetProject, targetLocation, true);
+  const tokenToWrite = buildCleanChannelToken(baseToken, targetProject, targetLocation, true, targetBillingMode);
   target.storedToken = tokenToWrite;
   if (!cfg.__meta__.channelTokensById || typeof cfg.__meta__.channelTokensById !== "object") {
     cfg.__meta__.channelTokensById = {};

@@ -672,8 +672,15 @@ export function sanitizeAllIsolatedInstancesAppStorage() {
         );
         const chTok = cfg?.__meta__?.channelTokensById?.[chId] || accObj?.storedToken;
         if (chTok) {
-          writeInstanceTokenFile(instDir, chTok);
-          syncInstanceStateVscdb(instDir, chTok, desc.email, desc.gcpProjectId || "");
+          const cleanTok = buildCleanChannelToken(
+            chTok,
+            desc.gcpProjectId || "",
+            (accObj?.gcpBillingMode || "agent_platform") === "agent_platform" ? (accObj?.gcpLocation || "global") : "",
+            false,
+            accObj?.gcpBillingMode || "agent_platform"
+          );
+          writeInstanceTokenFile(instDir, cleanTok);
+          syncInstanceStateVscdb(instDir, cleanTok, desc.email, desc.gcpProjectId || "");
         } else {
           ensureInstanceIsolatedHome(instDir);
         }
@@ -698,7 +705,13 @@ export function normalizeIsoExpiry(rawExpiry) {
   return new Date(Date.now() + 3500 * 1000).toISOString();
 }
 
-export function buildCleanChannelToken(baseToken, targetProject = "", targetLocation = "", forceNewWriterId = false) {
+export function buildCleanChannelToken(
+  baseToken,
+  targetProject = "",
+  targetLocation = "",
+  forceNewWriterId = false,
+  gcpBillingMode = "agent_platform"
+) {
   if (!baseToken || typeof baseToken !== "object") return null;
   const cleanPid = String(targetProject || "").trim();
   const cleanLoc = String(targetLocation || "").trim();
@@ -718,11 +731,27 @@ export function buildCleanChannelToken(baseToken, targetProject = "", targetLoca
   if (cleanPid) {
     next.auth_method = "gcp";
     next.project_id = cleanPid;
-    next.region = cleanLoc;
+    next.region = cleanLoc || "global";
+    if (gcpBillingMode === "gemini_enterprise") {
+      next.user_tier =
+        next.user_tier && next.user_tier !== "agy-business-paygo-tier"
+          ? next.user_tier
+          : "enterprise";
+      next.tier_display_name = "Gemini Enterprise";
+    } else {
+      delete next.user_tier;
+      delete next.userTier;
+      delete next.tier_display_name;
+      delete next.tierDisplayName;
+    }
   } else {
     next.auth_method = "consumer";
     delete next.project_id;
     delete next.region;
+    delete next.user_tier;
+    delete next.userTier;
+    delete next.tier_display_name;
+    delete next.tierDisplayName;
   }
   return next;
 }

@@ -376,6 +376,9 @@ export function sanitizeCachedQuotaModels(cachedQuota, isGcp, _liveTierTemplate 
     if (!isGcp && (isGcpOnlyModel(baseLabel) || isGcpOnlyModel(rawLabel))) {
       continue;
     }
+    if (isGcp && /4[._-\s]*6|gpt-oss/i.test(`${baseLabel} ${rawLabel}`)) {
+      continue;
+    }
     if (!isGcp && !hasArgonAccess && /argon/i.test(baseLabel)) {
       continue;
     }
@@ -504,6 +507,17 @@ export function normalizePersonalQuotaPool(rawPool) {
 export function normalizeAccountChannels(cfg) {
   if (!cfg.accounts || typeof cfg.accounts !== "object") cfg.accounts = {};
   if (!Array.isArray(cfg.gcpProjects)) cfg.gcpProjects = [];
+  if (cfg.__meta__?.liveTierModels?.gcp && Array.isArray(cfg.__meta__.liveTierModels.gcp)) {
+    const gcpTpl = cfg.__meta__.liveTierModels.gcp;
+    const hasGcpExclusive = gcpTpl.some((m) => isGcpOnlyModel(m?.label || m?.modelId || ""));
+    if (!hasGcpExclusive || gcpTpl.length < 6) {
+      cfg.__meta__.liveTierModels.gcp = AGENT_PLATFORM_DEFAULT_MODELS.map((m) => ({
+        label: m.label,
+        modelId: m.modelId,
+        variantIds: [...m.variantIds]
+      }));
+    }
+  }
   const activePool = normalizePersonalQuotaPool(cfg?.routing?.personalQuotaPool || cfg?.__meta__?.personalQuotaPool || "prod");
   const deletedSet = new Set(Array.isArray(cfg.__meta__?.deletedChannelIds) ? cfg.__meta__.deletedChannelIds : []);
   const nextAccounts = {};
@@ -578,10 +592,19 @@ export function normalizeAccountChannels(cfg) {
       const resolvedPersonalTierName = cachedQuota?.tierName || cleanPersonalTier;
       if (isGcp && pid && gcpBillingMode === "agent_platform") {
         const curModels = cachedQuota?.availableModels || [];
-        if (curModels.length < 6) {
-          const baseGcpModels = liveTierTemplate.length >= 6 ? liveTierTemplate : AGENT_PLATFORM_DEFAULT_MODELS;
+        const hasValidGcpModels =
+          curModels.length >= 6 &&
+          curModels.some((m) => isGcpOnlyModel(m?.label || m?.modelId || ""));
+        if (!hasValidGcpModels) {
+          const baseGcpModels =
+            liveTierTemplate.length >= 6 && liveTierTemplate.some((m) => isGcpOnlyModel(m?.label || m?.modelId || ""))
+              ? liveTierTemplate
+              : AGENT_PLATFORM_DEFAULT_MODELS;
           cachedQuota = {
             tierCode: "GCP",
+            tierName: cleanGcpTier,
+            hasArgonAccess: true,
+            isPaidProOrUltra: false,
             isGcpUnlimited: true,
             quotaGroups: [],
             availableModels: baseGcpModels.map((m) => ({
@@ -606,7 +629,8 @@ export function normalizeAccountChannels(cfg) {
             JSON.parse(JSON.stringify(rawChannelTok)),
             isGcp && pid ? pid : "",
             gcpBillingMode === "agent_platform" ? gcpLocation : "",
-            false
+            false,
+            gcpBillingMode
           )
         : null;
       if (!cfg.__meta__.channelTokensById || typeof cfg.__meta__.channelTokensById !== "object") {
@@ -647,7 +671,9 @@ export function normalizeAccountChannels(cfg) {
           gcpLocation: "global",
           projectName: item.projectName || oldPid,
           savedAt: item.savedAt || new Date().toISOString(),
-          storedToken: item.storedToken ? { ...item.storedToken, auth_method: "gcp", project_id: oldPid, region: "global" } : null,
+          storedToken: item.storedToken
+            ? buildCleanChannelToken(item.storedToken, oldPid, "global", false, "agent_platform")
+            : null,
           cachedQuota: {
             isGcpUnlimited: true,
             quotaGroups: [],

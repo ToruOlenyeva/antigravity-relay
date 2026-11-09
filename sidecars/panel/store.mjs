@@ -140,7 +140,7 @@ export function writeInstanceDescriptor(userDataDir, data) {
 }
 
 export function resolveCurrentInstanceContext(force = false) {
-  if (cachedInstanceCtx && cachedInstanceCtxConfirmed) {
+  if (!force && cachedInstanceCtx && cachedInstanceCtxConfirmed) {
     if (cachedInstanceCtx.isIsolatedInstance && cachedInstanceCtx.userDataDir) {
       cachedInstanceCtx.descriptor = readInstanceDescriptor(cachedInstanceCtx.userDataDir);
     }

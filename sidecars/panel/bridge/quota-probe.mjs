@@ -762,6 +762,41 @@ export async function probeChannelQuotaSnapshot(channelId) {
       }
     }
 
+    if (isGcp && gcpBillingMode === "agent_platform") {
+      if (!accessToken && refreshToken) {
+        try {
+          const refreshed = await refreshOAuthAccessToken(refreshToken);
+          if (refreshed && refreshed.access_token) {
+            sawValidToken = true;
+            accessToken = refreshed.access_token;
+            baseToken.token.access_token = accessToken;
+            baseToken.token.refreshedForRt = refreshToken;
+            baseToken.token.expiry = new Date(Date.now() + (refreshed.expires_in || 3599) * 1000).toISOString();
+          }
+        } catch (err) {
+          if (err && err.isAuthExpired) sawAuthExpired = true;
+        }
+      }
+      if (accessToken) {
+        sawValidToken = true;
+        const cleanGcpTok = buildCleanChannelToken(
+          baseToken,
+          gcpPid,
+          acc.gcpLocation || "global",
+          false,
+          "agent_platform"
+        );
+        acc.authExpired = false;
+        acc.storedToken = cleanGcpTok;
+        if (!cfg.__meta__.channelTokensById || typeof cfg.__meta__.channelTokensById !== "object") {
+          cfg.__meta__.channelTokensById = {};
+        }
+        cfg.__meta__.channelTokensById[acc.id] = JSON.parse(JSON.stringify(cleanGcpTok));
+        break;
+      }
+      continue;
+    }
+
     let probeRes = await tryProbeWithToken(accessToken);
     if ((probeRes.modelsResp.status === 401 || probeRes.modelsResp.status === 403 || !probeRes.modelsResp.data) && refreshToken) {
       try {
@@ -867,13 +902,21 @@ export async function probeChannelQuotaSnapshot(channelId) {
 
   if (isGcp && gcpBillingMode === "agent_platform") {
     const existingModels = acc.cachedQuota?.availableModels || [];
-    const baseGcpModels = liveTierTemplate.length >= 6 ? liveTierTemplate : AGENT_PLATFORM_DEFAULT_MODELS;
+    const hasValidGcpModels =
+      existingModels.length >= 6 &&
+      existingModels.some((m) => isGcpOnlyModel(m?.label || m?.modelId || ""));
+    const baseGcpModels =
+      liveTierTemplate.length >= 6 && liveTierTemplate.some((m) => isGcpOnlyModel(m?.label || m?.modelId || ""))
+        ? liveTierTemplate
+        : AGENT_PLATFORM_DEFAULT_MODELS;
     acc.cachedQuota = {
       tierCode: "GCP",
       tierName: acc.tierName || "Agent Platform",
+      hasArgonAccess: true,
+      isPaidProOrUltra: false,
       isGcpUnlimited: true,
       quotaGroups: [],
-      availableModels: existingModels.length >= 6
+      availableModels: hasValidGcpModels
         ? sanitizeCachedQuotaModels(acc.cachedQuota, true, liveTierTemplate).availableModels
         : baseGcpModels.map((m) => ({
             label: m.label,

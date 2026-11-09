@@ -492,7 +492,7 @@ export async function restartCurrentAntigravityInstance(ctx = null, opts = {}) {
   try {
     const escapedScript = scriptPath.replace(/'/g, "''");
     const escapedCfg = configPath.replace(/'/g, "''");
-    const wmiCmd = `$cmdLine = "powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File \`"${escapedScript}\`" -ConfigPath \`"${escapedCfg}\`""; Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $cmdLine } | Out-Null`;
+    const wmiCmd = `$startup = New-CimInstance -CimClass (Get-CimClass Win32_ProcessStartup) -ClientOnly; $startup.ShowWindow = [uint16]0; $cmdLine = "powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File \`"${escapedScript}\`" -ConfigPath \`"${escapedCfg}\`""; Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $cmdLine; ProcessStartupInformation = $startup } | Out-Null`;
     execFileSync(
       "powershell.exe",
       ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", wmiCmd],
@@ -1100,7 +1100,7 @@ export async function launchIsolatedAntigravityInstance(accountId) {
     } catch {}
   }
 
-  const tokenToWrite = buildCleanChannelToken(clonedBase, targetProject, targetLocation, true);
+  const tokenToWrite = buildCleanChannelToken(clonedBase, targetProject, targetLocation, true, targetBillingMode);
   target.storedToken = tokenToWrite;
   if (!cfg.__meta__.channelTokensById || typeof cfg.__meta__.channelTokensById !== "object") {
     cfg.__meta__.channelTokensById = {};
@@ -1199,19 +1199,38 @@ export async function launchIsolatedAntigravityInstance(accountId) {
   const userDataArg = `--user-data-dir=${instanceUserDataDir}`;
   let launchedPid = 0;
   try {
+    const geminiDir = path.join(HOME_DIR, ".gemini");
+    fs.mkdirSync(geminiDir, { recursive: true });
+    const launchScriptPath = path.join(geminiDir, `agy-relay-launch-${safeFolder}.ps1`);
     const psExe = exePath.replace(/'/g, "''");
     const psDir = path.dirname(exePath).replace(/'/g, "''");
     const psDataArg = userDataArg.replace(/'/g, "''");
     const psIsoHome = isoHomeDir.replace(/'/g, "''");
     const psRealHome = HOME_DIR.replace(/'/g, "''");
-    const psCmd = `$env:USERPROFILE = '${psIsoHome}'; $env:HOME = '${psIsoHome}'; $env:SSH_TTY = '1'; $env:AGY_REAL_USERPROFILE = '${psRealHome}'; $p = Start-Process -FilePath '${psExe}' -WorkingDirectory '${psDir}' -ArgumentList @('${psDataArg}') -WindowStyle Normal -PassThru; if ($p) { Write-Output $p.Id }`;
+    const psSafeId = safeFolder.replace(/'/g, "''");
+    const psDataDir = instanceUserDataDir.replace(/'/g, "''");
+    const launchPsContent = [
+      "$ErrorActionPreference = 'SilentlyContinue'",
+      `$env:USERPROFILE = '${psIsoHome}'`,
+      `$env:HOME = '${psIsoHome}'`,
+      "$env:SSH_TTY = '1'",
+      `$env:AGY_REAL_USERPROFILE = '${psRealHome}'`,
+      `$env:AGY_RELAY_INSTANCE_ID = '${psSafeId}'`,
+      `$env:AGY_RELAY_INSTANCE_USER_DATA_DIR = '${psDataDir}'`,
+      "$env:PLUGIN_SWITCHER_DISABLE_8088 = '1'",
+      "Remove-Item Env:\\ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue",
+      `Start-Process -FilePath '${psExe}' -WorkingDirectory '${psDir}' -ArgumentList @('${psDataArg}') -WindowStyle Normal`
+    ].join("\r\n");
+    fs.writeFileSync(launchScriptPath, launchPsContent, "utf8");
+    const escapedLaunchScript = launchScriptPath.replace(/'/g, "''");
+    const wmiLaunchCmd = `$startup = New-CimInstance -CimClass (Get-CimClass Win32_ProcessStartup) -ClientOnly; $startup.ShowWindow = [uint16]0; $cmdLine = "powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File \`"${escapedLaunchScript}\`""; $res = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $cmdLine; ProcessStartupInformation = $startup }; if ($res -and $res.ProcessId) { Write-Output $res.ProcessId }`;
     const out = execFileSync(
       "powershell.exe",
-      ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", psCmd],
+      ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", wmiLaunchCmd],
       {
         env: cleanEnv,
         encoding: "utf8",
-        timeout: 8000,
+        timeout: 6000,
         windowsHide: true
       }
     );
@@ -1385,7 +1404,13 @@ export function startIsolatedOAuthFlow(optionsOrCallback = {}, maybeCallback = n
             if (targetChannelType === "gcp" && !existingIsGcp && existingAcc.storedToken?.token?.refresh_token && !existingAcc.authExpired) continue;
             existingAcc.authExpired = false;
             existingAcc.storedToken = existingAcc.gcpProjectId
-              ? { ...storedToken, auth_method: "gcp", project_id: existingAcc.gcpProjectId, region: existingAcc.gcpBillingMode === "agent_platform" ? (existingAcc.gcpLocation || "global") : "" }
+              ? buildCleanChannelToken(
+                  storedToken,
+                  existingAcc.gcpProjectId,
+                  existingAcc.gcpBillingMode === "agent_platform" ? (existingAcc.gcpLocation || "global") : "",
+                  false,
+                  existingAcc.gcpBillingMode || "agent_platform"
+                )
               : storedToken;
           }
         }
@@ -1403,7 +1428,13 @@ export function startIsolatedOAuthFlow(optionsOrCallback = {}, maybeCallback = n
               authExpired: false,
               gcpProjectId: targetGcpProjectId, gcpBillingMode: targetGcpBillingMode, gcpLocation: targetGcpLocation,
               projectName: targetGcpProjectId, savedAt: new Date().toISOString(),
-              storedToken: { ...storedToken, auth_method: "gcp", project_id: targetGcpProjectId, region: targetGcpBillingMode === "agent_platform" ? targetGcpLocation : "" },
+              storedToken: buildCleanChannelToken(
+                storedToken,
+                targetGcpProjectId,
+                targetGcpBillingMode === "agent_platform" ? targetGcpLocation : "",
+                true,
+                targetGcpBillingMode
+              ),
               cachedQuota: targetGcpBillingMode === "agent_platform"
                 ? { isGcpUnlimited: true, quotaGroups: [], availableModels: AGENT_PLATFORM_DEFAULT_MODELS.map((m) => ({ ...m, variantIds: [...m.variantIds] })), updatedAt: Date.now() }
                 : { isGcpUnlimited: true, quotaGroups: [], availableModels: [], updatedAt: Date.now() }
