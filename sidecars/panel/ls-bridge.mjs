@@ -906,8 +906,22 @@ export async function switchActiveGoogleAccount(accountId, opts = {}) {
         baseToken.token.access_token = refreshed.access_token;
         baseToken.token.refreshedForRt = rt;
         baseToken.token.expiry = newExpiry;
+        target.authExpired = false;
       }
-    } catch {}
+    } catch (err) {
+      if (err && err.isAuthExpired) {
+        target.authExpired = true;
+        writeRelayConfig(cfg);
+        startIsolatedOAuthFlow({
+          channelType: targetProject ? "gcp" : "personal",
+          gcpProjectId: targetProject,
+          gcpBillingMode: targetBillingMode || "agent_platform",
+          gcpLocation: targetLocation || "global",
+          loginHint: target.email
+        }).catch(() => {});
+        throw new Error(`账号 ${target.email} 授权凭据已过期，已自动在浏览器拉起该账号重新登录，请完成授权后再点击启用`);
+      }
+    }
   }
 
   const currentLs = discoverLanguageServer(false);

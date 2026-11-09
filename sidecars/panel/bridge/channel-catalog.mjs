@@ -536,7 +536,7 @@ export function normalizeAccountChannels(cfg) {
         item.cachedQuota || null,
         Boolean(isGcp && pid),
         liveTierTemplate,
-        cleanPersonalTier,
+        isGcp && pid ? cleanGcpTier : cleanPersonalTier,
         item.tierCode || ""
       );
       let cachedQuotaByPool = undefined;
@@ -696,6 +696,10 @@ export function normalizeAccountChannels(cfg) {
     }
   }
 
+  delete cfg.activeChannelId;
+  delete cfg.activeEmail;
+  delete cfg.activeMode;
+  delete cfg.activeProjectId;
   cfg.accounts = nextAccounts;
 }
 

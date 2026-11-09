@@ -639,10 +639,34 @@ function buildAccountCardElement(acc, activeEmail, activeGcp) {
   emailEl.textContent = acc.email || acc.id;
   titleWrap.appendChild(emailEl);
 
+  if (acc.authExpired) {
+    const expBadge = document.createElement("span");
+    expBadge.className = "sig-status-badge mismatch";
+    expBadge.style.marginLeft = "4px";
+    expBadge.textContent = t.authExpiredBadge || "凭据已过期";
+    titleWrap.appendChild(expBadge);
+  }
+
   top.appendChild(titleWrap);
 
   const rightBadges = document.createElement("div");
   rightBadges.className = "btn-group";
+
+  if (acc.authExpired) {
+    const reloginBtn = document.createElement("button");
+    reloginBtn.className = "small";
+    reloginBtn.textContent = t.btnReloginAccount || "重新登录";
+    reloginBtn.onclick = () => {
+      startIsolatedBrowserLogin({
+        channelType: isGcpChannel ? "gcp" : "personal",
+        gcpProjectId: accPid,
+        gcpBillingMode: acc.gcpBillingMode || "agent_platform",
+        gcpLocation: acc.gcpLocation || "global",
+        loginHint: acc.email
+      });
+    };
+    rightBadges.appendChild(reloginBtn);
+  }
 
   if (isGcpChannel) {
     const editBtn = document.createElement("button");

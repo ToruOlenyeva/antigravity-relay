@@ -26,13 +26,13 @@
 
 ## ✨ 核心特性
 
-- <b>全等级精准识别与配额透视</b>：基于底层 Language Server 与 CloudCode 原生探针，精准区分 <code>Free</code>（无会员）、<code>Plus</code>（含渠道赠送版）、<code>Pro</code>、<code>Ultra</code> 与 <code>GCP</code> 五大通道等级，1:1 还原 <code>Gemini 模型</code>、<code>Claude 和 GPT 模型</code> 及 <code>Gemini 4 Argon</code> 独立周限额三大配额池与重置倒计时。
-- <b>个人通道免重载无感路由</b>：内置本地透明反向代理（默认 <code>8091</code> 端口，支持 <code>8091..8095</code> 及随机端口自动递增防冲突回退），按模型家族实时替换目标个人账号 <code>Bearer Token</code>，对话全程 0 界面重载、0 中断。
-- <b>按重置时间智能自动轮询</b>：每个模型支持设置「跟随当前通道」、「指定个人账号通道」或「自动轮询有余额通道」（优先消耗最早重置且有剩余额度的个人账号，并在主账号 <code>0%</code> 时自动解除前端模型灰显锁死）。
-- <b>双层思维签名识别与双模式无损剥离</b>：实时识别并展示当前会话及历史会话的签名归属徽章（<code>GCP</code> / <code>个人</code> / <code>无签名</code>），卡片右上角提供「仅清除当前会话签名」与「全项目扫描清除跨通道不匹配签名」双模式一键清理，结合透明代理流式剥离彻底根除 <code>Invalid thought signature (400)</code> 报错。
+- <b>全等级精准识别与个人双服独立账本透视</b>：基于动态客户端版本握手与 CloudCode 原生探针，精准区分 <code>Free</code>（无会员）、<code>Plus</code>（含渠道赠送版）、<code>Pro</code>、<code>Ultra</code> 与 <code>GCP</code> 五大通道等级，支持个人账号 <code>正式服 (Prod)</code> 与 <code>Daily 服</code> 两套独立配额账本一键切换，1:1 还原 <code>Gemini 模型</code>、<code>Claude 和 GPT 模型</code> 及 <code>Gemini 4 Argon</code> 周限额/5 小时限额与重置倒计时。
+- <b>个人通道免重载无感路由</b>：内置本地透明反向代理（默认 <code>8091</code> 端口，支持 <code>8091..8095</code> 及随机端口自动递增防冲突回退），按模型家族与目标账本（<code>Prod / Daily</code>）实时替换目标个人账号 <code>Bearer Token</code> 与上游网关，对话全程 0 界面重载、0 中断。
+- <b>双层重置时间智能自动轮询</b>：每个模型支持设置「跟随当前通道」、「指定个人账号通道」或「自动轮询有余额通道」（跨全个人账号 <code>Prod / Daily</code> 双池执行「先周限额重置时间、再 5 小时限额重置时间」两层排序，同窗口优先锁定当前激活账号，并在主账号 <code>0%</code> 时自动解除前端模型灰显锁死）。
+- <b>双层思维签名识别、WAL 截断与无损剥离</b>：实时识别并展示当前会话及历史会话的签名归属徽章（<code>GCP</code> / <code>个人</code> / <code>无签名</code>），卡片右上角提供「仅清除当前会话签名」与「全项目扫描清除跨通道不匹配签名」双模式清理（内置 SQLite <code>readOk</code> 锁守卫与 <code>wal_checkpoint(TRUNCATE)</code> 防签名反弹），结合跨号代理自动剥离彻底根除 <code>Invalid thought signature (400)</code> 报错。
 - <b>会话统计与项目汇总一键切换</b>：直读官方 <code>transcript.jsonl</code> 原生 Token 账单，支持在卡片内一键按钮切换「当前会话统计」（支持下拉切换项目内任意历史会话）与「项目汇总」（统计当前项目全部会话累计用词、缓存命中率与按模型细分用量）。
 - <b>独立多开实例、四重登录态同步与双通道互锁</b>：支持 <code>+ 多开实例</code> 一键拉起独立用户目录的个人或 <code>GCP</code> 实例（当个人与 <code>GCP</code> 双通道实例同时在场时自动互锁防串扰）；跨通道切换内置 Antigravity 2.29+ 四重登录态同步（<code>WinCred</code> + <code>state.vscdb</code> Protobuf Sentinel + <code>app_storage.json</code> + <code>auth_method</code> 隔离）与单实例无感自重启。
-- <b>旁路零打断官方 OAuth 登录与非侵入式 GCP 扫描</b>：通过独立本地随机端口拉起官方 Google OAuth 2.0 + PKCE S256 授权流程，支持免重登直接派生 <code>GCP</code> 通道并按需扫描点选云项目编号，同时监听宿主动态端口与固定 <code>8089</code> 端口。
+- <b>旁路零打断 OAuth 登录与凭据过期防切崩重登</b>：通过独立本地随机端口拉起官方 Google OAuth 2.0 + PKCE S256 授权流程；当存量账号 <code>refresh_token</code> 过期失效（<code>invalid_grant</code>）时，自动从轮询池隔离、在点击「启用」时拦截失效凭据写入并自动拉起预填该邮箱的浏览器重登，同时在卡片上提供「凭据过期」告警与一键「重新登录」按钮。
 
 ---
 
@@ -87,6 +87,7 @@ antigravity-relay/
 │   └── proto-scrub.cjs          # Protobuf 跨通道思考签名离线剥离引擎
 ├── sidecars/
 │   └── panel/                   # 原生免构建前后端分离 Sidecar 面板
+│       ├── bridge/              # 后端高内聚业务子模块目录
 │       ├── app.js               # 前端核心交互、自定义下拉与状态同步引擎
 │       ├── i18n.js              # 前端中英双语严格隔离词典
 │       ├── index.html           # 前端响应式骨架页面
@@ -95,7 +96,9 @@ antigravity-relay/
 │       ├── preload.js           # 宿主预加载桥接脚本
 │       ├── sidecar.json         # Sidecar 容器清单契约
 │       ├── store.mjs            # 配置原子化落盘与历史脏数据清洗引擎
-│       └── styles.css           # 纯扁平深浅色自适应主题样式表
+│       ├── styles.css           # 纯扁平深浅色自适应主题样式表
+│       ├── ui-channels-drawers.js # 通道列表、一键重登与操作抽屉视图模块
+│       └── ui-session-quota.js  # 会话统计、项目汇总与双服配额环视图模块
 ├── agy-relay-config.example.json # 脱敏示例配置档案
 ├── hooks.json                   # Antigravity 生命周期 Hook 契约
 ├── open-panel.bat               # 独立小窗模式快速启动脚本

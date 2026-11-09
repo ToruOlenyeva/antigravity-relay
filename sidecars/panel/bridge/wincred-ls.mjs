@@ -1273,7 +1273,16 @@ function refreshOAuthAccessTokenWithClient(refreshToken, clientId, clientSecret)
         res.on("end", () => {
           const text = Buffer.concat(chunks).toString("utf8");
           if (res.statusCode !== 200) {
-            return reject(new Error(`Refresh token HTTP ${res.statusCode}`));
+            const err = new Error(`Refresh token HTTP ${res.statusCode}: ${text.slice(0, 180)}`);
+            if (
+              res.statusCode === 400 ||
+              res.statusCode === 401
+            ) {
+              if (/invalid_grant|expired\s+or\s+revoked|token_expired|invalid_rapt/i.test(text)) {
+                err.isAuthExpired = true;
+              }
+            }
+            return reject(err);
           }
           try {
             resolve(JSON.parse(text));

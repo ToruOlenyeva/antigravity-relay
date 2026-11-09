@@ -359,7 +359,7 @@ export async function restartCurrentAntigravityInstance(ctx = null, opts = {}) {
     "$cfgRaw = [System.IO.File]::ReadAllText($ConfigPath, $utf8NoBom)",
     "$cfg = $cfgRaw | ConvertFrom-Json",
     "Start-Sleep -Milliseconds 650",
-    "$allProcs = Get-CimInstance Win32_Process -Filter \"Name = 'Antigravity.exe' OR Name = 'language_server_windows_x64.exe'\"",
+    "$allProcs = Get-CimInstance Win32_Process -Filter \"Name = 'Antigravity.exe' OR Name LIKE 'language_server%'\"",
     "$targetPids = New-Object System.Collections.Generic.HashSet[int]",
     "if ($cfg.lsPid -gt 0) { [void]$targetPids.Add([int]$cfg.lsPid) }",
     "if ($cfg.isIsolated -and $cfg.instanceId) {",
@@ -1381,8 +1381,9 @@ export function startIsolatedOAuthFlow(optionsOrCallback = {}, maybeCallback = n
         for (const existingAcc of Object.values(cfg.accounts || {})) {
           if (existingAcc.email === email) {
             const existingIsGcp = Boolean(existingAcc.gcpProjectId || existingAcc.channelType === "gcp");
-            if (targetChannelType === "personal" && existingIsGcp && existingAcc.storedToken?.token?.refresh_token) continue;
-            if (targetChannelType === "gcp" && !existingIsGcp && existingAcc.storedToken?.token?.refresh_token) continue;
+            if (targetChannelType === "personal" && existingIsGcp && existingAcc.storedToken?.token?.refresh_token && !existingAcc.authExpired) continue;
+            if (targetChannelType === "gcp" && !existingIsGcp && existingAcc.storedToken?.token?.refresh_token && !existingAcc.authExpired) continue;
+            existingAcc.authExpired = false;
             existingAcc.storedToken = existingAcc.gcpProjectId
               ? { ...storedToken, auth_method: "gcp", project_id: existingAcc.gcpProjectId, region: existingAcc.gcpBillingMode === "agent_platform" ? (existingAcc.gcpLocation || "global") : "" }
               : storedToken;
@@ -1399,6 +1400,7 @@ export function startIsolatedOAuthFlow(optionsOrCallback = {}, maybeCallback = n
             if (!cfg.gcpProjects.includes(targetGcpProjectId)) cfg.gcpProjects.push(targetGcpProjectId);
             cfg.accounts[gcpKey] = {
               id: gcpKey, alias: `${email} (${targetGcpProjectId})`, email, channelType: "gcp", tierName,
+              authExpired: false,
               gcpProjectId: targetGcpProjectId, gcpBillingMode: targetGcpBillingMode, gcpLocation: targetGcpLocation,
               projectName: targetGcpProjectId, savedAt: new Date().toISOString(),
               storedToken: { ...storedToken, auth_method: "gcp", project_id: targetGcpProjectId, region: targetGcpBillingMode === "agent_platform" ? targetGcpLocation : "" },
@@ -1420,7 +1422,9 @@ export function startIsolatedOAuthFlow(optionsOrCallback = {}, maybeCallback = n
           cfg.__meta__.deletedChannelIds = cfg.__meta__.deletedChannelIds.filter((id) => id !== personalKey);
         }
         cfg.accounts[personalKey] = {
+          ...(cfg.accounts[personalKey] || {}),
           id: personalKey, alias: email, email, channelType: "personal",
+          authExpired: false,
           tierName: cfg.accounts[personalKey]?.tierName || "Google AI Pro",
           gcpProjectId: "", savedAt: new Date().toISOString(), storedToken
         };

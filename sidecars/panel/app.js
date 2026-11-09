@@ -896,13 +896,16 @@ async function handleManualScrubSignatures(mode = "mismatched") {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         mode: mode === "current" ? "current" : "mismatched",
-        conversationId: targetConvId
+        conversationId: targetConvId,
+        activeIsGcp: Boolean(state.activeAccount?.gcpProjectId)
       })
     });
     const data = await res.json();
     if (data.snapshot) {
       state = data.snapshot;
       renderAll();
+    } else {
+      await loadSystemStatus(true, true);
     }
     const t = I18N[currentLang];
     const toastPrefix = mode === "current"

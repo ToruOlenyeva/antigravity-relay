@@ -40,7 +40,9 @@ antigravity-relay/
 │       ├── preload.js           # 宿主预加载脚本
 │       ├── sidecar.json         # Antigravity Sidecar 容器元数据契约
 │       ├── store.mjs            # 配置原子化落盘与脏模型自动清洗
-│       └── styles.css           # 前端纯扁平自适应主题样式表
+│       ├── styles.css           # 前端纯扁平自适应主题样式表
+│       ├── ui-channels-drawers.js # 通道列表、一键重登与操作抽屉视图模块
+│       └── ui-session-quota.js  # 会话统计、项目汇总与双服配额环视图模块
 ├── agy-relay-config.example.json # 脱敏示例配置档案
 ├── hooks.json                   # Antigravity Hook 配置文件
 ├── open-panel.bat               # 独立小窗快速启动脚本
@@ -85,7 +87,7 @@ antigravity-relay/
 ### 2.2 五大通道等级（`Free` / `Plus` / `Pro` / `Ultra` / `GCP`）与官方纯动态模型白名单
 系统通过 `detectPersonalAccountTier` 与 `parseCloudCodeModelsAndQuota` 严格按照 Google 官方下发的元数据实时判定通道等级与可用模型（零静态硬编码模板）：
 1. <b>`agentModelSorts` 推荐白名单与 `Notice` 过渡期模型保留</b>：个人通道向 `/v1internal:fetchAvailableModels` 传入 `{}` 空载荷，提取官方 `agentModelSorts[0].groups[].modelIds` 白名单并过滤存在 `quotaInfo` 且非 `disabled` / `Unavailable` 的模型；对带有 `tagTitle: "Notice"`（如 Jio 渠道合作版 Pro 在过渡期内仍开放的 `Claude Sonnet 4.6 (Thinking)`、`Claude Opus 4.6 (Thinking)`、`GPT-OSS 120B (Medium)`）的模型完整保留，直至官方切换为 `Unavailable` 时自动下线。
-2. <b>多 OAuth Client 轮询池与按 `refresh_token` 严格隔离同步</b>：`wincred-ls.mjs` 内置多组官方 OAuth Client 轮询刷新池，且每次刷新获得的 `access_token` 仅同步至持有相同 `refresh_token` 的通道卡片，彻底杜绝同邮箱 `#personal` 与 `#gcp` 令牌交叉覆盖。
+2. <b>多 OAuth Client 轮询池、按 `refresh_token` 严格隔离与凭据过期防切崩重登</b>：`wincred-ls.mjs` 内置多组官方 OAuth Client 轮询刷新池，每次刷新获得的 `access_token` 仅同步至持有相同 `refresh_token` 的通道卡片（杜绝同邮箱 `#personal` 与 `#gcp` 令牌交叉覆盖）；当刷新返回 `HTTP 400/401 invalid_grant`（凭据过期或吊销）时自动标记 `isAuthExpired` 与 `acc.authExpired = true`，自动从 `auto_poll` 轮询池剔除，并在用户点击「启用」时拦截失效凭据写入、自动拉起预填该邮箱（`loginHint`）的浏览器重登流程，同时在卡片展示「凭据过期」告警与一键「重新登录」按钮。
 3. <b>独立多开实例（`+ 多开实例`）免串扰架构</b>：`oauth-launcher.mjs` 通过等号拼接的 `--user-data-dir=<path>` 参数让 Chromium 在 `app.requestSingleInstanceLock()` 前切换独立用户目录锁，同步复制 `app_storage.json` 跳过首次向导直达 Hub，并在临时写入目标通道凭据时保留主窗口原本的 `writer_id`（防止主窗口 `cred_store.go` 1s 轮询被误触发切换），待新实例日志出现 `Auth succeeded` 后自动还原主实例凭据。
 
 ## 3. 双层通道架构：主通道重载切换 vs 个人通道免重载路由
@@ -96,17 +98,17 @@ antigravity-relay/
    - 显式设置凭据 `auth_method: "consumer"`（个人通道，彻底剔除 `project_id`）或 `auth_method: "gcp"`（GCP 通道，携带绑定 `project_id`）；
    - 同步写入目标实例四处核心状态源：① 主实例 Win32 `Advapi32.dll` `CredWriteW`（`gemini:antigravity`）或多开实例专属令牌文件；② 目标实例 `User/globalStorage/state.vscdb` 中的 `antigravityUnifiedStateSync.oauthToken`（Protobuf Base64 Sentinel `oauthTokenInfoSentinelKey`）与 `google.geminicodeassist`（防止 Electron 渲染层把旧账号状态刷回 `language_server`）；③ 目标实例 `app_storage.json` 的 `auth-session`；
    - 当跨通道切换（个人 $\leftrightarrow$ `GCP`）时，通过 WMI 拉起脱离进程树的重启器仅重启当前目标实例（绝不影响另一多开实例），并在旧进程退出后、新进程拉起前二次覆写上述四处存储以防退出回写覆盖。
-2. <b>会话级签名归属检测与双模式离线 Protobuf 签名无损剥离（`detectConversationSignatureChannel` + `scrubConversationsByScope`）</b>：
-   - Google Gemini 模型的思考签名（`thought_signature`）与生成该签名的通道类型（`personal` vs `gcp`）强绑定；系统在读取官方 `transcript.jsonl` 实时计算「会话统计 / 项目汇总」Token 账单时，同步检测各会话 `.db` 是否包含思考签名并结合 `signatureChannelMap` 标记 `GCP` / `个人` / `无签名` 徽章；
-   - 面板「当前会话统计 / 项目汇总」卡片内置双模式「清除签名」下拉菜单：支持「仅清除当前会话签名」（`scope: "conversation"`）或「全项目扫描，清除与当前通道不匹配的遗留签名」（`scope: "project_mismatch"`），递归剥离 `~/.gemini/antigravity/conversations/<cascade_id>.db` 中的签名魔数头（`0x01 0x69 0x14 0x7d 0x13` 或 Base64 `AWkUfR` / `FpFH0T`），100% 保留聊天正文与工具调用记录。
+2. <b>会话级签名归属检测、SQLite WAL 截断与双模式离线 Protobuf 签名无损剥离（`inspectConversationSignatureStatus` + `scrubConversationDbFile`）</b>：
+   - Google Gemini 模型的思考签名（`thought_signature`）与生成该签名的通道类型（`personal` vs `gcp`）强绑定；系统在读取官方 `transcript.jsonl` 实时计算「会话统计 / 项目汇总」Token 账单时，同步检测各会话 `.db` 与 `.db-wal` 是否包含思考签名（内置 `readOk` 锁竞争守卫防止误缓存空状态）并标记 `GCP` / `个人` / `无签名` 徽章；
+   - 面板「当前会话统计 / 项目汇总」卡片内置双模式「清除签名」下拉菜单：支持「仅清除当前会话签名」或「全项目扫描清除与当前通道不匹配的遗留签名」，递归剥离 `~/.gemini/antigravity/conversations/<cascade_id>.db` 中的签名魔数头（`0x01 0x69 0x14 0x7d 0x13` 或 Base64 `AWkUfR` / `FpFH0T`），提交事务后强制执行 `PRAGMA wal_checkpoint(TRUNCATE);` 截断 `.db-wal` 残留，100% 保留聊天正文与工具调用记录。
 
 ### 3.2 第二层：个人通道本地透明反向代理、双服切换与双层重置算力接力
 当主界面处于任意个人通道（`Free` / `Plus` / `Pro` / `Ultra`）时，底部「模型算力路由」在不重载界面的前提下实现跨个人账号及跨 `Prod / Daily` 双服的算力接力（`GCP` 通道完全独立，不参与底部个人池路由）：
 1. <b>常驻挂载 `SetCloudCodeURL` 本地透明代理</b>：在个人通道模式下，Sidecar 与 `relay-hook.cjs` 自动向 `language_server.exe` 发送 `SetCloudCodeURL` RPC，将其上游地址指向本地透明代理 `http://127.0.0.1:<proxyPort>`（若切换到 `GCP` 主通道，则自动恢复为官方 `https://cloudcode-pa.googleapis.com`）。
-2. <b>双服 `2N` 候选池 2 层自动轮询排序与动态 `Bearer Token` / `Host` 替换</b>：
+2. <b>双服 `2N` 候选池 2 层自动轮询排序、同窗口防跳变与动态 `Bearer Token` / `Host` 替换</b>：
    - 当 `language_server.exe` 发起 `/v1internal:streamGenerateContent` 或 `/v1internal:generateContent` 请求时，透明代理提取请求体中的 `model` 标识并映射为基础模型家族（如 `Gemini 4 Argon`、`Gemini 3.8 Flash`、`Claude Opus 5.5`）。
-   - 根据 `routing.models[family]` 配置（`follow_current`、`auto_poll` 或指定 `account:<email>#personal`），`auto_poll` 将所有个人账号的 `prod` 与 `daily` 双账本共 `2N` 个独立算力桶纳入候选，先按 `5 小时限额 > 5%` 门控过滤，再严格执行<b>2 层排序（第 1 层按周限额重置时间升序，第 2 层按 5 小时限额重置时间升序）</b>选出最优 `(acc, pool)`。
-   - 在内存中将 HTTP 请求头替换为目标个人账号的 `Authorization: Bearer <AccessToken>`、将 `body.project` 替换为该账号真实的私有 `companionProjectId`，并按目标账本 `pool` 动态路由至 `cloudcode-pa.googleapis.com`（`prod`）或 `daily-cloudcode-pa.googleapis.com`（`daily`），流式响应结束后 2 秒异步刷新目标账号双服配额。
+   - 根据 `routing.models[family]` 配置（`follow_current`、`auto_poll` 或指定 `account:<email>#personal`），`auto_poll` 将所有非 `authExpired` 个人账号的 `prod` 与 `daily` 双账本共 `2N` 个独立算力桶纳入候选，先按 `5 小时限额 > 5%` 门控过滤，再严格执行<b>2 层排序（第 1 层按周限额重置时间升序，第 2 层按 5 小时限额重置时间升序；当两层重置时间处于同一窗口时优先锁定当前激活账号与当前选定账本池，防微小百分比差跨号跳变）</b>选出最优 `(acc, pool)`。
+   - 在内存中将 HTTP 请求头替换为目标个人账号的 `Authorization: Bearer <AccessToken>`、将 `body.project` 替换为该账号真实的私有 `companionProjectId`，跨号路由时自动调用 `stripThoughtSignaturesFromJson` 剥离请求体 JSON 中的残留签名，并按目标账本 `pool` 动态路由至 `cloudcode-pa.googleapis.com`（`prod`）或 `daily-cloudcode-pa.googleapis.com`（`daily`），流式响应结束后 2 秒异步刷新目标账号双服配额。
 3. <b>拦截 `/v1internal:fetchAvailableModels` 防止主账号 `0%` 锁死</b>：
    - 当当前登录的主个人账号某模型配额降至 `0%`（或如 `Plus` / `Free` 账号本身无 `Gemini 4 Argon` 额度），但用户在底部路由中已将该模型路由至其他有额度的个人账号（或开启 `auto_poll` 且池内其他个人账号有额度）时，透明代理在返回模型列表给 `language_server.exe` 前自动注入目标路由账号的剩余配额百分比，防止客户端前端将模型下拉项置灰锁死。
 

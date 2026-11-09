@@ -729,6 +729,9 @@ export async function probeChannelQuotaSnapshot(channelId) {
     };
   };
 
+  let sawAuthExpired = false;
+  let sawValidToken = false;
+
   for (const baseToken of candidateTokenObjs) {
     let accessToken = baseToken.token.access_token || "";
     const refreshToken = baseToken.token.refresh_token || "";
@@ -741,6 +744,7 @@ export async function probeChannelQuotaSnapshot(channelId) {
       try {
         const refreshed = await refreshOAuthAccessToken(refreshToken);
         if (refreshed && refreshed.access_token) {
+          sawValidToken = true;
           accessToken = refreshed.access_token;
           baseToken.token.access_token = accessToken;
           baseToken.token.refreshedForRt = refreshToken;
@@ -753,7 +757,9 @@ export async function probeChannelQuotaSnapshot(channelId) {
             }
           }
         }
-      } catch {}
+      } catch (err) {
+        if (err && err.isAuthExpired) sawAuthExpired = true;
+      }
     }
 
     let probeRes = await tryProbeWithToken(accessToken);
@@ -761,6 +767,7 @@ export async function probeChannelQuotaSnapshot(channelId) {
       try {
         const refreshed = await refreshOAuthAccessToken(refreshToken);
         if (refreshed && refreshed.access_token) {
+          sawValidToken = true;
           accessToken = refreshed.access_token;
           baseToken.token.access_token = accessToken;
           baseToken.token.refreshedForRt = refreshToken;
@@ -774,7 +781,9 @@ export async function probeChannelQuotaSnapshot(channelId) {
           }
           probeRes = await tryProbeWithToken(accessToken);
         }
-      } catch {}
+      } catch (err) {
+        if (err && err.isAuthExpired) sawAuthExpired = true;
+      }
     }
 
     if (!isGcp && probeRes.byPool) {
@@ -820,6 +829,7 @@ export async function probeChannelQuotaSnapshot(channelId) {
           }
         }
         const cleanPersonalTok = buildCleanChannelToken(baseToken, "", "", false);
+        acc.authExpired = false;
         acc.storedToken = cleanPersonalTok;
         if (!cfg.__meta__.channelTokensById || typeof cfg.__meta__.channelTokensById !== "object") {
           cfg.__meta__.channelTokensById = {};
@@ -842,11 +852,17 @@ export async function probeChannelQuotaSnapshot(channelId) {
         []
       );
       if (parsed && isGcp && parsed.availableModels.length > 0) {
+        acc.authExpired = false;
         acc.cachedQuota = parsed;
         writeRelayConfig(cfg);
         return acc.cachedQuota;
       }
     }
+  }
+
+  if (sawAuthExpired && !sawValidToken) {
+    acc.authExpired = true;
+    writeRelayConfig(cfg);
   }
 
   if (isGcp && gcpBillingMode === "agent_platform") {

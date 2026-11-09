@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
-import os from "node:os";
 import { DatabaseSync } from "node:sqlite";
+import { HOME_DIR } from "../store.mjs";
 import { discoverLanguageServer } from "./wincred-ls.mjs";
 
 // Vertex AI (GCP 通道) 与 CloudCode PA (个人通道) 的 Tink 密钥签名头特征：
@@ -140,17 +140,17 @@ export function scrubThoughtSignaturesFromProto(buf, magicsToScrub = THOUGHT_SIG
       if (hasThoughtSignatureMagic(sub, magicsToScrub)) {
         if (!isDirectThoughtSigLeaf(sub, magicsToScrub) && isValidProtoSubMessage(sub)) {
           const res = scrubThoughtSignaturesFromProto(sub, magicsToScrub);
-          if (res.changed) {
+          if (res.changed && !hasThoughtSignatureMagic(res.buf, magicsToScrub)) {
             changed = true;
             if (res.buf.length > 0) {
               out.push(buf.subarray(start, tag.next), encodeProtoVarint(res.buf.length), res.buf);
             }
             continue;
           }
-        } else if (isDirectThoughtSigLeaf(sub, magicsToScrub)) {
-          changed = true;
-          continue;
         }
+        // 兜底剥离：无论是直接签名叶子字段，还是递归后仍残留签名魔数，一律整体剥离该 length-delimited 字段
+        changed = true;
+        continue;
       }
       out.push(buf.subarray(start, pos));
     } else if (wire === 5) {
@@ -164,10 +164,57 @@ export function scrubThoughtSignaturesFromProto(buf, magicsToScrub = THOUGHT_SIG
   return changed ? { buf: Buffer.concat(out), changed: true } : { buf, changed: false };
 }
 
+export function clearSignatureStatusCache(convId = "") {
+  if (convId) {
+    sigStatusCache.delete(String(convId).trim());
+  } else {
+    sigStatusCache.clear();
+  }
+}
+
+function getDbAndWalStat(fullPath) {
+  try {
+    const st = fs.statSync(fullPath);
+    let walMtimeMs = 0;
+    let walSize = 0;
+    const walPath = `${fullPath}-wal`;
+    if (fs.existsSync(walPath)) {
+      try {
+        const wst = fs.statSync(walPath);
+        walMtimeMs = wst.mtimeMs;
+        walSize = wst.size;
+      } catch {}
+    }
+    return {
+      mtimeMs: st.mtimeMs,
+      size: st.size,
+      walMtimeMs,
+      walSize,
+      walPath
+    };
+  } catch {
+    return null;
+  }
+}
+
+function rawDbOrWalHasSignatureMagic(fullPath, walPath, magics) {
+  try {
+    const rawBytes = fs.readFileSync(fullPath);
+    if (hasThoughtSignatureMagic(rawBytes, magics)) return true;
+  } catch {}
+  if (walPath && fs.existsSync(walPath)) {
+    try {
+      const walBytes = fs.readFileSync(walPath);
+      if (hasThoughtSignatureMagic(walBytes, magics)) return true;
+    } catch {}
+  }
+  return false;
+}
+
 function resolveConversationDbPath(convIdOrPrefix) {
   const clean = String(convIdOrPrefix || "").trim();
   if (!clean) return "";
-  const convDir = path.join(os.homedir(), ".gemini", "antigravity", "conversations");
+  const convDir = path.join(HOME_DIR, ".gemini", "antigravity", "conversations");
   if (!fs.existsSync(convDir)) return "";
   const exact = path.join(convDir, clean.endsWith(".db") ? clean : `${clean}.db`);
   if (fs.existsSync(exact)) return exact;
@@ -192,10 +239,8 @@ export function inspectConversationSignatureStatus(convIdOrPrefix, activeIsGcp =
     };
   }
 
-  let st = null;
-  try {
-    st = fs.statSync(fullPath);
-  } catch {
+  const st = getDbAndWalStat(fullPath);
+  if (!st) {
     return {
       convId,
       sigType: "none",
@@ -207,7 +252,13 @@ export function inspectConversationSignatureStatus(convIdOrPrefix, activeIsGcp =
   }
 
   const cached = sigStatusCache.get(convId);
-  if (cached && cached.mtimeMs === st.mtimeMs && cached.size === st.size) {
+  if (
+    cached &&
+    cached.mtimeMs === st.mtimeMs &&
+    cached.size === st.size &&
+    cached.walMtimeMs === st.walMtimeMs &&
+    cached.walSize === st.walSize
+  ) {
     const mismatched =
       cached.sigType === "mixed" ||
       (cached.sigType === "gcp" && !activeIsGcp) ||
@@ -221,23 +272,24 @@ export function inspectConversationSignatureStatus(convIdOrPrefix, activeIsGcp =
   let hasGcpSig = false;
   let hasPersonalSig = false;
   let lastSigType = "none";
+  let readOk = true;
 
   try {
-    const rawBytes = fs.readFileSync(fullPath);
-    const rawHasBin = hasThoughtSignatureMagic(rawBytes, [...GCP_BIN_MAGICS, ...PERSONAL_BIN_MAGICS]);
+    const rawHasBin = rawDbOrWalHasSignatureMagic(fullPath, st.walPath, THOUGHT_SIG_MAGICS);
     if (rawHasBin) {
       const db = new DatabaseSync(fullPath);
       try {
+        try { db.exec("PRAGMA busy_timeout = 3000;"); } catch {}
         const steps = db.prepare("SELECT idx, metadata, step_payload FROM steps ORDER BY idx ASC").all();
         for (const r of steps) {
           const m = r.metadata ? Buffer.from(r.metadata) : null;
           const p = r.step_payload ? Buffer.from(r.step_payload) : null;
           const stepHasGcp =
-            (m && hasThoughtSignatureMagic(m, GCP_BIN_MAGICS)) ||
-            (p && hasThoughtSignatureMagic(p, GCP_BIN_MAGICS));
+            (m && hasThoughtSignatureMagic(m, GCP_SIG_MAGICS)) ||
+            (p && hasThoughtSignatureMagic(p, GCP_SIG_MAGICS));
           const stepHasPers =
-            (m && hasThoughtSignatureMagic(m, PERSONAL_BIN_MAGICS)) ||
-            (p && hasThoughtSignatureMagic(p, PERSONAL_BIN_MAGICS));
+            (m && hasThoughtSignatureMagic(m, PERSONAL_SIG_MAGICS)) ||
+            (p && hasThoughtSignatureMagic(p, PERSONAL_SIG_MAGICS));
           if (stepHasGcp) {
             hasGcpSig = true;
             lastSigType = "gcp";
@@ -253,11 +305,11 @@ export function inspectConversationSignatureStatus(convIdOrPrefix, activeIsGcp =
             for (const g of gens) {
               const d = g.data ? Buffer.from(g.data) : null;
               if (!d) continue;
-              if (hasThoughtSignatureMagic(d, GCP_BIN_MAGICS)) {
+              if (hasThoughtSignatureMagic(d, GCP_SIG_MAGICS)) {
                 hasGcpSig = true;
                 lastSigType = "gcp";
               }
-              if (hasThoughtSignatureMagic(d, PERSONAL_BIN_MAGICS)) {
+              if (hasThoughtSignatureMagic(d, PERSONAL_SIG_MAGICS)) {
                 hasPersonalSig = true;
                 lastSigType = "personal";
               }
@@ -268,7 +320,9 @@ export function inspectConversationSignatureStatus(convIdOrPrefix, activeIsGcp =
         db.close();
       }
     }
-  } catch {}
+  } catch {
+    readOk = false;
+  }
 
   let sigType = "none";
   if (hasGcpSig && hasPersonalSig) {
@@ -279,16 +333,21 @@ export function inspectConversationSignatureStatus(convIdOrPrefix, activeIsGcp =
     sigType = "personal";
   }
 
+  const latestSt = getDbAndWalStat(fullPath) || st;
   const entry = {
     convId,
-    mtimeMs: st.mtimeMs,
-    size: st.size,
+    mtimeMs: latestSt.mtimeMs,
+    size: latestSt.size,
+    walMtimeMs: latestSt.walMtimeMs,
+    walSize: latestSt.walSize,
     sigType,
     hasGcpSig,
     hasPersonalSig,
     lastSigType
   };
-  sigStatusCache.set(convId, entry);
+  if (readOk) {
+    sigStatusCache.set(convId, entry);
+  }
 
   const mismatched =
     sigType === "mixed" ||
@@ -301,17 +360,22 @@ export function inspectConversationSignatureStatus(convIdOrPrefix, activeIsGcp =
   };
 }
 
-function scrubConversationDbFile(fullPath, magicsToScrub = THOUGHT_SIG_MAGICS, binPrecheckMagics = [...GCP_BIN_MAGICS, ...PERSONAL_BIN_MAGICS]) {
+function scrubConversationDbFile(fullPath, magicsToScrub = THOUGHT_SIG_MAGICS, binPrecheckMagics = THOUGHT_SIG_MAGICS) {
   if (!fullPath || !fs.existsSync(fullPath)) return false;
   let modified = false;
   const convId = path.basename(fullPath, ".db");
+  const walPath = `${fullPath}-wal`;
   try {
-    const rawBytes = fs.readFileSync(fullPath);
-    if (!hasThoughtSignatureMagic(rawBytes, binPrecheckMagics) && !hasThoughtSignatureMagic(rawBytes, magicsToScrub)) {
+    if (
+      !rawDbOrWalHasSignatureMagic(fullPath, walPath, binPrecheckMagics) &&
+      !rawDbOrWalHasSignatureMagic(fullPath, walPath, magicsToScrub)
+    ) {
+      sigStatusCache.delete(convId);
       return false;
     }
     const db = new DatabaseSync(fullPath);
     try {
+      try { db.exec("PRAGMA busy_timeout = 5000;"); } catch {}
       const steps = db.prepare("SELECT idx, metadata, step_payload FROM steps").all();
       const updStep = db.prepare("UPDATE steps SET metadata = ?, step_payload = ? WHERE idx = ?");
       db.exec("BEGIN");
@@ -338,6 +402,13 @@ function scrubConversationDbFile(fullPath, magicsToScrub = THOUGHT_SIG_MAGICS, b
         }
       } catch {}
       db.exec("COMMIT");
+      if (modified) {
+        try {
+          db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+        } catch {
+          try { db.exec("PRAGMA wal_checkpoint(PASSIVE);"); } catch {}
+        }
+      }
     } finally {
       db.close();
     }
@@ -346,47 +417,54 @@ function scrubConversationDbFile(fullPath, magicsToScrub = THOUGHT_SIG_MAGICS, b
   return modified;
 }
 
+function collectTargetAndChildDbPaths(targetConvId) {
+  const candidateDbPaths = new Set();
+  const mainDbPath = resolveConversationDbPath(targetConvId);
+  const fullConvId = mainDbPath ? path.basename(mainDbPath, ".db") : String(targetConvId || "").trim();
+  if (mainDbPath) candidateDbPaths.add(mainDbPath);
+
+  try {
+    const sumDbPath = path.join(HOME_DIR, ".gemini", "antigravity", "conversation_summaries.db");
+    if (fullConvId && fs.existsSync(sumDbPath)) {
+      const sumDb = new DatabaseSync(sumDbPath);
+      try {
+        try { sumDb.exec("PRAGMA busy_timeout = 3000;"); } catch {}
+        const children = sumDb
+          .prepare("SELECT conversation_id FROM conversation_summaries WHERE parent_conversation_id = ?")
+          .all(fullConvId);
+        for (const ch of children) {
+          const chPath = resolveConversationDbPath(ch.conversation_id);
+          if (chPath) candidateDbPaths.add(chPath);
+        }
+      } finally {
+        sumDb.close();
+      }
+    }
+  } catch {}
+
+  return candidateDbPaths;
+}
+
 export async function scrubConversationsByMode(opts = {}) {
   const mode = opts.mode === "current" ? "current" : (opts.mode === "all" ? "all" : "mismatched");
-  const activeIsGcp = Boolean(opts.activeIsGcp);
   const targetConvId = String(opts.conversationId || "").trim();
-  const convDir = path.join(os.homedir(), ".gemini", "antigravity", "conversations");
+  const convDir = path.join(HOME_DIR, ".gemini", "antigravity", "conversations");
+  clearSignatureStatusCache();
   if (!fs.existsSync(convDir)) {
     return { mode, scrubbedCount: 0, scrubbedIds: [] };
   }
 
-  const scrubbedIds = [];
+  const scrubbedIdSet = new Set();
 
   if (mode === "current") {
-    const mainDbPath = resolveConversationDbPath(targetConvId);
-    const fullConvId = mainDbPath ? path.basename(mainDbPath, ".db") : targetConvId;
-    const candidateDbPaths = new Set();
-    if (mainDbPath) candidateDbPaths.add(mainDbPath);
-
-    // 同步包含当前会话派生的子智能体对话库
-    try {
-      const sumDbPath = path.join(os.homedir(), ".gemini", "antigravity", "conversation_summaries.db");
-      if (fullConvId && fs.existsSync(sumDbPath)) {
-        const sumDb = new DatabaseSync(sumDbPath);
-        try {
-          const children = sumDb
-            .prepare("SELECT conversation_id FROM conversation_summaries WHERE parent_conversation_id = ?")
-            .all(fullConvId);
-          for (const ch of children) {
-            const chPath = resolveConversationDbPath(ch.conversation_id);
-            if (chPath) candidateDbPaths.add(chPath);
-          }
-        } finally {
-          sumDb.close();
-        }
-      }
-    } catch {}
-
+    const candidateDbPaths = collectTargetAndChildDbPaths(targetConvId);
     for (const dbP of candidateDbPaths) {
-      if (scrubConversationDbFile(dbP, THOUGHT_SIG_MAGICS)) {
-        scrubbedIds.push(path.basename(dbP, ".db"));
+      if (scrubConversationDbFile(dbP, THOUGHT_SIG_MAGICS, THOUGHT_SIG_MAGICS)) {
+        scrubbedIdSet.add(path.basename(dbP, ".db"));
       }
     }
+    const scrubbedIds = [...scrubbedIdSet];
+    clearSignatureStatusCache();
     return {
       mode: "current",
       scrubbedCount: scrubbedIds.length,
@@ -395,29 +473,30 @@ export async function scrubConversationsByMode(opts = {}) {
   }
 
   // mode === "mismatched" 或 "all"
-  // 当 mode === "mismatched" 时：
-  // - 当前处于 GCP 通道 (activeIsGcp = true)：仅清除遗留的个人通道签名 (PERSONAL_SIG_MAGICS)
-  // - 当前处于个人通道 (activeIsGcp = false)：仅清除遗留的 GCP 通道签名 (GCP_SIG_MAGICS)
-  const magicsToScrub = mode === "all"
-    ? THOUGHT_SIG_MAGICS
-    : (activeIsGcp ? PERSONAL_SIG_MAGICS : GCP_SIG_MAGICS);
-  const binPrecheck = mode === "all"
-    ? [...GCP_BIN_MAGICS, ...PERSONAL_BIN_MAGICS]
-    : (activeIsGcp ? PERSONAL_BIN_MAGICS : GCP_BIN_MAGICS);
-
+  // 手动全项目扫描清除或跨通道清洗时，彻底剥离所有会话中的历史思考签名 (GCP + Personal)，
+  // 确保清除后面板展示为干净的「无签名」，无论当前处于 GCP 还是个人通道、或重新进入面板都不会再反弹残留签名。
   try {
+    if (targetConvId) {
+      for (const dbP of collectTargetAndChildDbPaths(targetConvId)) {
+        if (scrubConversationDbFile(dbP, THOUGHT_SIG_MAGICS, THOUGHT_SIG_MAGICS)) {
+          scrubbedIdSet.add(path.basename(dbP, ".db"));
+        }
+      }
+    }
     const entries = fs
       .readdirSync(convDir)
       .filter((f) => f.endsWith(".db"))
       .map((f) => ({ cascadeId: f.slice(0, -3), fullPath: path.join(convDir, f) }));
 
     for (const item of entries) {
-      if (scrubConversationDbFile(item.fullPath, magicsToScrub, binPrecheck)) {
-        scrubbedIds.push(item.cascadeId);
+      if (scrubConversationDbFile(item.fullPath, THOUGHT_SIG_MAGICS, THOUGHT_SIG_MAGICS)) {
+        scrubbedIdSet.add(item.cascadeId);
       }
     }
   } catch {}
 
+  const scrubbedIds = [...scrubbedIdSet];
+  clearSignatureStatusCache();
   return {
     mode,
     scrubbedCount: scrubbedIds.length,

@@ -198,7 +198,7 @@ export function selectBestPersonalRouteCandidate(baseFamily, cfg, excludedIds = 
 
   for (const acc of accounts) {
     const isGcp = acc.channelType === "gcp" || Boolean(acc.gcpProjectId);
-    if (isGcp || excludeSet.has(acc.id)) continue;
+    if (isGcp || acc.authExpired || excludeSet.has(acc.id)) continue;
 
     for (const poolKey of ["prod", "daily"]) {
       const candidateKey = `${acc.id}@${poolKey}`;
@@ -251,10 +251,11 @@ export function selectBestPersonalRouteCandidate(baseFamily, cfg, excludedIds = 
     if (Math.abs(a.fiveHourResetMs - b.fiveHourResetMs) > 60000) {
       return a.fiveHourResetMs - b.fiveHourResetMs;
     }
+    // 3. 当两层重置时间处于同一窗口时，优先命中当前激活账号与当前选定额度池，避免因微小百分比差无谓跨号
+    if (a.isCurrentAcc !== b.isCurrentAcc) return a.isCurrentAcc ? -1 : 1;
+    if (a.isPreferredPool !== b.isPreferredPool) return a.isPreferredPool ? -1 : 1;
     if (b.weeklyPct !== a.weeklyPct) return b.weeklyPct - a.weeklyPct;
     if (b.fiveHourPct !== a.fiveHourPct) return b.fiveHourPct - a.fiveHourPct;
-    if (a.isPreferredPool !== b.isPreferredPool) return a.isPreferredPool ? -1 : 1;
-    if (a.isCurrentAcc !== b.isCurrentAcc) return a.isCurrentAcc ? -1 : 1;
     return 0;
   });
   return candidates[0];
@@ -286,8 +287,10 @@ export async function getValidPersonalAccessToken(cfg, targetAcc) {
         baseToken.token.access_token = accessToken;
         baseToken.token.refreshedForRt = refreshToken;
         baseToken.token.expiry = newExpiry;
+        if (targetAcc) targetAcc.authExpired = false;
         for (const item of Object.values(cfg.accounts || {})) {
           if (item.storedToken?.token?.refresh_token === refreshToken) {
+            item.authExpired = false;
             item.storedToken.token.access_token = accessToken;
             item.storedToken.token.refreshedForRt = refreshToken;
             item.storedToken.token.expiry = newExpiry;
@@ -295,7 +298,13 @@ export async function getValidPersonalAccessToken(cfg, targetAcc) {
         }
         writeRelayConfig(cfg);
       }
-    } catch {}
+    } catch (err) {
+      if (err && err.isAuthExpired) {
+        if (targetAcc) targetAcc.authExpired = true;
+        writeRelayConfig(cfg);
+        return "";
+      }
+    }
   }
   return accessToken;
 }
@@ -426,6 +435,7 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
       );
 
       if (isCrossPersonalRoute) {
+        strippedSigCount = stripThoughtSignaturesFromJson(bodyClone);
         const targetToken = await getValidPersonalAccessToken(cfg, routedTargetAcc);
         if (targetToken) {
           outHeaders["authorization"] = `Bearer ${targetToken}`;

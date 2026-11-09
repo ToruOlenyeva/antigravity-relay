@@ -26,13 +26,13 @@
 
 ## ✨ Key Features
 
-- <b>Full-Tier Detection & Quota Telemetry</b>: Powered by native Language Server and CloudCode probes to accurately classify <code>Free</code>, <code>Plus</code> (including promotional partner plans), <code>Pro</code>, <code>Ultra</code>, and <code>GCP</code> channels, displaying <code>Gemini Models</code>, <code>Claude and GPT Models</code>, and <code>Gemini 4 Argon</code> weekly/5-hour quota rings with live reset countdowns.
-- <b>Reload-Free Personal Channel Routing</b>: Built-in local transparent reverse proxy (defaulting to port <code>8091</code> with automatic fallback across <code>8091..8095</code> and OS ephemeral ports) dynamically swaps the target personal account's <code>Bearer Token</code> per model family without reloading the UI or interrupting active chats.
-- <b>Reset-First Smart Auto-Polling</b>: Configure each model to "Follow Current Channel", pin a specific personal account, or "Auto-Poll Available Channels" (prioritizing personal channels with remaining quota that reset soonest, while automatically unlocking models in the UI when the primary account hits <code>0%</code>).
-- <b>Signature Badge Detection & Dual-Mode Scrubbing</b>: Detects and badges each conversation's thought signature origin (<code>GCP</code> / <code>Personal</code> / <code>No Sig</code>) in real time, providing a dual-mode "Clear Sig" menu (scrub current session only vs scan project for mismatched signatures) alongside in-flight proxy stripping to eliminate <code>Invalid thought signature (400)</code> errors.
+- <b>Full-Tier Detection & Dual Personal Quota Ledgers</b>: Powered by dynamic client version handshakes and CloudCode probes to classify <code>Free</code>, <code>Plus</code> (including promotional partner plans), <code>Pro</code>, <code>Ultra</code>, and <code>GCP</code> channels, supporting one-click switching between independent <code>Prod</code> and <code>Daily</code> personal quota ledgers with live <code>Gemini Models</code>, <code>Claude and GPT Models</code>, and <code>Gemini 4 Argon</code> weekly/5-hour countdowns.
+- <b>Reload-Free Personal Channel Routing</b>: Built-in local transparent reverse proxy (defaulting to port <code>8091</code> with automatic fallback across <code>8091..8095</code> and OS ephemeral ports) dynamically swaps the target personal account's <code>Bearer Token</code> and upstream gateway (<code>Prod / Daily</code>) per model family without reloading the UI or interrupting active chats.
+- <b>Two-Layer Reset-First Auto-Polling</b>: Configure each model to "Follow Current Channel", pin a specific personal account, or "Auto-Poll Available Channels" (sorting all <code>Prod / Daily</code> personal buckets by weekly reset time first and 5-hour reset time second, prioritizing the active account within identical reset windows, and unlocking models when the primary account hits <code>0%</code>).
+- <b>Signature Badge Detection, WAL Truncation & Dual-Mode Scrubbing</b>: Detects and badges each conversation's thought signature origin (<code>GCP</code> / <code>Personal</code> / <code>No Sig</code>) in real time, providing a dual-mode "Clear Sig" menu backed by SQLite <code>readOk</code> lock guards and <code>wal_checkpoint(TRUNCATE)</code> to prevent signature bounce-back, alongside in-flight proxy stripping to eliminate <code>Invalid thought signature (400)</code> errors.
 - <b>One-Click Session Stats & Project Summary Toggle</b>: Reads official <code>transcript.jsonl</code> token telemetry directly, allowing instant toggle button switching between "Current Session Stats" (with per-conversation selector) and "Project Summary" (aggregating total tokens, prefix cache hits, and per-model breakdown across the entire project).
 - <b>Isolated Multi-Instance, Quad-Store Auth Sync & Dual-Channel Interlock</b>: Launch isolated Personal or <code>GCP</code> instances via <code>+ Multi-Instance</code> (automatically interlocking cross-channel switches when both channels are active); channel switching performs Antigravity 2.29+ quad-store auth sync (<code>WinCred</code> + <code>state.vscdb</code> Protobuf Sentinel + <code>app_storage.json</code> + <code>auth_method</code> isolation) and per-instance auto-restart.
-- <b>Zero-Interruption OAuth Login & Non-Intrusive GCP Discovery</b>: Launches official Google OAuth 2.0 + PKCE S256 on an isolated callback port, derives <code>GCP</code> channels from saved tokens with on-demand project discovery, and dual-hosts on the dynamic Sidecar port and fixed port <code>8089</code>.
+- <b>Zero-Interruption OAuth Login & Expired Credential Guard</b>: Launches official Google OAuth 2.0 + PKCE S256 on an isolated callback port; when a saved account's <code>refresh_token</code> expires or is revoked (<code>invalid_grant</code>), it automatically isolates the account from auto-polling, blocks broken switches by opening a pre-filled browser re-login flow, and surfaces an "Auth Expired" badge with a one-click "Re-login" button on the card.
 
 ---
 
@@ -87,6 +87,7 @@ antigravity-relay/
 │   └── proto-scrub.cjs          # Offline Protobuf thoughtSignature scrubbing engine
 ├── sidecars/
 │   └── panel/                   # Native build-free decoupled Sidecar panel
+│       ├── bridge/              # Cohesive backend domain sub-modules
 │       ├── app.js               # Frontend interaction, custom dropdowns, and sync engine
 │       ├── i18n.js              # Strictly isolated English and Chinese dictionary
 │       ├── index.html           # Responsive frontend HTML skeleton
@@ -95,7 +96,9 @@ antigravity-relay/
 │       ├── preload.js           # Host preload bridge script
 │       ├── sidecar.json         # Sidecar container manifest
 │       ├── store.mjs            # Atomic config persistence and legacy model sanitizer
-│       └── styles.css           # Flat adaptive dark and light theme stylesheet
+│       ├── styles.css           # Flat adaptive dark and light theme stylesheet
+│       ├── ui-channels-drawers.js # Channel cards, one-click re-login & action drawers view
+│       └── ui-session-quota.js  # Session telemetry, project total & dual-pool quota view
 ├── agy-relay-config.example.json # Sanitized example configuration file
 ├── hooks.json                   # Antigravity lifecycle Hook manifest
 ├── open-panel.bat               # Standalone window quick launcher script
