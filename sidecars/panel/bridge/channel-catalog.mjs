@@ -448,7 +448,7 @@ export function findStoredTokenForEmail(cfg, email, preferGcp = null) {
       }
     }
     const winCred = readWinCredToken(false);
-    if (winCred && winCred.id_token_email === email && !winCred.project_id && winCred.auth_method !== "gcp") {
+    if (winCred && winCred.id_token_email === email && !winCred.project_id && winCred.auth_method !== "gcp" && winCred.auth_method !== "adc") {
       return winCred;
     }
   }
@@ -571,7 +571,8 @@ export function normalizeAccountChannels(cfg) {
           }
         }
         if (cachedQuota && Array.isArray(cachedQuota.quotaGroups) && cachedQuota.quotaGroups.length > 0) {
-          const taggedPool = cachedQuota.quotaPool === "daily" ? "daily" : (cachedQuota.quotaPool === "prod" ? "prod" : activePool);
+          const rawTag = cachedQuota.pool || cachedQuota.quotaPool || "";
+          const taggedPool = rawTag === "daily" ? "daily" : (rawTag === "prod" ? "prod" : activePool);
           if (!cachedQuotaByPool[taggedPool]) {
             cachedQuotaByPool[taggedPool] = cachedQuota;
           }

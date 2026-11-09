@@ -1,5 +1,6 @@
 import https from "node:https";
 import http from "node:http";
+import zlib from "node:zlib";
 import {
   readRelayConfig,
   writeRelayConfig,
@@ -24,21 +25,30 @@ import {
   getCloudCodeHostnameForPool
 } from "./quota-probe.mjs";
 
-export function stripThoughtSignaturesFromJson(node) {
+export function isGcpThoughtSignature(sigVal) {
+  if (typeof sigVal !== "string") return false;
+  const s = sigVal.trim();
+  return s.startsWith("AY89a18") || s.startsWith("IDxACGAIqQ") || s.startsWith("CA8QAhgCKk");
+}
+
+export function stripThoughtSignaturesFromJson(node, opts = {}) {
   if (!node || typeof node !== "object") return 0;
+  const onlyGcpSignatures = Boolean(opts?.onlyGcpSignatures);
   let count = 0;
   if (Array.isArray(node)) {
     for (const item of node) {
-      count += stripThoughtSignaturesFromJson(item);
+      count += stripThoughtSignaturesFromJson(item, opts);
     }
     return count;
   }
   for (const key of Object.keys(node)) {
     if (key === "thoughtSignature" || key === "thought_signature") {
-      delete node[key];
-      count++;
+      if (!onlyGcpSignatures || isGcpThoughtSignature(node[key])) {
+        delete node[key];
+        count++;
+      }
     } else if (node[key] && typeof node[key] === "object") {
-      count += stripThoughtSignaturesFromJson(node[key]);
+      count += stripThoughtSignaturesFromJson(node[key], opts);
     }
   }
   return count;
@@ -96,38 +106,54 @@ export function normalizeConsumerModelId(rawModelStr) {
 
 export async function ensurePersonalCompanionProjectId(cfg, acc, accessToken, targetHostname = "cloudcode-pa.googleapis.com") {
   if (!acc) return "";
-  const existing = String(acc.companionProjectId || acc.cachedQuota?.companionProjectId || "").trim();
+  const existing = String(
+    acc.companionProjectId ||
+    acc.cachedQuota?.companionProjectId ||
+    acc.cachedQuotaByPool?.prod?.companionProjectId ||
+    acc.cachedQuotaByPool?.daily?.companionProjectId ||
+    ""
+  ).trim();
   if (existing && !isDowngradedConsumerPoolProject(existing)) {
     if (!acc.companionProjectId) acc.companionProjectId = existing;
     return existing;
   }
   if (!accessToken) return "";
-  try {
-    const loadResp = await callCloudCodeApi(
-      "/v1internal:loadCodeAssist",
-      accessToken,
-      {
-        metadata: buildLoadCodeAssistMetadata()
-      },
-      {},
-      targetHostname
-    );
-    if (loadResp.status === 200 && loadResp.data) {
-      const pid = String(
-        loadResp.data.cloudaicompanionProject?.id ||
-        loadResp.data.cloudaicompanionProject ||
-        ""
-      ).trim();
-      if (pid && !isDowngradedConsumerPoolProject(pid)) {
-        acc.companionProjectId = pid;
-        if (acc.cachedQuota && typeof acc.cachedQuota === "object") {
-          acc.cachedQuota.companionProjectId = pid;
+  const hostCandidates = Array.from(
+    new Set([targetHostname, "daily-cloudcode-pa.googleapis.com", "cloudcode-pa.googleapis.com"].filter(Boolean))
+  );
+  for (const host of hostCandidates) {
+    try {
+      const loadResp = await callCloudCodeApi(
+        "/v1internal:loadCodeAssist",
+        accessToken,
+        {
+          metadata: buildLoadCodeAssistMetadata()
+        },
+        {},
+        host
+      );
+      if (loadResp.status === 200 && loadResp.data) {
+        const pid = String(
+          loadResp.data.cloudaicompanionProject?.id ||
+          loadResp.data.cloudaicompanionProject ||
+          ""
+        ).trim();
+        if (pid && !isDowngradedConsumerPoolProject(pid)) {
+          acc.companionProjectId = pid;
+          if (acc.cachedQuota && typeof acc.cachedQuota === "object") {
+            acc.cachedQuota.companionProjectId = pid;
+          }
+          if (acc.cachedQuotaByPool && typeof acc.cachedQuotaByPool === "object") {
+            for (const pq of Object.values(acc.cachedQuotaByPool)) {
+              if (pq && typeof pq === "object") pq.companionProjectId = pid;
+            }
+          }
+          writeRelayConfig(cfg);
+          return pid;
         }
-        writeRelayConfig(cfg);
-        return pid;
       }
-    }
-  } catch {}
+    } catch {}
+  }
   return "";
 }
 
@@ -267,7 +293,12 @@ export function selectBestPersonalChannelForModel(baseFamily, cfg, excludedIds =
 }
 
 export async function getValidPersonalAccessToken(cfg, targetAcc) {
-  const preferredStored = (targetAcc?.storedToken && !targetAcc.storedToken.project_id && targetAcc.storedToken.auth_method !== "gcp")
+  const preferredStored = (
+    targetAcc?.storedToken &&
+    !targetAcc.storedToken.project_id &&
+    targetAcc.storedToken.auth_method !== "gcp" &&
+    targetAcc.storedToken.auth_method !== "adc"
+  )
     ? targetAcc.storedToken
     : null;
   const baseToken = preferredStored || findStoredTokenForEmail(cfg, targetAcc?.email, false) || targetAcc?.storedToken;
@@ -419,11 +450,11 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
         const candidateAcc = cfg.accounts?.[refId];
         if (candidateAcc && candidateAcc.channelType !== "gcp" && !candidateAcc.gcpProjectId && !excludedIds.has(candidateAcc.id)) {
           routedTargetAcc = candidateAcc;
-          targetPool = explicitPool ? normalizePersonalQuotaPool(explicitPool) : pickBestPoolForAccount(candidateAcc, baseFamily);
+          targetPool = explicitPool ? normalizePersonalQuotaPool(explicitPool) : defaultPool;
         }
       } else if (activePersonalAcc && !excludedIds.has(activePersonalAcc.id)) {
         routedTargetAcc = activePersonalAcc;
-        targetPool = pickBestPoolForAccount(activePersonalAcc, baseFamily);
+        targetPool = defaultPool;
       }
 
       targetHostname = getCloudCodeHostnameForPool(targetPool, false);
@@ -435,7 +466,8 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
       );
 
       if (isCrossPersonalRoute) {
-        strippedSigCount = stripThoughtSignaturesFromJson(bodyClone);
+        // 个人号之间共享同一套消费级 Tink 签名密钥，仅剥离跨通道遗留的 GCP 签名，避免带 functionCall 的对话报 400
+        strippedSigCount = stripThoughtSignaturesFromJson(bodyClone, { onlyGcpSignatures: true });
         const targetToken = await getValidPersonalAccessToken(cfg, routedTargetAcc);
         if (targetToken) {
           outHeaders["authorization"] = `Bearer ${targetToken}`;
@@ -445,7 +477,7 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
           const targetCompanionPid = await ensurePersonalCompanionProjectId(cfg, routedTargetAcc, targetToken, targetHostname);
           if (targetCompanionPid && !isDowngradedConsumerPoolProject(targetCompanionPid)) {
             bodyClone.project = targetCompanionPid;
-          } else {
+          } else if (targetPool === "daily") {
             bodyClone.project = "aicode-consumers";
           }
           cfg.__meta__.lastRoutedChannelId = routedTargetAcc.id;
@@ -467,14 +499,21 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
           writeRelayConfig(cfg);
         }
       } else if (activePersonalAcc) {
-        let activeCompanionPid = String(activePersonalAcc.companionProjectId || activePersonalAcc.cachedQuota?.companionProjectId || "").trim();
+        strippedSigCount = stripThoughtSignaturesFromJson(bodyClone, { onlyGcpSignatures: true });
+        let activeCompanionPid = String(
+          activePersonalAcc.companionProjectId ||
+          activePersonalAcc.cachedQuota?.companionProjectId ||
+          activePersonalAcc.cachedQuotaByPool?.prod?.companionProjectId ||
+          activePersonalAcc.cachedQuotaByPool?.daily?.companionProjectId ||
+          ""
+        ).trim();
         if (isDowngradedConsumerPoolProject(activeCompanionPid)) {
           const activeTok = await getValidPersonalAccessToken(cfg, activePersonalAcc);
           activeCompanionPid = await ensurePersonalCompanionProjectId(cfg, activePersonalAcc, activeTok, targetHostname);
         }
         if (activeCompanionPid && !isDowngradedConsumerPoolProject(activeCompanionPid)) {
           bodyClone.project = activeCompanionPid;
-        } else if (!bodyClone.project) {
+        } else if (!bodyClone.project && targetPool === "daily") {
           bodyClone.project = "aicode-consumers";
         }
         cfg.__meta__.lastRoutedChannelId = activePersonalAcc.id;
@@ -515,6 +554,7 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
           port: 443,
           path: reqUrl,
           method: req.method || "POST",
+          family: 4,
           headers: outHeaders,
           timeout: 120000
         },
@@ -528,7 +568,7 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
             excludedIds.add(`${routedTargetAcc.id}@${targetPool}`);
             const hasNextCandidate = routeSpec === "auto_poll"
               ? Boolean(selectBestPersonalRouteCandidate(baseFamily, cfg, excludedIds))
-              : !excludedIds.has(`${routedTargetAcc.id}@${targetPool === "daily" ? "prod" : "daily"}`);
+              : false;
             if (hasNextCandidate) {
               upRes.resume();
               setTimeout(() => {
@@ -539,13 +579,15 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
             }
           }
 
-          if (isLoadCodeAssistEndpoint && upRes.statusCode === 200 && !upRes.headers["content-encoding"]) {
+          if (isLoadCodeAssistEndpoint && upRes.statusCode === 200) {
             const chunks = [];
             upRes.on("data", (c) => chunks.push(c));
             upRes.on("end", () => {
               const respBuf = Buffer.concat(chunks);
               try {
-                const respJson = JSON.parse(respBuf.toString("utf8"));
+                const enc = String(upRes.headers["content-encoding"] || "").toLowerCase();
+                const decodedBuf = enc === "gzip" ? zlib.gunzipSync(respBuf) : respBuf;
+                const respJson = JSON.parse(decodedBuf.toString("utf8"));
                 const cPid = String(
                   respJson?.cloudaicompanionProject?.id ||
                   respJson?.cloudaicompanionProject ||

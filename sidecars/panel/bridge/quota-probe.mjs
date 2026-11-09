@@ -198,12 +198,20 @@ export function callCloudCodeApi(endpointPath, accessToken, payloadObj = {}, ext
     if (!accessToken) return resolve({ status: 0, data: null });
     const hostname = String(targetHostname || "").trim() || "cloudcode-pa.googleapis.com";
     const body = Buffer.from(JSON.stringify(payloadObj || {}), "utf8");
+    let settled = false;
+    const finish = (val) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(hardTimer);
+      resolve(val);
+    };
     const req = https.request(
       {
         hostname,
         port: 443,
         path: endpointPath,
         method: "POST",
+        family: 4,
         headers: {
           Authorization: `Bearer ${accessToken}`,
           "Content-Type": "application/json",
@@ -219,17 +227,21 @@ export function callCloudCodeApi(endpointPath, accessToken, payloadObj = {}, ext
         res.on("end", () => {
           const raw = Buffer.concat(chunks).toString("utf8");
           try {
-            resolve({ status: res.statusCode || 0, data: JSON.parse(raw) });
+            finish({ status: res.statusCode || 0, data: JSON.parse(raw) });
           } catch {
-            resolve({ status: res.statusCode || 0, data: null, raw: raw.slice(0, 300) });
+            finish({ status: res.statusCode || 0, data: null, raw: raw.slice(0, 300) });
           }
         });
       }
     );
-    req.on("error", (err) => resolve({ status: -1, data: null, error: err.message }));
+    const hardTimer = setTimeout(() => {
+      req.destroy();
+      finish({ status: -2, data: null, error: "timeout" });
+    }, 6000);
+    req.on("error", (err) => finish({ status: -1, data: null, error: err.message }));
     req.on("timeout", () => {
       req.destroy();
-      resolve({ status: -2, data: null, error: "timeout" });
+      finish({ status: -2, data: null, error: "timeout" });
     });
     req.write(body);
     req.end();
@@ -494,7 +506,6 @@ export async function probeChannelQuotaSnapshot(channelId) {
   const gcpPid = (acc.gcpProjectId || "").trim();
   const gcpBillingMode = isGcp ? (acc.gcpBillingMode || "agent_platform") : "";
 
-  const ls = discoverLanguageServer(false);
   const ctx = resolveCurrentInstanceContext();
   const instMeta = getInstanceMeta(cfg, ctx);
   const activeEmail = (instMeta?.activeEmail || cfg.__meta__?.activeEmail || "").trim();
@@ -505,70 +516,73 @@ export async function probeChannelQuotaSnapshot(channelId) {
   ).trim();
 
   // 仅当探测当前在线 GCP 通道时优先复用本地 language_server_rpc；
-  // 个人通道一律使用该账号自身的独立 OAuth Token 直连 daily-cloudcode-pa.googleapis.com，彻底隔绝本地代理或切号瞬态缓存
-  if (isGcp && ls && acc.email && acc.email === activeEmail && gcpPid === originalGcpPid) {
-    try {
-      const usResp = await callLsRpc(ls, "GetUserStatus", {}).catch(() => null);
-      const clientModels = usResp?.userStatus?.cascadeModelConfigData?.clientModelConfigs || [];
-      const usEmail = (usResp?.userStatus?.email || "").trim();
-      const usTierName = usResp?.userStatus?.userTier?.name || usResp?.userStatus?.planStatus?.planInfo?.planName || "";
-      const logInfo = parseLsLogInfo(ctx.lsLogFile);
-      const logPid = String(logInfo.lastProjectId || "").trim();
-      const lsHasGcpModels = clientModels.some(
-        (m) => !isModelEntryRestrictedOrSunset(m) && isGcpOnlyModel(m.label || m.modelOrAlias?.model || "")
-      );
-      const lsModeMatches = Boolean(
-        usEmail === acc.email &&
-        (logPid ? logPid === gcpPid : Boolean(/agent\s*platform|enterprise/i.test(usTierName) || lsHasGcpModels))
-      );
-      if (lsModeMatches && clientModels.length > 0) {
-        const groupedMap = new Map();
-        for (const m of clientModels) {
-          const rawLabel = (m.label || "").trim();
-          const modelId = m.modelOrAlias?.model || m.modelOrAlias?.alias || "";
-          if (!rawLabel || !modelId) continue;
-          const baseLabel = rawLabel.replace(/\s*\((Low|Medium|High|Max)\)\s*$/i, "").trim();
-          if (!groupedMap.has(baseLabel)) {
-            groupedMap.set(baseLabel, {
-              label: baseLabel,
-              modelId: baseLabel,
-              variantIds: [baseLabel, rawLabel, modelId],
-              remainingPct: 100,
-              resetTime: "",
-              unlimited: true
-            });
-          } else {
-            const entry = groupedMap.get(baseLabel);
-            if (!entry.variantIds.includes(rawLabel)) entry.variantIds.push(rawLabel);
-            if (!entry.variantIds.includes(modelId)) entry.variantIds.push(modelId);
+  // 个人通道一律使用该账号自身的独立 OAuth Token 直连上游，彻底隔绝本地代理或切号瞬态缓存
+  if (isGcp && acc.email && acc.email === activeEmail && gcpPid === originalGcpPid) {
+    const ls = discoverLanguageServer(false);
+    if (ls) {
+      try {
+        const usResp = await callLsRpc(ls, "GetUserStatus", {}).catch(() => null);
+        const clientModels = usResp?.userStatus?.cascadeModelConfigData?.clientModelConfigs || [];
+        const usEmail = (usResp?.userStatus?.email || "").trim();
+        const usTierName = usResp?.userStatus?.userTier?.name || usResp?.userStatus?.planStatus?.planInfo?.planName || "";
+        const logInfo = parseLsLogInfo(ctx.lsLogFile);
+        const logPid = String(logInfo.lastProjectId || "").trim();
+        const lsHasGcpModels = clientModels.some(
+          (m) => !isModelEntryRestrictedOrSunset(m) && isGcpOnlyModel(m.label || m.modelOrAlias?.model || "")
+        );
+        const lsModeMatches = Boolean(
+          usEmail === acc.email &&
+          (logPid ? logPid === gcpPid : Boolean(/agent\s*platform|enterprise/i.test(usTierName) || lsHasGcpModels))
+        );
+        if (lsModeMatches && clientModels.length > 0) {
+          const groupedMap = new Map();
+          for (const m of clientModels) {
+            const rawLabel = (m.label || "").trim();
+            const modelId = m.modelOrAlias?.model || m.modelOrAlias?.alias || "";
+            if (!rawLabel || !modelId) continue;
+            const baseLabel = rawLabel.replace(/\s*\((Low|Medium|High|Max)\)\s*$/i, "").trim();
+            if (!groupedMap.has(baseLabel)) {
+              groupedMap.set(baseLabel, {
+                label: baseLabel,
+                modelId: baseLabel,
+                variantIds: [baseLabel, rawLabel, modelId],
+                remainingPct: 100,
+                resetTime: "",
+                unlimited: true
+              });
+            } else {
+              const entry = groupedMap.get(baseLabel);
+              if (!entry.variantIds.includes(rawLabel)) entry.variantIds.push(rawLabel);
+              if (!entry.variantIds.includes(modelId)) entry.variantIds.push(modelId);
+            }
+          }
+          const liveModels = Array.from(groupedMap.values());
+          if (liveModels.length > 0) {
+            if (!cfg.__meta__.liveTierModels || typeof cfg.__meta__.liveTierModels !== "object") {
+              cfg.__meta__.liveTierModels = {};
+            }
+            cfg.__meta__.liveTierModels.gcp = liveModels.map((m) => ({
+              label: m.label,
+              modelId: m.modelId,
+              variantIds: [...(m.variantIds || [m.label])]
+            }));
+            acc.cachedQuota = {
+              tierCode: "GCP",
+              tierName: acc.tierName || "Agent Platform",
+              hasArgonAccess: true,
+              isPaidProOrUltra: false,
+              isGcpUnlimited: true,
+              quotaGroups: [],
+              availableModels: liveModels,
+              probedVia: "language_server_rpc",
+              updatedAt: Date.now()
+            };
+            writeRelayConfig(cfg);
+            return acc.cachedQuota;
           }
         }
-        const liveModels = Array.from(groupedMap.values());
-        if (liveModels.length > 0) {
-          if (!cfg.__meta__.liveTierModels || typeof cfg.__meta__.liveTierModels !== "object") {
-            cfg.__meta__.liveTierModels = {};
-          }
-          cfg.__meta__.liveTierModels.gcp = liveModels.map((m) => ({
-            label: m.label,
-            modelId: m.modelId,
-            variantIds: [...(m.variantIds || [m.label])]
-          }));
-          acc.cachedQuota = {
-            tierCode: "GCP",
-            tierName: acc.tierName || "Agent Platform",
-            hasArgonAccess: true,
-            isPaidProOrUltra: false,
-            isGcpUnlimited: true,
-            quotaGroups: [],
-            availableModels: liveModels,
-            probedVia: "language_server_rpc",
-            updatedAt: Date.now()
-          };
-          writeRelayConfig(cfg);
-          return acc.cachedQuota;
-        }
-      }
-    } catch {}
+      } catch {}
+    }
   }
 
   const liveTierTemplate = cfg.__meta__?.liveTierModels?.[isGcp ? "gcp" : "personal"] || [];
@@ -592,12 +606,14 @@ export async function probeChannelQuotaSnapshot(channelId) {
         pushCandidateToken(item.storedToken);
       }
     }
-    const winCred = readWinCredToken(false);
-    if (winCred && winCred.id_token_email === acc.email && !winCred.project_id) {
-      pushCandidateToken(winCred);
-    }
     for (const item of Object.values(cfg.accounts || {})) {
       if (item.email === acc.email) pushCandidateToken(item.storedToken);
+    }
+    if (candidateTokenObjs.length === 0) {
+      const winCred = readWinCredToken(false);
+      if (winCred && winCred.id_token_email === acc.email && !winCred.project_id) {
+        pushCandidateToken(winCred);
+      }
     }
   } else {
     pushCandidateToken(cfg?.__meta__?.channelTokensById?.[acc.id]);
@@ -664,31 +680,34 @@ export async function probeChannelQuotaSnapshot(channelId) {
     if (isGcp && gcpPid) {
       loadPayload.cloudaicompanionProject = gcpPid;
     }
-    const loadResp = await callCloudCodeApi(
-      "/v1internal:loadCodeAssist",
-      tok,
-      loadPayload,
-      {},
-      PROD_HOSTNAME
-    );
+    const [loadResp, dailyLoadResp] = await Promise.all([
+      callCloudCodeApi("/v1internal:loadCodeAssist", tok, loadPayload, {}, PROD_HOSTNAME),
+      isGcp
+        ? Promise.resolve({ status: 0, data: null })
+        : callCloudCodeApi("/v1internal:loadCodeAssist", tok, loadPayload, {}, DAILY_HOSTNAME)
+    ]);
     let userTier = "";
-    if (loadResp.status === 200 && loadResp.data) {
-      if (!isGcp) {
-        const loadedPid = String(
-          loadResp.data.cloudaicompanionProject?.id ||
-          loadResp.data.cloudaicompanionProject ||
-          ""
-        ).trim();
-        if (loadedPid && !isDowngradedConsumerPoolProject(loadedPid)) {
-          companionPid = loadedPid;
+    for (const lr of [loadResp, dailyLoadResp]) {
+      if (lr && lr.status === 200 && lr.data) {
+        if (!isGcp && !companionPid) {
+          const loadedPid = String(
+            lr.data.cloudaicompanionProject?.id ||
+            lr.data.cloudaicompanionProject ||
+            ""
+          ).trim();
+          if (loadedPid && !isDowngradedConsumerPoolProject(loadedPid)) {
+            companionPid = loadedPid;
+          }
+        }
+        if (!userTier) {
+          const pTier = lr.data.paidTier || lr.data.currentTier || {};
+          userTier = String(
+            isGcp
+              ? (lr.data.currentTier?.id || "standard-tier")
+              : `${pTier.id || ""} ${pTier.name || ""}`
+          ).trim();
         }
       }
-      const pTier = loadResp.data.paidTier || loadResp.data.currentTier || {};
-      userTier = String(
-        isGcp
-          ? (loadResp.data.currentTier?.id || "standard-tier")
-          : `${pTier.id || ""} ${pTier.name || ""}`
-      ).trim();
     }
 
     if (isGcp) {
@@ -839,6 +858,7 @@ export async function probeChannelQuotaSnapshot(channelId) {
         );
         if (parsedPool && Array.isArray(parsedPool.quotaGroups) && parsedPool.quotaGroups.length > 0) {
           parsedPool.pool = poolKey;
+          parsedPool.quotaPool = poolKey;
           parsedPool.upstreamHostname = poolKey === "daily" ? DAILY_HOSTNAME : PROD_HOSTNAME;
           if (probeRes.companionPid) {
             parsedPool.companionProjectId = probeRes.companionPid;

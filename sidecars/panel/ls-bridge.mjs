@@ -271,15 +271,16 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
         : "";
     }
   } else {
-    // 主窗口：仅在刚点击面板切换的 15 秒过渡期内（或 LS 尚未返回邮箱时）优先使用 instPinnedAcc；
-    // 一旦过渡期结束且 LS 已返回实时邮箱與项目状态，100% 尊重底层真实状态（兼容用户原生退出/重登与手动修改项目 ID）
-    const lsActuallyGcp = Boolean(logPid || tierIndicatesGcp);
+    // 主窗口：兼容面板切号重启后 LS 尚未收到 ValidateProject 时的项目状态恢复，以及用户原生重登与修改项目 ID
+    const credIsGcpMethod = Boolean(cred && (cred.auth_method === "adc" || cred.auth_method === "gcp" || credPid));
+    const lsActuallyGcp = Boolean(logPid || tierIndicatesGcp || credIsGcpMethod);
     const pinnedMatchesLs = Boolean(
       instPinnedAcc &&
       lsEmail &&
       lsEmail === instPinnedAcc.email &&
-      lsActuallyGcp === Boolean(instPinnedAcc.gcpProjectId) &&
-      (!lsActuallyGcp || !logPid || logPid === instPinnedAcc.gcpProjectId)
+      (instMeta.switchedViaPanel ||
+        (lsActuallyGcp === Boolean(instPinnedAcc.gcpProjectId) &&
+          (!lsActuallyGcp || !logPid || logPid === instPinnedAcc.gcpProjectId)))
     );
     if (instPinnedAcc && (recentlySwitched || !lsEmail || pinnedMatchesLs)) {
       activeEmail = instPinnedAcc.email;
@@ -295,7 +296,7 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
     } else {
       activeEmail = credEmail || instMeta.activeEmail || cfg.__meta__?.activeEmail || "";
       if (cred) {
-        isLiveGcp = Boolean(cred.auth_method === "gcp" || credPid);
+        isLiveGcp = Boolean(cred.auth_method === "adc" || cred.auth_method === "gcp" || credPid);
       } else if (instMeta.lastAppliedGcpProject || cfg.__meta__?.lastAppliedGcpProject) {
         isLiveGcp = true;
       }
@@ -338,7 +339,7 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
 
   const deletedSet = new Set(Array.isArray(cfg.__meta__?.deletedChannelIds) ? cfg.__meta__.deletedChannelIds : []);
 
-  if (cred && credEmail && !isLiveGcp && cred.auth_method !== "gcp" && !credPid) {
+  if (cred && credEmail && !isLiveGcp && cred.auth_method !== "gcp" && cred.auth_method !== "adc" && !credPid) {
     if (!cfg.__meta__.oauthTokensByEmail || typeof cfg.__meta__.oauthTokensByEmail !== "object") {
       cfg.__meta__.oauthTokensByEmail = {};
     }
@@ -365,7 +366,7 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
   }
 
   if (activeEmail) {
-    const credIsGcp = Boolean(cred && (cred.auth_method === "gcp" || credPid));
+    const credIsGcp = Boolean(cred && (cred.auth_method === "gcp" || cred.auth_method === "adc" || credPid));
     const matchingCred = (cred && credEmail === activeEmail && credIsGcp === isLiveGcp)
       ? cred
       : findStoredTokenForEmail(cfg, activeEmail, isLiveGcp);
@@ -500,12 +501,12 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
     isLiveGcp &&
     activeGcpProject &&
     activeGcpBillingMode === "agent_platform" &&
-    (!lsHasGcpModels || Boolean(logInfo.lastUserTier) || Boolean(cred?.user_tier)) &&
+    (!lsHasGcpModels || logPid !== activeGcpProject || Boolean(logInfo.lastUserTier) || Boolean(cred?.user_tier) || cred?.auth_method !== "adc") &&
     instMeta.lastValidateProjectPid !== ls.pid
   ) {
     instMeta.lastValidateProjectPid = ls.pid;
     try {
-      if (cred && (cred.user_tier || cred.tier_display_name || cred.auth_method !== "gcp" || cred.project_id !== activeGcpProject)) {
+      if (cred && (cred.user_tier || cred.tier_display_name || cred.auth_method !== "adc" || cred.project_id !== activeGcpProject)) {
         const healedTok = buildCleanChannelToken(
           cred,
           activeGcpProject,
@@ -683,14 +684,28 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
       updatedAt: Date.now()
     };
   }
+  const activePool = getActivePersonalQuotaPool(cfg);
   if (!activeGcpProject && detectedChannelId && cfg.accounts[detectedChannelId]) {
-    const detCached = cfg.accounts[detectedChannelId].cachedQuota;
+    let detCached = cfg.accounts[detectedChannelId].cachedQuota;
+    const poolMatchedSnapshot = cfg.accounts[detectedChannelId].cachedQuotaByPool?.[activePool];
+    if (poolMatchedSnapshot?.quotaGroups?.length) {
+      detCached = poolMatchedSnapshot;
+      cfg.accounts[detectedChannelId].cachedQuota = poolMatchedSnapshot;
+    }
+    const detCachedPool = detCached?.pool || detCached?.quotaPool || "";
     const detCachedAt = Number(detCached?.updatedAt || 0);
-    if (forceWinCred || detCached?.probedVia !== "cloudcode_http" || !detCached?.quotaGroups?.length || (Date.now() - detCachedAt > 45000)) {
+    if (
+      forceWinCred ||
+      detCached?.probedVia !== "cloudcode_http" ||
+      !detCached?.quotaGroups?.length ||
+      (detCachedPool && detCachedPool !== activePool) ||
+      !cfg.accounts[detectedChannelId].companionProjectId ||
+      (Date.now() - detCachedAt > 45000)
+    ) {
       await probeChannelQuotaSnapshot(detectedChannelId).catch(() => {});
       const freshCfg = readRelayConfig();
       const freshAcc = freshCfg?.accounts?.[detectedChannelId];
-      const probed = freshAcc?.cachedQuota;
+      const probed = freshAcc?.cachedQuotaByPool?.[activePool] || freshAcc?.cachedQuota;
       if (freshAcc) {
         if (freshAcc.companionProjectId) {
           cfg.accounts[detectedChannelId].companionProjectId = freshAcc.companionProjectId;
@@ -716,8 +731,18 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
     }
   }
   if (activeChannelId && activeChannelId !== detectedChannelId && cfg.accounts[activeChannelId]) {
+    const activeIsGcp = Boolean(cfg.accounts[activeChannelId].gcpProjectId || cfg.accounts[activeChannelId].channelType === "gcp");
+    if (!activeIsGcp && cfg.accounts[activeChannelId].cachedQuotaByPool?.[activePool]?.quotaGroups?.length) {
+      cfg.accounts[activeChannelId].cachedQuota = cfg.accounts[activeChannelId].cachedQuotaByPool[activePool];
+    }
     const cachedAt = Number(cfg.accounts[activeChannelId].cachedQuota?.updatedAt || 0);
-    if (forceWinCred || !cfg.accounts[activeChannelId].cachedQuota?.quotaGroups?.length || (Date.now() - cachedAt > 45000)) {
+    const cachedPool = cfg.accounts[activeChannelId].cachedQuota?.pool || cfg.accounts[activeChannelId].cachedQuota?.quotaPool || "";
+    if (
+      forceWinCred ||
+      !cfg.accounts[activeChannelId].cachedQuota?.quotaGroups?.length ||
+      (!activeIsGcp && ((cachedPool && cachedPool !== activePool) || !cfg.accounts[activeChannelId].companionProjectId)) ||
+      (Date.now() - cachedAt > 45000)
+    ) {
       await probeChannelQuotaSnapshot(activeChannelId).catch(() => {});
       const freshCfg = readRelayConfig();
       const freshActive = freshCfg?.accounts?.[activeChannelId];
@@ -728,8 +753,9 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
         if (freshActive.cachedQuotaByPool) {
           cfg.accounts[activeChannelId].cachedQuotaByPool = freshActive.cachedQuotaByPool;
         }
-        if (freshActive.cachedQuota) {
-          cfg.accounts[activeChannelId].cachedQuota = freshActive.cachedQuota;
+        const activeProbed = (!activeIsGcp && freshActive.cachedQuotaByPool?.[activePool]) || freshActive.cachedQuota;
+        if (activeProbed) {
+          cfg.accounts[activeChannelId].cachedQuota = activeProbed;
         }
       }
     }

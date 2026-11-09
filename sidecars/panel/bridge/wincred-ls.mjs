@@ -583,7 +583,7 @@ export function buildStateVscdbSyncPayload(tokenObj, email = "", gcpProjectId = 
 
   let enterprisePrefsB64 = "";
   if (cleanPid) {
-    const entTopicBuf = buildTopicMapEntryBuffer("enterpriseGcpProjectId", Buffer.from(cleanPid, "utf8"));
+    const entTopicBuf = buildTopicMapEntryBuffer("enterpriseGcpProjectId", encodeProtoStringField(1, cleanPid));
     enterprisePrefsB64 = entTopicBuf.toString("base64");
   }
 
@@ -729,7 +729,7 @@ export function buildCleanChannelToken(
     next.writer_id = crypto.randomUUID();
   }
   if (cleanPid) {
-    next.auth_method = "gcp";
+    next.auth_method = gcpBillingMode === "gemini_enterprise" ? "gcp" : "adc";
     next.project_id = cleanPid;
     next.region = cleanLoc || "global";
     if (gcpBillingMode === "gemini_enterprise") {
@@ -1284,12 +1284,21 @@ function refreshOAuthAccessTokenWithClient(refreshToken, clientId, clientSecret)
       grant_type: "refresh_token"
     });
     const body = Buffer.from(params.toString(), "utf8");
+    let settled = false;
+    const finish = (err, val) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(hardTimer);
+      if (err) reject(err);
+      else resolve(val);
+    };
     const req = https.request(
       {
         hostname: "oauth2.googleapis.com",
         port: 443,
         path: "/token",
         method: "POST",
+        family: 4,
         headers: {
           "Content-Type": "application/x-www-form-urlencoded",
           "Content-Length": body.length
@@ -1311,20 +1320,24 @@ function refreshOAuthAccessTokenWithClient(refreshToken, clientId, clientSecret)
                 err.isAuthExpired = true;
               }
             }
-            return reject(err);
+            return finish(err);
           }
           try {
-            resolve(JSON.parse(text));
+            finish(null, JSON.parse(text));
           } catch (e) {
-            reject(e);
+            finish(e);
           }
         });
       }
     );
-    req.on("error", reject);
+    const hardTimer = setTimeout(() => {
+      req.destroy();
+      finish(new Error("Refresh token timeout"));
+    }, 4500);
+    req.on("error", (err) => finish(err));
     req.on("timeout", () => {
       req.destroy();
-      reject(new Error("Refresh token timeout"));
+      finish(new Error("Refresh token timeout"));
     });
     req.write(body);
     req.end();
