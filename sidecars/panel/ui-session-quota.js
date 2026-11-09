@@ -73,14 +73,6 @@ function getSignatureBadgeDisplay(sigStatus, t) {
       pillType: st.mismatched ? "mismatch" : "personal"
     };
   }
-  if (sigType === "mixed") {
-    return {
-      text: `${t.sigBadgeMixed || "签名: GCP+个人"}${t.sigMismatchSuffix || " · 不匹配"}`,
-      shortText: currentLang === "zh" ? "混合" : "Mixed",
-      className: "telemetry-sig-badge mixed mismatched",
-      pillType: "mismatch"
-    };
-  }
   return {
     text: t.sigBadgeNone || "无签名",
     shortText: currentLang === "zh" ? "无签名" : "Clean",
@@ -647,13 +639,39 @@ function createQuotaRingSvg(pct) {
 }
 
 function getActivePersonalPoolUi() {
-  return "daily";
+  const raw = state.personalQuotaPool || state.routing?.personalQuotaPool || "prod";
+  return String(raw).toLowerCase() === "daily" ? "daily" : "prod";
 }
 
-function renderQuotaPoolSwitch(_isGcpChannel) {
+function renderQuotaPoolSwitch(isGcpChannel) {
   const mount = document.getElementById("quotaPoolSwitchMount");
   if (!mount) return;
   mount.innerHTML = "";
+  if (isGcpChannel) return;
+  const t = I18N[currentLang];
+  const activePool = getActivePersonalPoolUi();
+  const wrap = document.createElement("div");
+  wrap.className = "quota-pool-switch";
+
+  const prodBtn = document.createElement("button");
+  prodBtn.type = "button";
+  prodBtn.className = "quota-pool-btn" + (activePool === "prod" ? " active" : "");
+  prodBtn.textContent = t.poolTabProd || (currentLang === "zh" ? "正式服 Prod" : "Prod Pool");
+  prodBtn.onclick = () => {
+    if (activePool !== "prod") switchPersonalQuotaPool("prod");
+  };
+
+  const dailyBtn = document.createElement("button");
+  dailyBtn.type = "button";
+  dailyBtn.className = "quota-pool-btn" + (activePool === "daily" ? " active" : "");
+  dailyBtn.textContent = t.poolTabDaily || (currentLang === "zh" ? "Daily 服" : "Daily Pool");
+  dailyBtn.onclick = () => {
+    if (activePool !== "daily") switchPersonalQuotaPool("daily");
+  };
+
+  wrap.appendChild(prodBtn);
+  wrap.appendChild(dailyBtn);
+  mount.appendChild(wrap);
 }
 
 // 1:1 对齐官方「使用量」弹窗：每个分组下把「周限额」和「5h limit」拆成独立行 + 右侧百分比 + SVG 圆环 + Resets in ...
@@ -815,7 +833,9 @@ function renderQuotaGroups() {
 
     const modelsLabel = document.createElement("div");
     modelsLabel.className = "gcp-models-label";
-    modelsLabel.textContent = t.gcpModelsLabel || "已识别可用模型：";
+    modelsLabel.textContent = activePool === "daily"
+      ? (t.personalModelsLabelDaily || "Daily 服已识别可用模型：")
+      : (t.personalModelsLabelProd || "正式服 (Prod) 已识别可用模型：");
     modelsCard.appendChild(modelsLabel);
 
     const chipsWrap = document.createElement("div");

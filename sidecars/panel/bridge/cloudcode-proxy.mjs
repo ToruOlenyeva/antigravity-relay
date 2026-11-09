@@ -20,6 +20,7 @@ import {
   probeChannelQuotaSnapshot,
   callCloudCodeApi,
   isDowngradedConsumerPoolProject,
+  resolvePersonalCompanionProjectId,
   normalizePersonalQuotaPool,
   getActivePersonalQuotaPool,
   getCloudCodeHostnameForPool
@@ -106,20 +107,25 @@ export function normalizeConsumerModelId(rawModelStr) {
 
 export async function ensurePersonalCompanionProjectId(cfg, acc, accessToken, targetHostname = "cloudcode-pa.googleapis.com") {
   if (!acc) return "";
-  const existing = String(
+  const resolved = resolvePersonalCompanionProjectId(
+    cfg,
+    acc.email,
     acc.companionProjectId ||
-    acc.cachedQuota?.companionProjectId ||
-    acc.cachedQuotaByPool?.prod?.companionProjectId ||
-    acc.cachedQuotaByPool?.daily?.companionProjectId ||
-    ""
-  ).trim();
-  if (existing && !isDowngradedConsumerPoolProject(existing)) {
-    if (!acc.companionProjectId) acc.companionProjectId = existing;
-    return existing;
+      acc.cachedQuota?.companionProjectId ||
+      acc.cachedQuotaByPool?.prod?.companionProjectId ||
+      acc.cachedQuotaByPool?.daily?.companionProjectId ||
+      ""
+  );
+  if (resolved && !isDowngradedConsumerPoolProject(resolved)) {
+    if (acc.companionProjectId !== resolved) {
+      acc.companionProjectId = resolved;
+      writeRelayConfig(cfg);
+    }
+    return resolved;
   }
   if (!accessToken) return "";
   const hostCandidates = Array.from(
-    new Set([targetHostname, "daily-cloudcode-pa.googleapis.com", "cloudcode-pa.googleapis.com"].filter(Boolean))
+    new Set([targetHostname, "cloudcode-pa.googleapis.com", "daily-cloudcode-pa.googleapis.com"].filter(Boolean))
   );
   for (const host of hostCandidates) {
     try {
@@ -139,17 +145,18 @@ export async function ensurePersonalCompanionProjectId(cfg, acc, accessToken, ta
           ""
         ).trim();
         if (pid && !isDowngradedConsumerPoolProject(pid)) {
-          acc.companionProjectId = pid;
+          const lockedPid = resolvePersonalCompanionProjectId(cfg, acc.email, pid);
+          acc.companionProjectId = lockedPid;
           if (acc.cachedQuota && typeof acc.cachedQuota === "object") {
-            acc.cachedQuota.companionProjectId = pid;
+            acc.cachedQuota.companionProjectId = lockedPid;
           }
           if (acc.cachedQuotaByPool && typeof acc.cachedQuotaByPool === "object") {
             for (const pq of Object.values(acc.cachedQuotaByPool)) {
-              if (pq && typeof pq === "object") pq.companionProjectId = pid;
+              if (pq && typeof pq === "object") pq.companionProjectId = lockedPid;
             }
           }
           writeRelayConfig(cfg);
-          return pid;
+          return lockedPid;
         }
       }
     } catch {}
@@ -213,6 +220,7 @@ export function extractModelDualQuota(accOrQuota, matched, baseFamily) {
 }
 
 export function hasActivePersonalRoutingConfig(cfg) {
+  if (getActivePersonalQuotaPool(cfg) === "prod") return true;
   const models = cfg?.routing?.models || {};
   return Object.values(models).some((v) => v && v !== "follow_current");
 }
@@ -221,6 +229,8 @@ export function selectBestPersonalRouteCandidate(baseFamily, cfg, excludedIds = 
   const accounts = Object.values(cfg?.accounts || {});
   const activeEmail = (cfg?.__meta__?.activeEmail || "").trim();
   const activeChannelId = activeEmail ? `${activeEmail}#personal` : "";
+  const preferredPool = getActivePersonalQuotaPool(cfg);
+  const poolsOrder = preferredPool === "daily" ? ["daily", "prod"] : ["prod", "daily"];
   const thresholdPct = Number(cfg?.routing?.lowQuotaThresholdPct ?? 5);
   const targetLower = (baseFamily || "").toLowerCase();
   const excludeSet = excludedIds instanceof Set ? excludedIds : new Set(Array.isArray(excludedIds) ? excludedIds : []);
@@ -228,44 +238,49 @@ export function selectBestPersonalRouteCandidate(baseFamily, cfg, excludedIds = 
 
   for (const acc of accounts) {
     const isGcp = acc.channelType === "gcp" || Boolean(acc.gcpProjectId);
-    if (isGcp || acc.authExpired || excludeSet.has(acc.id) || excludeSet.has(`${acc.id}@daily`)) continue;
+    if (isGcp || acc.authExpired || excludeSet.has(acc.id)) continue;
 
-    const poolQuota = acc.cachedQuotaByPool?.daily || acc.cachedQuota || null;
-    if (!poolQuota || typeof poolQuota !== "object") continue;
+    for (const poolKey of poolsOrder) {
+      if (excludeSet.has(`${acc.id}@${poolKey}`)) continue;
+      const poolQuota =
+        acc.cachedQuotaByPool?.[poolKey] ||
+        (poolKey === (acc.cachedQuota?.pool || acc.cachedQuota?.quotaPool || preferredPool) ? acc.cachedQuota : null);
+      if (!poolQuota || typeof poolQuota !== "object") continue;
 
-    const models = poolQuota.availableModels || [];
-    const matched = models.find((m) => {
-      const id = (m.modelId || m.label || "").toLowerCase();
-      if (id === targetLower) return true;
-      return Array.isArray(m.variantIds) && m.variantIds.some((v) => String(v).toLowerCase() === targetLower);
-    });
-    if (!matched && targetLower) continue;
+      const models = poolQuota.availableModels || [];
+      const matched = models.find((m) => {
+        const id = (m.modelId || m.label || "").toLowerCase();
+        if (id === targetLower) return true;
+        return Array.isArray(m.variantIds) && m.variantIds.some((v) => String(v).toLowerCase() === targetLower);
+      });
+      if (!matched && targetLower) continue;
 
-    const dual = extractModelDualQuota(poolQuota, matched, baseFamily);
-    if (dual.weeklyPct <= 0 || dual.fiveHourPct <= 0) continue;
+      const dual = extractModelDualQuota(poolQuota, matched, baseFamily);
+      if (dual.weeklyPct <= 0 || dual.fiveHourPct <= 0) continue;
 
-    const weeklyLow = dual.weeklyPct <= thresholdPct;
-    const effectiveWeeklyResetMs = dual.weeklyResetMs + (weeklyLow ? WEEK_PENALTY_MS : 0);
-    const fiveHourAboveThreshold = dual.fiveHourPct > thresholdPct;
+      const weeklyLow = dual.weeklyPct <= thresholdPct;
+      const effectiveWeeklyResetMs = dual.weeklyResetMs + (weeklyLow ? WEEK_PENALTY_MS : 0);
+      const fiveHourAboveThreshold = dual.fiveHourPct > thresholdPct;
 
-    candidates.push({
-      acc,
-      pool: "daily",
-      upstreamHostname: "daily-cloudcode-pa.googleapis.com",
-      matched,
-      weeklyPct: dual.weeklyPct,
-      fiveHourPct: dual.fiveHourPct,
-      fiveHourAboveThreshold,
-      effectiveWeeklyResetMs,
-      fiveHourResetMs: dual.fiveHourResetMs,
-      isCurrentAcc: acc.id === activeChannelId,
-      isPreferredPool: true
-    });
+      candidates.push({
+        acc,
+        pool: poolKey,
+        upstreamHostname: getCloudCodeHostnameForPool(poolKey, false),
+        matched,
+        weeklyPct: dual.weeklyPct,
+        fiveHourPct: dual.fiveHourPct,
+        fiveHourAboveThreshold,
+        effectiveWeeklyResetMs,
+        fiveHourResetMs: dual.fiveHourResetMs,
+        isCurrentAcc: acc.id === activeChannelId,
+        isPreferredPool: poolKey === preferredPool
+      });
+    }
   }
 
   if (candidates.length === 0) return null;
   candidates.sort((a, b) => {
-    // 0. 5小时限额门控：优先排 fiveHourPct > 5% 的账号
+    // 0. 5小时限额门控：优先排 fiveHourPct > 5% 的候选池
     if (a.fiveHourAboveThreshold !== b.fiveHourAboveThreshold) {
       return a.fiveHourAboveThreshold ? -1 : 1;
     }
@@ -277,7 +292,8 @@ export function selectBestPersonalRouteCandidate(baseFamily, cfg, excludedIds = 
     if (Math.abs(a.fiveHourResetMs - b.fiveHourResetMs) > 60000) {
       return a.fiveHourResetMs - b.fiveHourResetMs;
     }
-    // 3. 当两层重置时间处于同一窗口时，优先命中当前激活账号，避免因微小百分比差无谓跨号
+    // 3. 重置窗口相同时优先当前选中的配额池 (Prod / Daily) 与当前激活账号
+    if (a.isPreferredPool !== b.isPreferredPool) return a.isPreferredPool ? -1 : 1;
     if (a.isCurrentAcc !== b.isCurrentAcc) return a.isCurrentAcc ? -1 : 1;
     if (b.weeklyPct !== a.weeklyPct) return b.weeklyPct - a.weeklyPct;
     if (b.fiveHourPct !== a.fiveHourPct) return b.fiveHourPct - a.fiveHourPct;
@@ -412,8 +428,8 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
     const outHeaders = { ...baseHeaders };
     let outBodyBuf = rawBodyBuf || Buffer.alloc(0);
     let routedTargetAcc = null;
-    let targetPool = "daily";
-    let targetHostname = "daily-cloudcode-pa.googleapis.com";
+    let targetPool = preferredPool;
+    let targetHostname = defaultHostname;
     let strippedSigCount = 0;
 
     if (isGenerateEndpoint && parsedBodyJson) {
@@ -422,18 +438,52 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
         const bestCand = selectBestPersonalRouteCandidate(baseFamily, cfg, excludedIds);
         if (bestCand) {
           routedTargetAcc = bestCand.acc;
-        } else if (activePersonalAcc && !excludedIds.has(activePersonalAcc.id) && !excludedIds.has(`${activePersonalAcc.id}@daily`)) {
+          targetPool = bestCand.pool;
+          targetHostname = getCloudCodeHostnameForPool(targetPool);
+        } else if (activePersonalAcc && !excludedIds.has(`${activePersonalAcc.id}@${preferredPool}`)) {
           routedTargetAcc = activePersonalAcc;
+          targetPool = preferredPool;
+          targetHostname = getCloudCodeHostnameForPool(targetPool);
         }
       } else if (typeof routeSpec === "string" && routeSpec.startsWith("account:")) {
         const rawRef = routeSpec.slice(8).trim();
-        const [refId] = rawRef.split("@");
+        const [refId, explicitPool] = rawRef.split("@");
         const candidateAcc = cfg.accounts?.[refId];
-        if (candidateAcc && candidateAcc.channelType !== "gcp" && !candidateAcc.gcpProjectId && !excludedIds.has(candidateAcc.id) && !excludedIds.has(`${candidateAcc.id}@daily`)) {
-          routedTargetAcc = candidateAcc;
+        if (candidateAcc && candidateAcc.channelType !== "gcp" && !candidateAcc.gcpProjectId) {
+          let chosenPool = explicitPool ? normalizePersonalQuotaPool(explicitPool) : preferredPool;
+          const chosenQuota = candidateAcc.cachedQuotaByPool?.[chosenPool] || (chosenPool === preferredPool ? candidateAcc.cachedQuota : null);
+          const matchedChosen = (chosenQuota?.availableModels || []).find(
+            (m) => (m.modelId || m.label || "").toLowerCase() === baseFamily.toLowerCase()
+          );
+          const chosenDual = extractModelDualQuotaSnapshot(chosenQuota, matchedChosen, baseFamily);
+          if (!explicitPool && (chosenDual.weeklyPct <= 0 || chosenDual.fiveHourPct <= 0 || excludedIds.has(`${candidateAcc.id}@${chosenPool}`))) {
+            const altPool = chosenPool === "prod" ? "daily" : "prod";
+            const altQuota = candidateAcc.cachedQuotaByPool?.[altPool];
+            const matchedAlt = (altQuota?.availableModels || []).find(
+              (m) => (m.modelId || m.label || "").toLowerCase() === baseFamily.toLowerCase()
+            );
+            const altDual = extractModelDualQuotaSnapshot(altQuota, matchedAlt, baseFamily);
+            if (altDual.weeklyPct > 0 && altDual.fiveHourPct > 0 && !excludedIds.has(`${candidateAcc.id}@${altPool}`)) {
+              chosenPool = altPool;
+            }
+          }
+          if (!excludedIds.has(candidateAcc.id) && !excludedIds.has(`${candidateAcc.id}@${chosenPool}`)) {
+            routedTargetAcc = candidateAcc;
+            targetPool = chosenPool;
+            targetHostname = getCloudCodeHostnameForPool(targetPool);
+          }
         }
-      } else if (activePersonalAcc && !excludedIds.has(activePersonalAcc.id) && !excludedIds.has(`${activePersonalAcc.id}@daily`)) {
+      } else if (activePersonalAcc) {
+        let chosenPool = preferredPool;
+        if (excludedIds.has(`${activePersonalAcc.id}@${chosenPool}`)) {
+          const altPool = chosenPool === "prod" ? "daily" : "prod";
+          if (!excludedIds.has(`${activePersonalAcc.id}@${altPool}`)) {
+            chosenPool = altPool;
+          }
+        }
         routedTargetAcc = activePersonalAcc;
+        targetPool = chosenPool;
+        targetHostname = getCloudCodeHostnameForPool(targetPool);
       }
 
       outHeaders["Host"] = targetHostname;
@@ -448,7 +498,7 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
           delete outHeaders["x-goog-user-project"];
           delete outHeaders["X-Goog-User-Project"];
           const targetCompanionPid = await ensurePersonalCompanionProjectId(cfg, routedTargetAcc, targetToken, targetHostname);
-          bodyClone.project = targetCompanionPid || "aicode-consumers";
+          bodyClone.project = targetCompanionPid || (targetPool === "daily" ? "aicode-consumers" : "");
           cfg.__meta__.lastRoutedChannelId = routedTargetAcc.id;
           cfg.__meta__.lastRoutedPool = targetPool;
           cfg.__meta__.lastProxyHit = {
@@ -469,6 +519,8 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
         }
       }
       outBodyBuf = Buffer.from(JSON.stringify(bodyClone), "utf8");
+    } else {
+      outHeaders["Host"] = targetHostname;
     }
 
     outHeaders["Content-Length"] = outBodyBuf.length;
@@ -554,22 +606,31 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
                 const respJson = JSON.parse(respBuf.toString("utf8"));
                 if (respJson?.models && typeof respJson.models === "object") {
                   const routeMap = cfg.routing?.models || {};
+                  const curPool = getActivePersonalQuotaPool(cfg);
                   let modified = false;
                   for (const [mKey, mObj] of Object.entries(respJson.models)) {
                     if (!mObj || typeof mObj !== "object" || /disabled$/i.test(mKey)) continue;
                     const mFamily = resolveBaseModelFamilyFromId(mKey, cfg);
                     const rSpec = routeMap[mFamily] || routeMap[mKey] || "follow_current";
                     let tAcc = null;
+                    let tPool = curPool;
                     if (rSpec === "auto_poll") {
-                      tAcc = selectBestPersonalChannelForModel(mFamily, cfg);
+                      const bestCand = selectBestPersonalRouteCandidate(mFamily, cfg);
+                      if (bestCand) {
+                        tAcc = bestCand.acc;
+                        tPool = bestCand.pool;
+                      }
                     } else if (typeof rSpec === "string" && rSpec.startsWith("account:")) {
-                      tAcc = cfg.accounts?.[rSpec.slice(8).trim()] || null;
+                      const [refId, expPool] = rSpec.slice(8).trim().split("@");
+                      tAcc = cfg.accounts?.[refId] || null;
+                      if (expPool) tPool = normalizePersonalQuotaPool(expPool);
                     }
                     if (tAcc && tAcc.channelType !== "gcp" && !tAcc.gcpProjectId) {
                       const curFraction = mObj.quotaInfo?.remainingFraction !== undefined
                         ? Number(mObj.quotaInfo.remainingFraction)
                         : (mObj.quotaInfo?.resetTime ? 0 : 1);
-                      const matchedModel = (tAcc.cachedQuota?.availableModels || []).find(
+                      const snapModels = tAcc.cachedQuotaByPool?.[tPool]?.availableModels || tAcc.cachedQuota?.availableModels || [];
+                      const matchedModel = snapModels.find(
                         (item) => (item.modelId || item.label || "").toLowerCase() === mFamily.toLowerCase()
                       );
                       if (curFraction <= 0 && matchedModel && matchedModel.remainingPct > 0) {

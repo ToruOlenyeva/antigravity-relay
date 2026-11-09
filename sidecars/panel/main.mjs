@@ -311,8 +311,12 @@ async function requestHandler(req, res) {
   // 5. 切换通道或谷歌账号（写入凭据并调度当前实例独立自动重启，立即返回 HTTP 响应供前端展示重启过渡态）
   if (req.method === "POST" && pathname === "/api/switch-account") {
     try {
-      const { accountId, scrubSignatures } = await readJsonBody(req);
-      const result = await lsBridge.switchActiveGoogleAccount(accountId, { scrubSignatures });
+      const { accountId, scrubSignatures, conversationId } = await readJsonBody(req);
+      const targetConvId = conversationId || latestSnapshot?.telemetry?.fullConversationId || latestSnapshot?.telemetry?.conversationId || "";
+      const result = await lsBridge.switchActiveGoogleAccount(accountId, {
+        scrubSignatures,
+        conversationId: targetConvId
+      });
       const snap = result?.restarting && latestSnapshot
         ? latestSnapshot
         : await lsBridge.fetchLiveSystemSnapshot(false);

@@ -499,11 +499,11 @@ export function syncInstanceAppStorage(
     const cleanEmail = String(email || "").trim();
     if (cleanEmail) {
       storageObj["agy.onboarding.lastLoginUsername"] = cleanEmail;
-      storageObj["jetski.onboarding.lastLoginUsername"] = cleanEmail;
     }
+    delete storageObj["jetski.onboarding.lastLoginUsername"];
+    delete storageObj["jetski.onboarding.lastLoginIsGcpTos"];
     storageObj["agy.onboarding.lastLoginIsGcpTos"] = isGcp ? "true" : "false";
     storageObj["agy.onboarding.lastLoginStrategy"] = isGcp ? "gcp" : "google";
-    storageObj["jetski.onboarding.lastLoginIsGcpTos"] = Boolean(isGcp);
     const cleanPid = isGcp ? String(gcpProjectId || "").trim() : "";
     if (cleanPid) {
       storageObj["jetski.gcp.projectId"] = cleanPid;
@@ -515,6 +515,22 @@ export function syncInstanceAppStorage(
       delete storageObj["jetski.gcp.location"];
     }
     fs.writeFileSync(appStoragePath, JSON.stringify(storageObj, null, 2), "utf8");
+    const targetHome = isIsolated ? ensureInstanceIsolatedHome(userDataDir) : HOME_DIR;
+    const geminiCfgPath = path.join(targetHome, ".gemini", "config", "config.json");
+    if (fs.existsSync(geminiCfgPath)) {
+      try {
+        const gCfg = JSON.parse(fs.readFileSync(geminiCfgPath, "utf8"));
+        if (gCfg && typeof gCfg === "object") {
+          if (!gCfg.userSettings || typeof gCfg.userSettings !== "object") {
+            gCfg.userSettings = {};
+          }
+          if (cleanPid) {
+            gCfg.userSettings.gcpRegion = gcpLocation || "global";
+          }
+          fs.writeFileSync(geminiCfgPath, JSON.stringify(gCfg, null, 2), "utf8");
+        }
+      } catch {}
+    }
   } catch {}
 }
 
@@ -722,14 +738,15 @@ export function buildCleanChannelToken(
       access_token: String(next.token.access_token || "").trim(),
       token_type: String(next.token.token_type || "Bearer").trim(),
       refresh_token: String(next.token.refresh_token || "").trim(),
-      expiry: normalizeIsoExpiry(next.token.expiry)
+      expiry: normalizeIsoExpiry(next.token.expiry),
+      expires_in: Number(next.token.expires_in || 3599)
     };
   }
   if (forceNewWriterId || !next.writer_id) {
     next.writer_id = crypto.randomUUID();
   }
   if (cleanPid) {
-    next.auth_method = gcpBillingMode === "gemini_enterprise" ? "gcp" : "adc";
+    next.auth_method = "gcp";
     next.project_id = cleanPid;
     next.region = cleanLoc || "global";
     if (gcpBillingMode === "gemini_enterprise") {

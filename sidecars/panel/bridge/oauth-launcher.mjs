@@ -288,16 +288,37 @@ export async function restartCurrentAntigravityInstance(ctx = null, opts = {}) {
 
   const vscdbSyncMjs = [
     'import fs from "node:fs";',
+    'import path from "node:path";',
     'import { DatabaseSync } from "node:sqlite";',
     'const cfgPath = process.argv[2] || "";',
     'if (!cfgPath || !fs.existsSync(cfgPath)) process.exit(0);',
     'try {',
     '  const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));',
+    '  if (cfg.appStoragePath && cfg.appStorageContent) {',
+    '    try { fs.writeFileSync(cfg.appStoragePath, cfg.appStorageContent, "utf8"); } catch {}',
+    '  }',
+    '  const targetHome = String(cfg.isIsolated && cfg.isoHomeDir ? cfg.isoHomeDir : cfg.realHomeDir || "");',
+    '  if (targetHome) {',
+    '    try {',
+    '      const geminiCfgPath = path.join(targetHome, ".gemini", "config", "config.json");',
+    '      if (fs.existsSync(geminiCfgPath)) {',
+    '        const gCfg = JSON.parse(fs.readFileSync(geminiCfgPath, "utf8"));',
+    '        if (gCfg && typeof gCfg === "object") {',
+    '          if (!gCfg.userSettings || typeof gCfg.userSettings !== "object") gCfg.userSettings = {};',
+    '          if (cfg.vscdbPayload?.isGcp) {',
+    '            gCfg.userSettings.gcpRegion = cfg.gcpLocation || "global";',
+    '          }',
+    '          fs.writeFileSync(geminiCfgPath, JSON.stringify(gCfg, null, 2), "utf8");',
+    '        }',
+    '      }',
+    '    } catch {}',
+    '  }',
     '  const dbPath = String(cfg.stateVscdbPath || "");',
     '  const p = cfg.vscdbPayload;',
     '  if (dbPath && p && fs.existsSync(dbPath)) {',
     '    const db = new DatabaseSync(dbPath);',
     '    try {',
+    '      try { db.exec("PRAGMA busy_timeout = 5000;"); } catch {}',
     '      db.exec("CREATE TABLE IF NOT EXISTS ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)");',
     '      const upsert = db.prepare("INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)");',
     '      if (p.oauthTokenB64) upsert.run("antigravityUnifiedStateSync.oauthToken", p.oauthTokenB64);',
@@ -307,6 +328,20 @@ export async function restartCurrentAntigravityInstance(ctx = null, opts = {}) {
     '      } else {',
     '        db.prepare("DELETE FROM ItemTable WHERE key = ?").run("antigravityUnifiedStateSync.enterprisePreferences");',
     '      }',
+    '      let gcaObj = {};',
+    '      try {',
+    '        const gcaRow = db.prepare("SELECT value FROM ItemTable WHERE key = ?").get("google.geminicodeassist");',
+    '        if (gcaRow && gcaRow.value) {',
+    '          const parsedGca = JSON.parse(String(gcaRow.value));',
+    '          if (parsedGca && typeof parsedGca === "object") gcaObj = { ...parsedGca };',
+    '        }',
+    '      } catch {}',
+    '      if (p.isGcp && p.gcpProjectId) {',
+    '        gcaObj["geminicodeassist.project"] = p.gcpProjectId;',
+    '      } else {',
+    '        delete gcaObj["geminicodeassist.project"];',
+    '      }',
+    '      upsert.run("google.geminicodeassist", JSON.stringify(gcaObj));',
     '      let authObj = { name: p.email ? p.email.split("@")[0] : "User", email: p.email || "", apiKey: p.accessToken || "" };',
     '      try {',
     '        const row = db.prepare("SELECT value FROM ItemTable WHERE key = ?").get("antigravityAuthStatus");',
@@ -319,15 +354,39 @@ export async function restartCurrentAntigravityInstance(ctx = null, opts = {}) {
     '        }',
     '      } catch {}',
     '      upsert.run("antigravityAuthStatus", JSON.stringify(authObj));',
+    '      try { db.exec("PRAGMA wal_checkpoint(TRUNCATE);"); } catch {}',
     '    } finally {',
     '      db.close();',
     '    }',
+    '  }',
+    '  if (cfg.scrubConvId && cfg.realHomeDir && cfg.protoScrubPath && fs.existsSync(cfg.protoScrubPath)) {',
+    '    try {',
+    '      const { createRequire } = await import("node:module");',
+    '      const req = createRequire(import.meta.url);',
+    '      const { scrubSingleConversationDbSync } = req(cfg.protoScrubPath);',
+    '      const convDir = path.join(cfg.realHomeDir, ".gemini", "antigravity", "conversations");',
+    '      const targetDb = path.join(convDir, cfg.scrubConvId.endsWith(".db") ? cfg.scrubConvId : `${cfg.scrubConvId}.db`);',
+    '      if (fs.existsSync(targetDb)) scrubSingleConversationDbSync(targetDb);',
+    '      const sumDbPath = path.join(cfg.realHomeDir, ".gemini", "antigravity", "conversation_summaries.db");',
+    '      if (fs.existsSync(sumDbPath)) {',
+    '        const sdb = new DatabaseSync(sumDbPath);',
+    '        try {',
+    '          const children = sdb.prepare("SELECT conversation_id FROM conversation_summaries WHERE parent_conversation_id = ?").all(cfg.scrubConvId);',
+    '          for (const ch of children) {',
+    '            const chDb = path.join(convDir, `${ch.conversation_id}.db`);',
+    '            if (fs.existsSync(chDb)) scrubSingleConversationDbSync(chDb);',
+    '          }',
+    '        } finally { sdb.close(); }',
+    '      }',
+    '    } catch {}',
     '  }',
     '} catch {}'
   ].join("\n");
   try {
     fs.writeFileSync(vscdbSyncScriptPath, vscdbSyncMjs, "utf8");
   } catch {}
+
+  const protoScrubPath = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([a-zA-Z]:)/, "$1")), "../../../lib/proto-scrub.cjs");
 
   const restartCfg = {
     isIsolated,
@@ -341,8 +400,11 @@ export async function restartCurrentAntigravityInstance(ctx = null, opts = {}) {
     exeDir: path.dirname(exePath),
     nodeExePath: process.execPath,
     vscdbSyncScriptPath,
+    protoScrubPath,
     stateVscdbPath,
     vscdbPayload,
+    gcpLocation: String(opts?.gcpLocation || "global"),
+    scrubConvId: String(opts?.scrubConvId || ""),
     lsPid: Number(opts?.lsPid || 0),
     appStoragePath,
     appStorageContent,
@@ -398,9 +460,15 @@ export async function restartCurrentAntigravityInstance(ctx = null, opts = {}) {
     "  $pidArray = [int[]]::new($targetPids.Count)",
     "  $targetPids.CopyTo($pidArray)",
     "  Stop-Process -Id $pidArray -Force -ErrorAction SilentlyContinue",
-    "  Wait-Process -Id $pidArray -Timeout 3 -ErrorAction SilentlyContinue",
+    "  Wait-Process -Id $pidArray -Timeout 4 -ErrorAction SilentlyContinue",
     "}",
-    "Start-Sleep -Milliseconds 420",
+    "for ($w = 0; $w -lt 8; $w++) {",
+    "  $rem = Get-CimInstance Win32_Process -Filter \"Name = 'Antigravity.exe' OR Name LIKE 'language_server%'\" | Where-Object { $targetPids.Contains([int]$_.ProcessId) }",
+    "  if (-not $rem) { break }",
+    "  foreach ($rp in $rem) { Stop-Process -Id ([int]$rp.ProcessId) -Force -ErrorAction SilentlyContinue }",
+    "  Start-Sleep -Milliseconds 250",
+    "}",
+    "Start-Sleep -Milliseconds 350",
     "if ($cfg.appStoragePath -and $cfg.appStorageContent) {",
     "  [System.IO.File]::WriteAllText([string]$cfg.appStoragePath, [string]$cfg.appStorageContent, $utf8NoBom)",
     "}",
@@ -442,7 +510,10 @@ export async function restartCurrentAntigravityInstance(ctx = null, opts = {}) {
     "    }",
     "    [DllImport(\"Advapi32.dll\", SetLastError = true, CharSet = CharSet.Unicode)]",
     "    public static extern bool CredWriteW([In] ref CREDENTIAL userCredential, [In] uint flags);",
+    "    [DllImport(\"Advapi32.dll\", SetLastError = true, CharSet = CharSet.Unicode)]",
+    "    public static extern bool CredDeleteW(string target, uint type, uint flags);",
     "    public static bool Write(string target, string user, string secret) {",
+    "        for (int i = 0; i < 10; i++) { CredDeleteW(target + \":\" + i, 1, 0); }",
     "        byte[] byteArray = Encoding.UTF8.GetBytes(secret);",
     "        CREDENTIAL cred = new CREDENTIAL();",
     "        cred.Flags = 0;",
@@ -492,7 +563,7 @@ export async function restartCurrentAntigravityInstance(ctx = null, opts = {}) {
   try {
     const escapedScript = scriptPath.replace(/'/g, "''");
     const escapedCfg = configPath.replace(/'/g, "''");
-    const wmiCmd = `$startup = New-CimInstance -CimClass (Get-CimClass Win32_ProcessStartup) -ClientOnly; $startup.ShowWindow = [uint16]0; $cmdLine = "powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File \`"${escapedScript}\`" -ConfigPath \`"${escapedCfg}\`""; Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $cmdLine; ProcessStartupInformation = $startup } | Out-Null`;
+    const wmiCmd = `$startup = New-CimInstance -CimClass (Get-CimClass Win32_ProcessStartup) -ClientOnly; $startup.ShowWindow = [uint16]0; $cmdLine = 'powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "${escapedScript}" -ConfigPath "${escapedCfg}"'; Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $cmdLine; ProcessStartupInformation = $startup } | Out-Null`;
     execFileSync(
       "powershell.exe",
       ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", wmiCmd],
@@ -900,7 +971,7 @@ export async function computeSessionTelemetrySnapshot(cfgInput = null, instanceC
     const cid = String(r.conversation_id || "").trim();
     if (!cid) continue;
     const tStat = parseSingleConversationTranscript(cid, brainDir, knownDict, fallbackModel);
-    const sigStat = inspectConversationSignatureStatus(cid, activeIsGcp);
+    const sigStat = inspectConversationSignatureStatus(cid, activeIsGcp, cid === targetConvId);
     if (sigStat.hasGcpSig) projHasGcpSig = true;
     if (sigStat.hasPersonalSig) projHasPersonalSig = true;
     if (sigStat.mismatched) projMismatchedCount += 1;
@@ -955,7 +1026,7 @@ export async function computeSessionTelemetrySnapshot(cfgInput = null, instanceC
       conversationId: targetConvId ? targetConvId.slice(0, 8) : "",
       title: targetConvId ? targetConvId.slice(0, 8) : "",
       isCurrentActive: true,
-      signatureStatus: inspectConversationSignatureStatus(targetConvId, activeIsGcp),
+      signatureStatus: inspectConversationSignatureStatus(targetConvId, activeIsGcp, true),
       ...parseSingleConversationTranscript(targetConvId, brainDir, knownDict, fallbackModel)
     };
 
@@ -976,7 +1047,8 @@ export async function computeSessionTelemetrySnapshot(cfgInput = null, instanceC
     .sort((a, b) => b.totalTokens - a.totalTokens);
 
   let projSigType = "none";
-  if (projHasGcpSig && projHasPersonalSig) projSigType = "mixed";
+  if (activeIsGcp && projHasGcpSig) projSigType = "gcp";
+  else if (!activeIsGcp && projHasPersonalSig) projSigType = "personal";
   else if (projHasGcpSig) projSigType = "gcp";
   else if (projHasPersonalSig) projSigType = "personal";
 
@@ -1223,7 +1295,7 @@ export async function launchIsolatedAntigravityInstance(accountId) {
     ].join("\r\n");
     fs.writeFileSync(launchScriptPath, launchPsContent, "utf8");
     const escapedLaunchScript = launchScriptPath.replace(/'/g, "''");
-    const wmiLaunchCmd = `$startup = New-CimInstance -CimClass (Get-CimClass Win32_ProcessStartup) -ClientOnly; $startup.ShowWindow = [uint16]0; $cmdLine = "powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File \`"${escapedLaunchScript}\`""; $res = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $cmdLine; ProcessStartupInformation = $startup }; if ($res -and $res.ProcessId) { Write-Output $res.ProcessId }`;
+    const wmiLaunchCmd = `$startup = New-CimInstance -CimClass (Get-CimClass Win32_ProcessStartup) -ClientOnly; $startup.ShowWindow = [uint16]0; $cmdLine = 'powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "${escapedLaunchScript}"'; $res = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $cmdLine; ProcessStartupInformation = $startup }; if ($res -and $res.ProcessId) { Write-Output $res.ProcessId }`;
     const out = execFileSync(
       "powershell.exe",
       ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", wmiLaunchCmd],

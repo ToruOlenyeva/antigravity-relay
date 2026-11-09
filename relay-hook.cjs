@@ -6,6 +6,7 @@ const https = require("https");
 const os = require("os");
 const {
   sendLsRpcMethod,
+  scrubConversationOppositeSignaturesSync,
   scrubAndReloadCascadeIfNeeded,
   scrubAllConversationDbsSync
 } = require("./lib/proto-scrub.cjs");
@@ -205,6 +206,8 @@ function resolveBestAvailableChannelSpec(baseModelName, relayCfg) {
   if (accounts.length === 0) return null;
   const activeEmail = (relayCfg?.__meta__?.activeEmail || "").trim();
   const activeChannelId = activeEmail ? `${activeEmail}#personal` : "";
+  const preferredPool = String(relayCfg?.routing?.personalQuotaPool || "prod").toLowerCase() === "daily" ? "daily" : "prod";
+  const poolOrder = preferredPool === "daily" ? ["daily", "prod"] : ["prod", "daily"];
   const thresholdPct = Number(relayCfg?.routing?.lowQuotaThresholdPct ?? 5);
   const targetLower = (baseModelName || "").toLowerCase();
 
@@ -213,34 +216,36 @@ function resolveBestAvailableChannelSpec(baseModelName, relayCfg) {
   for (const acc of accounts) {
     const isGcp = acc.channelType === "gcp" || Boolean(acc.gcpProjectId);
     if (isGcp || acc.authExpired) continue;
-    const poolQuota = acc?.cachedQuotaByPool?.daily || acc?.cachedQuota || null;
-    if (!poolQuota || typeof poolQuota !== "object") continue;
-    const models = poolQuota.availableModels || [];
-    const matched = models.find((m) => {
-      const id = (m.modelId || m.label || "").toLowerCase();
-      if (id === targetLower) return true;
-      return Array.isArray(m.variantIds) && m.variantIds.some((v) => String(v).toLowerCase() === targetLower);
-    });
-    if (!matched && targetLower) continue;
-    const dual = extractModelDualQuotaForHook(poolQuota, matched, baseModelName);
-    if (dual.weeklyPct <= 0 || dual.fiveHourPct <= 0) continue;
+    for (const pool of poolOrder) {
+      const poolQuota = acc?.cachedQuotaByPool?.[pool] || (pool === preferredPool ? acc?.cachedQuota : null);
+      if (!poolQuota || typeof poolQuota !== "object") continue;
+      const models = poolQuota.availableModels || [];
+      const matched = models.find((m) => {
+        const id = (m.modelId || m.label || "").toLowerCase();
+        if (id === targetLower) return true;
+        return Array.isArray(m.variantIds) && m.variantIds.some((v) => String(v).toLowerCase() === targetLower);
+      });
+      if (!matched && targetLower) continue;
+      const dual = extractModelDualQuotaForHook(poolQuota, matched, baseModelName);
+      if (dual.weeklyPct <= 0 || dual.fiveHourPct <= 0) continue;
 
-    const weeklyLow = dual.weeklyPct <= thresholdPct;
-    const effectiveWeeklyResetMs = dual.weeklyResetMs + (weeklyLow ? WEEK_PENALTY_MS : 0);
-    const fiveHourAboveThreshold = dual.fiveHourPct > thresholdPct;
+      const weeklyLow = dual.weeklyPct <= thresholdPct;
+      const effectiveWeeklyResetMs = dual.weeklyResetMs + (weeklyLow ? WEEK_PENALTY_MS : 0);
+      const fiveHourAboveThreshold = dual.fiveHourPct > thresholdPct;
 
-    candidates.push({
-      acc,
-      pool: "daily",
-      weeklyPct: dual.weeklyPct,
-      fiveHourPct: dual.fiveHourPct,
-      fiveHourAboveThreshold,
-      effectiveWeeklyResetMs,
-      fiveHourResetMs: dual.fiveHourResetMs,
-      isPreferredPool: true,
-      isCurrent: acc.id === activeChannelId,
-      sameEmail: acc.email === activeEmail
-    });
+      candidates.push({
+        acc,
+        pool,
+        weeklyPct: dual.weeklyPct,
+        fiveHourPct: dual.fiveHourPct,
+        fiveHourAboveThreshold,
+        effectiveWeeklyResetMs,
+        fiveHourResetMs: dual.fiveHourResetMs,
+        isPreferredPool: pool === preferredPool,
+        isCurrent: acc.id === activeChannelId,
+        sameEmail: acc.email === activeEmail
+      });
+    }
   }
 
   if (candidates.length === 0) return null;
@@ -258,6 +263,7 @@ function resolveBestAvailableChannelSpec(baseModelName, relayCfg) {
     if (Math.abs(a.fiveHourResetMs - b.fiveHourResetMs) > 60000) {
       return a.fiveHourResetMs - b.fiveHourResetMs;
     }
+    if (a.isPreferredPool !== b.isPreferredPool) return a.isPreferredPool ? -1 : 1;
     if (b.weeklyPct !== a.weeklyPct) return b.weeklyPct - a.weeklyPct;
     if (b.fiveHourPct !== a.fiveHourPct) return b.fiveHourPct - a.fiveHourPct;
     if (a.isCurrent !== b.isCurrent) return a.isCurrent ? -1 : 1;
@@ -265,7 +271,7 @@ function resolveBestAvailableChannelSpec(baseModelName, relayCfg) {
     return 0;
   });
 
-  return `account:${candidates[0].acc.id}`;
+  return `account:${candidates[0].acc.id}@${candidates[0].pool}`;
 }
 
 function resolveHookInstanceMeta(relayCfg) {
@@ -388,7 +394,15 @@ async function applyTargetRoute(targetSpec, relayCfg, baseModelName = "", rawMod
   relayCfg.__meta__.lastRoutedModel = rawModelName || baseModelName || "";
 
   if (!targetSpec || targetSpec === "follow_current") {
+    const preferredPool = String(relayCfg?.routing?.personalQuotaPool || "prod").toLowerCase() === "daily" ? "daily" : "prod";
+    if (preferredPool === "prod") {
+      const lsTarget = activeMeta?.lsRpcTarget || relayCfg?.__meta__?.lsRpcTarget;
+      if (lsTarget) {
+        await ensureLocalCloudCodeProxyMounted(lsTarget, relayCfg, activeMeta);
+      }
+    }
     relayCfg.__meta__.lastRoutedChannelId = activeMeta?.activeChannelId || "";
+    relayCfg.__meta__.lastRoutedPool = preferredPool;
     writeJsonSafe(relayConfigPath, relayCfg);
     return false;
   }
@@ -404,7 +418,8 @@ async function applyTargetRoute(targetSpec, relayCfg, baseModelName = "", rawMod
   }
 
   if (resolvedSpec.startsWith("account:") || resolvedSpec.startsWith("channel:")) {
-    const accId = resolvedSpec.replace(/^(account|channel):/, "").trim();
+    const rawRef = resolvedSpec.replace(/^(account|channel):/, "").trim();
+    const [accId, explicitPool] = rawRef.split("@");
     const acc = relayCfg?.accounts?.[accId];
     if (!acc || acc.channelType === "gcp" || acc.gcpProjectId) {
       writeJsonSafe(relayConfigPath, relayCfg);
@@ -415,6 +430,7 @@ async function applyTargetRoute(targetSpec, relayCfg, baseModelName = "", rawMod
       await ensureLocalCloudCodeProxyMounted(lsTarget, relayCfg, activeMeta);
     }
     relayCfg.__meta__.lastRoutedChannelId = acc.id;
+    relayCfg.__meta__.lastRoutedPool = explicitPool || String(relayCfg?.routing?.personalQuotaPool || "prod");
     writeJsonSafe(relayConfigPath, relayCfg);
     return true;
   }
@@ -464,6 +480,10 @@ async function main() {
         await applyTargetRoute("follow_current", relayCfg, baseModelName, modelName, activeMeta);
       }
       if (convId) {
+        // 若用户切换到另一个历史会话发消息，仅对该单个会话定向剥离异种通道签名（绝不清空其他未打开的历史会话）
+        try {
+          scrubConversationOppositeSignaturesSync(convId, isGcpMode, convDir);
+        } catch (e) {}
         const currentActiveChannel =
           relayCfg.__meta__?.lastRoutedChannelId ||
           activeMeta?.activeChannelId ||

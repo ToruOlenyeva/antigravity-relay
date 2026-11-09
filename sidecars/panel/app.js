@@ -189,10 +189,13 @@ function getPoolModelsForScope(isGcpScope = false) {
       }
     }
   } else {
-    // 个人通道激活时，汇总已收录个人通道支持的可用模型
+    // 个人通道激活时，汇总已收录个人通道（Prod + Daily 双池）支持的可用模型
     for (const acc of (state.accounts || [])) {
       const isGcp = acc.channelType === "gcp" || Boolean(acc.gcpProjectId);
       if (isGcp) continue;
+      for (const m of (acc.cachedQuotaByPool?.prod?.availableModels || [])) {
+        addModelEntry(m, false);
+      }
       for (const m of (acc.cachedQuotaByPool?.daily?.availableModels || [])) {
         addModelEntry(m, false);
       }
@@ -392,14 +395,18 @@ function findModelInQuotaSnapshot(quotaSnap, modelObj) {
   return null;
 }
 
-function findModelInChannel(acc, modelObj) {
+function findModelInChannel(acc, modelObj, explicitPool = "") {
   if (!acc) return null;
   const isGcp = acc.channelType === "gcp" || Boolean(acc.gcpProjectId);
   if (isGcp) {
     return findModelInQuotaSnapshot(acc.cachedQuota, modelObj);
   }
-  const snap = acc.cachedQuotaByPool?.daily || acc.cachedQuota;
-  return findModelInQuotaSnapshot(snap, modelObj);
+  const activePool = explicitPool || getActivePersonalPoolUi();
+  const primarySnap = acc.cachedQuotaByPool?.[activePool] || acc.cachedQuota;
+  const matchedPrimary = findModelInQuotaSnapshot(primarySnap, modelObj);
+  if (matchedPrimary) return matchedPrimary;
+  const altPool = activePool === "prod" ? "daily" : "prod";
+  return findModelInQuotaSnapshot(acc.cachedQuotaByPool?.[altPool], modelObj);
 }
 
 const WEEK_PENALTY_MS = 7 * 24 * 3600 * 1000;
@@ -461,35 +468,39 @@ function extractModelDualQuotaUi(accOrQuota, matched, m) {
 }
 
 function selectAutoPollChannel(accounts, m, activeChannelId, thresholdPct = 5) {
+  const preferredPool = getActivePersonalPoolUi();
+  const poolOrder = preferredPool === "daily" ? ["daily", "prod"] : ["prod", "daily"];
   const candidates = [];
   for (const acc of accounts) {
     const isGcp = acc.channelType === "gcp" || Boolean(acc.gcpProjectId);
     if (isGcp) continue;
-    const poolSnap = acc.cachedQuotaByPool?.daily || acc.cachedQuota;
-    if (!poolSnap) continue;
-    const matched = findModelInQuotaSnapshot(poolSnap, m);
-    if (!matched) continue;
-    const dual = extractModelDualQuotaUi(poolSnap, matched, m);
-    if (dual.weeklyPct <= 0 || dual.fiveHourPct <= 0) continue;
+    for (const pool of poolOrder) {
+      const poolSnap = acc.cachedQuotaByPool?.[pool] || (pool === preferredPool ? acc.cachedQuota : null);
+      if (!poolSnap) continue;
+      const matched = findModelInQuotaSnapshot(poolSnap, m);
+      if (!matched) continue;
+      const dual = extractModelDualQuotaUi(poolSnap, matched, m);
+      if (dual.weeklyPct <= 0 || dual.fiveHourPct <= 0) continue;
 
-    const weeklyLow = dual.weeklyPct <= thresholdPct;
-    const effectiveWeeklyResetMs = dual.weeklyResetMs + (weeklyLow ? WEEK_PENALTY_MS : 0);
-    const fiveHourAboveThreshold = dual.fiveHourPct > thresholdPct;
+      const weeklyLow = dual.weeklyPct <= thresholdPct;
+      const effectiveWeeklyResetMs = dual.weeklyResetMs + (weeklyLow ? WEEK_PENALTY_MS : 0);
+      const fiveHourAboveThreshold = dual.fiveHourPct > thresholdPct;
 
-    candidates.push({
-      acc,
-      pool: "daily",
-      matched,
-      dual,
-      isGcp: false,
-      weeklyPct: dual.weeklyPct,
-      fiveHourPct: dual.fiveHourPct,
-      fiveHourAboveThreshold,
-      effectiveWeeklyResetMs,
-      fiveHourResetMs: dual.fiveHourResetMs,
-      isPreferredPool: true,
-      isCurrent: acc.id === activeChannelId
-    });
+      candidates.push({
+        acc,
+        pool,
+        matched,
+        dual,
+        isGcp: false,
+        weeklyPct: dual.weeklyPct,
+        fiveHourPct: dual.fiveHourPct,
+        fiveHourAboveThreshold,
+        effectiveWeeklyResetMs,
+        fiveHourResetMs: dual.fiveHourResetMs,
+        isPreferredPool: pool === preferredPool,
+        isCurrent: acc.id === activeChannelId
+      });
+    }
   }
   if (candidates.length === 0) return null;
 
@@ -505,6 +516,7 @@ function selectAutoPollChannel(accounts, m, activeChannelId, thresholdPct = 5) {
     if (Math.abs(a.fiveHourResetMs - b.fiveHourResetMs) > 60000) {
       return a.fiveHourResetMs - b.fiveHourResetMs;
     }
+    if (a.isPreferredPool !== b.isPreferredPool) return a.isPreferredPool ? -1 : 1;
     if (a.isCurrent !== b.isCurrent) return a.isCurrent ? -1 : 1;
     if (b.weeklyPct !== a.weeklyPct) return b.weeklyPct - a.weeklyPct;
     if (b.fiveHourPct !== a.fiveHourPct) return b.fiveHourPct - a.fiveHourPct;
@@ -519,12 +531,16 @@ function formatModelQuotaSubText(m, selectedRoute) {
   const accounts = state.accounts || [];
   const activeChannelId = state.activeAccount?.channelId || "";
   const thresholdPct = Number(state.routing?.lowQuotaThresholdPct ?? 5);
+  const activePool = getActivePersonalPoolUi();
 
   if (selectedRoute === "auto_poll") {
     const picked = selectAutoPollChannel(accounts, m, activeChannelId, thresholdPct);
     if (picked) {
-      const { acc: bestAcc, matched: bestModel, dual, isGcp } = picked;
-      const shortName = isGcp ? `${t.channelGcpBadge}·${bestAcc.gcpProjectId.slice(0, 12)}` : bestAcc.email.split("@")[0];
+      const { acc: bestAcc, pool: bestPool, matched: bestModel, dual, isGcp } = picked;
+      const poolBadge = bestPool === "daily" ? "Daily" : "Prod";
+      const shortName = isGcp
+        ? `${t.channelGcpBadge}·${bestAcc.gcpProjectId.slice(0, 12)}`
+        : `${bestAcc.email.split("@")[0]} (${poolBadge})`;
       if (isGcp) {
         return `${t.autoPollSubPrefix}${shortName} · ${t.gcpRouteSubUnlimited}`;
       }
@@ -541,27 +557,42 @@ function formatModelQuotaSubText(m, selectedRoute) {
     }
   }
 
-  const formatPersonalAccountModelSub = (targetAcc) => {
-    const snap = targetAcc.cachedQuotaByPool?.daily || targetAcc.cachedQuota;
-    const matched = findModelInQuotaSnapshot(snap, m);
-    if (matched) {
-      const dual = extractModelDualQuotaUi(snap, matched, m);
+  const formatPersonalAccountModelSub = (targetAcc, explicitPool = "") => {
+    let chosenPool = explicitPool || activePool;
+    let snap = targetAcc.cachedQuotaByPool?.[chosenPool] || (chosenPool === activePool ? targetAcc.cachedQuota : null);
+    let matched = findModelInQuotaSnapshot(snap, m);
+    let dual = matched ? extractModelDualQuotaUi(snap, matched, m) : null;
+    if (!explicitPool && (!matched || dual.weeklyPct <= 0 || dual.fiveHourPct <= 0)) {
+      const altPool = chosenPool === "prod" ? "daily" : "prod";
+      const altSnap = targetAcc.cachedQuotaByPool?.[altPool];
+      const altMatched = findModelInQuotaSnapshot(altSnap, m);
+      const altDual = altMatched ? extractModelDualQuotaUi(altSnap, altMatched, m) : null;
+      if (altMatched && altDual && altDual.weeklyPct > 0 && altDual.fiveHourPct > 0) {
+        chosenPool = altPool;
+        snap = altSnap;
+        matched = altMatched;
+        dual = altDual;
+      }
+    }
+    if (matched && dual) {
+      const poolSuffix = chosenPool === "daily" ? "Daily" : "Prod";
       const countdown = formatResetCountdown(dual.weeklyResetTime || matched.resetTime);
       if (dual.hasDistinct5h) {
         const wkLabel = currentLang === "zh" ? "周" : "Wk";
         return countdown
-          ? `${wkLabel} ${dual.weeklyPct}% (${countdown}) · 5h ${dual.fiveHourPct}%`
-          : `${wkLabel} ${dual.weeklyPct}% · 5h ${dual.fiveHourPct}%`;
+          ? `${poolSuffix} · ${wkLabel} ${dual.weeklyPct}% (${countdown}) · 5h ${dual.fiveHourPct}%`
+          : `${poolSuffix} · ${wkLabel} ${dual.weeklyPct}% · 5h ${dual.fiveHourPct}%`;
       }
       return countdown
-        ? `${t.remainingLabel} ${dual.weeklyPct}% · ${t.resetsInPrefix}${countdown}${t.resetsInSuffix}`
-        : `${t.remainingLabel} ${dual.weeklyPct}%`;
+        ? `${poolSuffix} · ${t.remainingLabel} ${dual.weeklyPct}% · ${t.resetsInPrefix}${countdown}${t.resetsInSuffix}`
+        : `${poolSuffix} · ${t.remainingLabel} ${dual.weeklyPct}%`;
     }
     return t.gcpRouteSubUnsupported;
   };
 
   if (selectedRoute && selectedRoute.startsWith("account:")) {
-    const accId = selectedRoute.slice(8);
+    const rawRef = selectedRoute.slice(8);
+    const [accId, explicitPool] = rawRef.split("@");
     const targetAcc = accounts.find((a) => a.id === accId);
     if (targetAcc) {
       const isGcp = targetAcc.channelType === "gcp" || Boolean(targetAcc.gcpProjectId);
@@ -569,7 +600,7 @@ function formatModelQuotaSubText(m, selectedRoute) {
         const matched = findModelInChannel(targetAcc, m);
         return matched ? t.gcpRouteSubUnlimited : t.gcpRouteSubUnsupported;
       }
-      return formatPersonalAccountModelSub(targetAcc);
+      return formatPersonalAccountModelSub(targetAcc, explicitPool || "");
     }
   }
 
@@ -904,10 +935,16 @@ async function switchGoogleAccount(accountId, scrubSignatures = false) {
     switchingAccountId = accountId;
     renderAccountList();
     showToast(I18N[currentLang].toastAccountSwitching);
+    const tel = state.telemetry || {};
+    const currentConvId = tel.fullConversationId || tel.conversationId || "";
     const res = await fetch("/api/switch-account", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ accountId, scrubSignatures: Boolean(scrubSignatures) })
+      body: JSON.stringify({
+        accountId,
+        scrubSignatures: Boolean(scrubSignatures),
+        conversationId: currentConvId
+      })
     });
     const data = await res.json();
     if (data && data.error) {

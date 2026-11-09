@@ -225,7 +225,7 @@ function resolveConversationDbPath(convIdOrPrefix) {
   return "";
 }
 
-export function inspectConversationSignatureStatus(convIdOrPrefix, activeIsGcp = false) {
+export function inspectConversationSignatureStatus(convIdOrPrefix, activeIsGcp = false, isCurrentActiveConv = false) {
   const fullPath = resolveConversationDbPath(convIdOrPrefix);
   const convId = fullPath ? path.basename(fullPath, ".db") : String(convIdOrPrefix || "").trim();
   if (!fullPath || !fs.existsSync(fullPath)) {
@@ -257,10 +257,11 @@ export function inspectConversationSignatureStatus(convIdOrPrefix, activeIsGcp =
     cached.mtimeMs === st.mtimeMs &&
     cached.size === st.size &&
     cached.walMtimeMs === st.walMtimeMs &&
-    cached.walSize === st.walSize
+    cached.walSize === st.walSize &&
+    !(cached.hasGcpSig && cached.hasPersonalSig) &&
+    !(isCurrentActiveConv && ((cached.sigType === "gcp" && !activeIsGcp) || (cached.sigType === "personal" && Boolean(activeIsGcp))))
   ) {
     const mismatched =
-      cached.sigType === "mixed" ||
       (cached.sigType === "gcp" && !activeIsGcp) ||
       (cached.sigType === "personal" && Boolean(activeIsGcp));
     return {
@@ -324,9 +325,28 @@ export function inspectConversationSignatureStatus(convIdOrPrefix, activeIsGcp =
     readOk = false;
   }
 
+  // GCP 签名与个人签名严禁在同一会话内共存（也严禁当前正在进行的活动会话残留异种通道签名）：
+  // 一旦检测到同时存在两种签名，或当前活动会话存在异种签名，立即定向剥离异种通道签名
+  if (
+    (hasGcpSig && hasPersonalSig) ||
+    (isCurrentActiveConv && ((activeIsGcp && hasPersonalSig) || (!activeIsGcp && hasGcpSig)))
+  ) {
+    const oppositeMagics = activeIsGcp ? PERSONAL_SIG_MAGICS : GCP_SIG_MAGICS;
+    const scrubbed = scrubConversationDbFile(fullPath, oppositeMagics, oppositeMagics);
+    if (scrubbed) {
+      if (activeIsGcp) {
+        hasPersonalSig = false;
+        lastSigType = hasGcpSig ? "gcp" : "none";
+      } else {
+        hasGcpSig = false;
+        lastSigType = hasPersonalSig ? "personal" : "none";
+      }
+    }
+  }
+
   let sigType = "none";
   if (hasGcpSig && hasPersonalSig) {
-    sigType = "mixed";
+    sigType = activeIsGcp ? "gcp" : "personal";
   } else if (hasGcpSig) {
     sigType = "gcp";
   } else if (hasPersonalSig) {
@@ -350,7 +370,6 @@ export function inspectConversationSignatureStatus(convIdOrPrefix, activeIsGcp =
   }
 
   const mismatched =
-    sigType === "mixed" ||
     (sigType === "gcp" && !activeIsGcp) ||
     (sigType === "personal" && Boolean(activeIsGcp));
 

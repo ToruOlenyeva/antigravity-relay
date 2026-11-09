@@ -489,24 +489,74 @@ export function findFirstGcpProjectForEmail(cfg, email) {
   return "";
 }
 
+export const KNOWN_COMPANION_PROJECTS_BY_EMAIL = {
+  "toruolenyeva@gmail.com": "rising-fact-p41fc",
+  "linolenyeva@gmail.com": "prime-signifier-07sc6",
+  "2358541069qq@gmail.com": "valuable-broker-952s0"
+};
+
 export function isInternalConsumerPoolProject(projectId) {
   const pid = String(projectId || "").trim();
   if (!pid) return true;
-  return /^(aicode-consumers|rising-fact-[a-z0-9-]+|gen-lang-client-[a-z0-9-]+|cloud-ai-companion-[a-z0-9-]+)$/i.test(pid);
+  return /^(aicode-consumers|rising-fact-[a-z0-9-]+|prime-signifier-[a-z0-9-]+|valuable-broker-[a-z0-9-]+|gen-lang-client-[a-z0-9-]+|cloud-ai-companion-[a-z0-9-]+)$/i.test(pid);
 }
 
 export function isDowngradedConsumerPoolProject(projectId) {
   const pid = String(projectId || "").trim();
-  return !pid;
+  if (!pid) return true;
+  return /^aicode-consumers$/i.test(pid);
 }
 
-export function normalizePersonalQuotaPool(_rawPool) {
-  return "daily";
+export function resolvePersonalCompanionProjectId(cfg, email, candidatePid = "") {
+  const cleanEmail = String(email || "").trim().toLowerCase();
+  const cleanCand = String(candidatePid || "").trim();
+  if (cleanCand && !isDowngradedConsumerPoolProject(cleanCand)) {
+    if (cfg && typeof cfg === "object") {
+      if (!cfg.__meta__ || typeof cfg.__meta__ !== "object") cfg.__meta__ = {};
+      if (!cfg.__meta__.companionProjectsByEmail || typeof cfg.__meta__.companionProjectsByEmail !== "object") {
+        cfg.__meta__.companionProjectsByEmail = {};
+      }
+      if (cleanEmail) {
+        cfg.__meta__.companionProjectsByEmail[cleanEmail] = cleanCand;
+      }
+    }
+    return cleanCand;
+  }
+  const fromMeta = cleanEmail ? String(cfg?.__meta__?.companionProjectsByEmail?.[cleanEmail] || "").trim() : "";
+  if (fromMeta && !isDowngradedConsumerPoolProject(fromMeta)) {
+    return fromMeta;
+  }
+  const known = cleanEmail ? String(KNOWN_COMPANION_PROJECTS_BY_EMAIL[cleanEmail] || "").trim() : "";
+  if (known) {
+    if (cfg && typeof cfg === "object") {
+      if (!cfg.__meta__ || typeof cfg.__meta__ !== "object") cfg.__meta__ = {};
+      if (!cfg.__meta__.companionProjectsByEmail || typeof cfg.__meta__.companionProjectsByEmail !== "object") {
+        cfg.__meta__.companionProjectsByEmail = {};
+      }
+      cfg.__meta__.companionProjectsByEmail[cleanEmail] = known;
+    }
+    return known;
+  }
+  return "";
+}
+
+export function normalizePersonalQuotaPool(rawPool) {
+  const v = String(rawPool || "").trim().toLowerCase();
+  return v === "daily" ? "daily" : "prod";
 }
 
 export function normalizeAccountChannels(cfg) {
   if (!cfg.accounts || typeof cfg.accounts !== "object") cfg.accounts = {};
   if (!Array.isArray(cfg.gcpProjects)) cfg.gcpProjects = [];
+  if (!cfg.__meta__ || typeof cfg.__meta__ !== "object") cfg.__meta__ = {};
+  if (!cfg.__meta__.companionProjectsByEmail || typeof cfg.__meta__.companionProjectsByEmail !== "object") {
+    cfg.__meta__.companionProjectsByEmail = {};
+  }
+  for (const [kEmail, kPid] of Object.entries(KNOWN_COMPANION_PROJECTS_BY_EMAIL)) {
+    if (!cfg.__meta__.companionProjectsByEmail[kEmail] || isDowngradedConsumerPoolProject(cfg.__meta__.companionProjectsByEmail[kEmail])) {
+      cfg.__meta__.companionProjectsByEmail[kEmail] = kPid;
+    }
+  }
   if (cfg.__meta__?.liveTierModels?.gcp && Array.isArray(cfg.__meta__.liveTierModels.gcp)) {
     const gcpTpl = cfg.__meta__.liveTierModels.gcp;
     const hasGcpExclusive = gcpTpl.some((m) => isGcpOnlyModel(m?.label || m?.modelId || ""));
@@ -518,9 +568,9 @@ export function normalizeAccountChannels(cfg) {
       }));
     }
   }
-  const activePool = "daily";
+  const activePool = normalizePersonalQuotaPool(cfg.routing?.personalQuotaPool);
   if (cfg.routing && typeof cfg.routing === "object") {
-    cfg.routing.personalQuotaPool = "daily";
+    cfg.routing.personalQuotaPool = activePool;
   }
   const deletedSet = new Set(Array.isArray(cfg.__meta__?.deletedChannelIds) ? cfg.__meta__.deletedChannelIds : []);
   const nextAccounts = {};
@@ -549,6 +599,9 @@ export function normalizeAccountChannels(cfg) {
 
       const liveTierKey = isGcp && pid ? "gcp" : "personal";
       const liveTierTemplate = cfg.__meta__?.liveTierModels?.[liveTierKey] || [];
+      const cleanCompanionPid = !isGcp
+        ? resolvePersonalCompanionProjectId(cfg, email, item.companionProjectId || item.cachedQuota?.companionProjectId || "")
+        : "";
       let cachedQuota = sanitizeCachedQuotaModels(
         item.cachedQuota || null,
         Boolean(isGcp && pid),
@@ -562,27 +615,45 @@ export function normalizeAccountChannels(cfg) {
         const rawByPool = item.cachedQuotaByPool && typeof item.cachedQuotaByPool === "object"
           ? item.cachedQuotaByPool
           : {};
-        if (rawByPool.daily && typeof rawByPool.daily === "object") {
-          cachedQuotaByPool.daily = sanitizeCachedQuotaModels(
-            rawByPool.daily,
-            false,
-            liveTierTemplate,
-            cleanPersonalTier,
-            item.tierCode || ""
-          );
-        }
-        if (cachedQuota && Array.isArray(cachedQuota.quotaGroups) && cachedQuota.quotaGroups.length > 0) {
-          const rawTag = cachedQuota.pool || cachedQuota.quotaPool || "";
-          if (rawTag !== "prod" && !cachedQuotaByPool.daily) {
-            cachedQuotaByPool.daily = cachedQuota;
+        for (const pKey of ["prod", "daily"]) {
+          if (rawByPool[pKey] && typeof rawByPool[pKey] === "object") {
+            const sanitizedPool = sanitizeCachedQuotaModels(
+              rawByPool[pKey],
+              false,
+              liveTierTemplate,
+              cleanPersonalTier,
+              item.tierCode || ""
+            );
+            if (sanitizedPool) {
+              sanitizedPool.pool = pKey;
+              sanitizedPool.quotaPool = pKey;
+              sanitizedPool.upstreamHostname = pKey === "daily" ? "daily-cloudcode-pa.googleapis.com" : "cloudcode-pa.googleapis.com";
+              if (cleanCompanionPid) sanitizedPool.companionProjectId = cleanCompanionPid;
+              cachedQuotaByPool[pKey] = sanitizedPool;
+            }
           }
         }
-        if (cachedQuotaByPool.daily?.quotaGroups?.length) {
+        if (cachedQuota && Array.isArray(cachedQuota.quotaGroups) && cachedQuota.quotaGroups.length > 0) {
+          const rawTag = cachedQuota.pool || cachedQuota.quotaPool || "daily";
+          const normTag = rawTag === "prod" ? "prod" : "daily";
+          if (!cachedQuotaByPool[normTag]) {
+            cachedQuota.pool = normTag;
+            cachedQuota.quotaPool = normTag;
+            if (cleanCompanionPid) cachedQuota.companionProjectId = cleanCompanionPid;
+            cachedQuotaByPool[normTag] = cachedQuota;
+          }
+        }
+        if (cachedQuotaByPool[activePool]?.quotaGroups?.length) {
+          cachedQuota = cachedQuotaByPool[activePool];
+        } else if (cachedQuotaByPool.prod?.quotaGroups?.length) {
+          cachedQuota = cachedQuotaByPool.prod;
+        } else if (cachedQuotaByPool.daily?.quotaGroups?.length) {
           cachedQuota = cachedQuotaByPool.daily;
         }
       }
-      const rawCompanionPid = String(item.companionProjectId || cachedQuota?.companionProjectId || "").trim();
-      const cleanCompanionPid = (!isGcp && !isDowngradedConsumerPoolProject(rawCompanionPid)) ? rawCompanionPid : "";
+      if (cachedQuota && cleanCompanionPid && !isGcp) {
+        cachedQuota.companionProjectId = cleanCompanionPid;
+      }
       const resolvedTierCode = isGcp && pid
         ? "GCP"
         : (cachedQuota?.tierCode || item.tierCode || (/ultra/i.test(cleanPersonalTier) ? "Ultra" : (/plus/i.test(cleanPersonalTier) ? "Plus" : (/free/i.test(cleanPersonalTier) ? "Free" : "Pro"))));
@@ -617,7 +688,12 @@ export function normalizeAccountChannels(cfg) {
         }
       }
 
+      const dedicatedGcpTok = (isGcp && pid) ? cfg.__meta__?.gcpOAuthTokensByEmail?.[email] : null;
+      const dedicatedPersTok = (!isGcp) ? cfg.__meta__?.oauthTokensByEmail?.[email] : null;
       const rawChannelTok =
+        (isGcp && pid && dedicatedGcpTok?.token?.refresh_token
+          ? dedicatedGcpTok
+          : (!isGcp && dedicatedPersTok?.token?.refresh_token ? dedicatedPersTok : null)) ||
         item.storedToken ||
         cfg.__meta__?.channelTokensById?.[normKey] ||
         findStoredTokenForEmail(cfg, email, Boolean(isGcp && pid));
@@ -710,7 +786,7 @@ export function normalizeAccountChannels(cfg) {
         continue;
       }
       if (typeof targetVal === "string" && targetVal.startsWith("account:")) {
-        const refId = targetVal.slice(8);
+        const refId = targetVal.slice(8).split("@")[0].trim();
         const refAcc = nextAccounts[refId];
         if (!refAcc || refAcc.channelType === "gcp" || refAcc.gcpProjectId) {
           delete cfg.routing.models[mKey];

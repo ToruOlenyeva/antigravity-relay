@@ -707,15 +707,9 @@ function buildAccountCardElement(acc, activeEmail, activeGcp) {
     switchBtn.textContent = t.btnSwitchAccount;
     switchBtn.onclick = () => {
       if (switchingAccountId) return;
-      // 同通道切换（个人 <-> 个人 或 GCP <-> GCP）直接无感切换且绝不清除签名；
-      // 仅当跨通道切换（个人 <-> GCP）时展开内联签名清理确认条
-      if (!isCrossChannelSwitch) {
-        pendingCrossSwitchAccountId = "";
-        switchGoogleAccount(acc.id, false);
-      } else {
-        pendingCrossSwitchAccountId = pendingCrossSwitchAccountId === acc.id ? "" : acc.id;
-        renderAccountList();
-      }
+      // 同通道切换（个人 <-> 个人 或 GCP <-> GCP）免清签名；
+      // 跨通道切换（个人 <-> GCP）仅自动净空当前正在进行的会话签名（绝不清空其他历史会话，也绝不允许保留异种签名导致混合冲突）
+      switchGoogleAccount(acc.id, Boolean(isCrossChannelSwitch));
     };
     rightBadges.appendChild(switchBtn);
   }
@@ -759,49 +753,6 @@ function buildAccountCardElement(acc, activeEmail, activeGcp) {
 
   top.appendChild(rightBadges);
   card.appendChild(top);
-
-  if (pendingCrossSwitchAccountId === acc.id && !isCurrent) {
-    const confirmBar = document.createElement("div");
-    confirmBar.className = "cross-switch-confirm-bar";
-
-    const promptEl = document.createElement("div");
-    promptEl.className = "cross-switch-prompt";
-    promptEl.textContent = t.crossSwitchPrompt;
-    confirmBar.appendChild(promptEl);
-
-    const actionsEl = document.createElement("div");
-    actionsEl.className = "cross-switch-actions";
-
-    const scrubAndSwitchBtn = document.createElement("button");
-    scrubAndSwitchBtn.className = "small";
-    scrubAndSwitchBtn.textContent = t.btnSwitchAndScrub;
-    scrubAndSwitchBtn.onclick = () => {
-      pendingCrossSwitchAccountId = "";
-      switchGoogleAccount(acc.id, true);
-    };
-
-    const switchOnlyBtn = document.createElement("button");
-    switchOnlyBtn.className = "secondary small";
-    switchOnlyBtn.textContent = t.btnSwitchKeepSig;
-    switchOnlyBtn.onclick = () => {
-      pendingCrossSwitchAccountId = "";
-      switchGoogleAccount(acc.id, false);
-    };
-
-    const cancelSwitchBtn = document.createElement("button");
-    cancelSwitchBtn.className = "secondary small";
-    cancelSwitchBtn.textContent = t.btnCancelDelete;
-    cancelSwitchBtn.onclick = () => {
-      pendingCrossSwitchAccountId = "";
-      renderAccountList();
-    };
-
-    actionsEl.appendChild(scrubAndSwitchBtn);
-    actionsEl.appendChild(switchOnlyBtn);
-    actionsEl.appendChild(cancelSwitchBtn);
-    confirmBar.appendChild(actionsEl);
-    card.appendChild(confirmBar);
-  }
 
   if (isGcpChannel) {
     const bottom = document.createElement("div");
