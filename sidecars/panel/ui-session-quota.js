@@ -647,39 +647,13 @@ function createQuotaRingSvg(pct) {
 }
 
 function getActivePersonalPoolUi() {
-  const raw = state?.personalQuotaPool || state?.routing?.personalQuotaPool || "prod";
-  return String(raw).toLowerCase() === "daily" ? "daily" : "prod";
+  return "daily";
 }
 
-function renderQuotaPoolSwitch(isGcpChannel) {
+function renderQuotaPoolSwitch(_isGcpChannel) {
   const mount = document.getElementById("quotaPoolSwitchMount");
   if (!mount) return;
   mount.innerHTML = "";
-  if (isGcpChannel) return;
-
-  const t = I18N[currentLang];
-  const activePool = getActivePersonalPoolUi();
-  const wrap = document.createElement("div");
-  wrap.className = "quota-pool-switch";
-
-  for (const poolItem of [
-    { key: "prod", label: t.poolTabProd || "正式服 Prod", host: "cloudcode-pa.googleapis.com" },
-    { key: "daily", label: t.poolTabDaily || "Daily 服", host: "daily-cloudcode-pa.googleapis.com" }
-  ]) {
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "quota-pool-btn" + (activePool === poolItem.key ? " active" : "");
-    btn.title = poolItem.host;
-    btn.textContent = poolItem.label;
-    btn.onclick = () => {
-      if (activePool !== poolItem.key && typeof switchPersonalQuotaPool === "function") {
-        switchPersonalQuotaPool(poolItem.key);
-      }
-    };
-    wrap.appendChild(btn);
-  }
-
-  mount.appendChild(wrap);
 }
 
 // 1:1 对齐官方「使用量」弹窗：每个分组下把「周限额」和「5h limit」拆成独立行 + 右侧百分比 + SVG 圆环 + Resets in ...
@@ -841,9 +815,7 @@ function renderQuotaGroups() {
 
     const modelsLabel = document.createElement("div");
     modelsLabel.className = "gcp-models-label";
-    modelsLabel.textContent = activePool === "daily"
-      ? (t.personalModelsLabelDaily || "Daily 服已识别可用模型：")
-      : (t.personalModelsLabelProd || "正式服 (Prod) 已识别可用模型：");
+    modelsLabel.textContent = t.gcpModelsLabel || "已识别可用模型：";
     modelsCard.appendChild(modelsLabel);
 
     const chipsWrap = document.createElement("div");

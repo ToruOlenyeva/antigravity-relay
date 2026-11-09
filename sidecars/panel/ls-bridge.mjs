@@ -56,6 +56,7 @@ import {
   getDetectedClientVersion
 } from "./bridge/quota-probe.mjs";
 import {
+  hasActivePersonalRoutingConfig,
   selectBestPersonalChannelForModel,
   proxyCloudCodeRequest,
   getActiveCloudCodeProxyUrl,
@@ -445,9 +446,12 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
       cfg.__meta__.lsRpcTarget = rpcTargetObj;
     }
 
-    const desiredProxyMode = !isLiveGcp ? "local_proxy" : "direct";
+    const hasPersonalRouting = hasActivePersonalRoutingConfig(cfg);
+    const desiredProxyMode = (!isLiveGcp && hasPersonalRouting) ? "local_proxy" : "direct";
     const localProxyUrl = getActiveCloudCodeProxyUrl(cfg);
-    const directUpstreamUrl = "https://cloudcode-pa.googleapis.com";
+    const directUpstreamUrl = isLiveGcp
+      ? "https://cloudcode-pa.googleapis.com"
+      : "https://daily-cloudcode-pa.googleapis.com";
     const targetUrl = desiredProxyMode === "local_proxy" ? localProxyUrl : directUpstreamUrl;
     if (desiredProxyMode === "local_proxy") {
       if (
@@ -468,7 +472,11 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
           })
           .catch(() => {});
       }
-    } else if (instMeta.cloudCodeProxyMode === "local_proxy" && instMeta.cloudCodeProxyPid === ls.pid) {
+    } else if (
+      instMeta.cloudCodeProxyMode === "local_proxy" ||
+      instMeta.cloudCodeProxyPid !== ls.pid ||
+      instMeta.cloudCodeProxyUrl !== targetUrl
+    ) {
       await callLsRpc(ls, "SetCloudCodeURL", { url: targetUrl })
         .then(() => {
           instMeta.cloudCodeProxyPid = ls.pid;
@@ -1000,9 +1008,13 @@ export async function switchActiveGoogleAccount(accountId, opts = {}) {
   }
 
   const currentLs = discoverLanguageServer(false);
+  const hasPersonalRouting = hasActivePersonalRoutingConfig(cfg);
+  const desiredProxyMode = (!targetProject && hasPersonalRouting) ? "local_proxy" : "direct";
   const localProxyUrl = getActiveCloudCodeProxyUrl(cfg);
-  const directUpstreamUrl = "https://cloudcode-pa.googleapis.com";
-  const targetUrl = !targetProject ? localProxyUrl : directUpstreamUrl;
+  const directUpstreamUrl = targetProject
+    ? "https://cloudcode-pa.googleapis.com"
+    : "https://daily-cloudcode-pa.googleapis.com";
+  const targetUrl = desiredProxyMode === "local_proxy" ? localProxyUrl : directUpstreamUrl;
 
   const tokenToWrite = buildCleanChannelToken(baseToken, targetProject, targetLocation, true, targetBillingMode);
   target.storedToken = tokenToWrite;
@@ -1050,7 +1062,7 @@ export async function switchActiveGoogleAccount(accountId, opts = {}) {
     target.email,
     targetProject
   );
-  instMeta.cloudCodeProxyMode = !targetProject ? "local_proxy" : "direct";
+  instMeta.cloudCodeProxyMode = desiredProxyMode;
   instMeta.cloudCodeProxyUrl = targetUrl;
   if (!ctx.isIsolatedInstance) {
     cfg.__meta__.cloudCodeProxyMode = instMeta.cloudCodeProxyMode;

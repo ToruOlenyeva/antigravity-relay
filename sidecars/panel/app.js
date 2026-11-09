@@ -189,14 +189,12 @@ function getPoolModelsForScope(isGcpScope = false) {
       }
     }
   } else {
-    // 个人通道激活时，汇总已收录个人通道在 Prod 与 Daily 双服下支持的可用模型
+    // 个人通道激活时，汇总已收录个人通道支持的可用模型
     for (const acc of (state.accounts || [])) {
       const isGcp = acc.channelType === "gcp" || Boolean(acc.gcpProjectId);
       if (isGcp) continue;
-      for (const poolKey of ["prod", "daily"]) {
-        for (const m of (acc.cachedQuotaByPool?.[poolKey]?.availableModels || [])) {
-          addModelEntry(m, false);
-        }
+      for (const m of (acc.cachedQuotaByPool?.daily?.availableModels || [])) {
+        addModelEntry(m, false);
       }
       for (const m of (acc.cachedQuota?.availableModels || [])) {
         addModelEntry(m, false);
@@ -394,20 +392,14 @@ function findModelInQuotaSnapshot(quotaSnap, modelObj) {
   return null;
 }
 
-function findModelInChannel(acc, modelObj, preferredPool = "") {
+function findModelInChannel(acc, modelObj) {
   if (!acc) return null;
   const isGcp = acc.channelType === "gcp" || Boolean(acc.gcpProjectId);
   if (isGcp) {
     return findModelInQuotaSnapshot(acc.cachedQuota, modelObj);
   }
-  const activePool = preferredPool || (String(state?.personalQuotaPool || state?.routing?.personalQuotaPool || "prod").toLowerCase() === "daily" ? "daily" : "prod");
-  const altPool = activePool === "daily" ? "prod" : "daily";
-  for (const pk of [activePool, altPool]) {
-    const snap = acc.cachedQuotaByPool?.[pk];
-    const found = findModelInQuotaSnapshot(snap, modelObj);
-    if (found) return found;
-  }
-  return findModelInQuotaSnapshot(acc.cachedQuota, modelObj);
+  const snap = acc.cachedQuotaByPool?.daily || acc.cachedQuota;
+  return findModelInQuotaSnapshot(snap, modelObj);
 }
 
 const WEEK_PENALTY_MS = 7 * 24 * 3600 * 1000;
@@ -470,37 +462,34 @@ function extractModelDualQuotaUi(accOrQuota, matched, m) {
 
 function selectAutoPollChannel(accounts, m, activeChannelId, thresholdPct = 5) {
   const candidates = [];
-  const preferredPool = String(state?.personalQuotaPool || state?.routing?.personalQuotaPool || "prod").toLowerCase() === "daily" ? "daily" : "prod";
   for (const acc of accounts) {
     const isGcp = acc.channelType === "gcp" || Boolean(acc.gcpProjectId);
     if (isGcp) continue;
-    for (const poolKey of ["prod", "daily"]) {
-      const poolSnap = acc.cachedQuotaByPool?.[poolKey] || (poolKey === preferredPool ? acc.cachedQuota : null);
-      if (!poolSnap) continue;
-      const matched = findModelInQuotaSnapshot(poolSnap, m);
-      if (!matched) continue;
-      const dual = extractModelDualQuotaUi(poolSnap, matched, m);
-      if (dual.weeklyPct <= 0 || dual.fiveHourPct <= 0) continue;
+    const poolSnap = acc.cachedQuotaByPool?.daily || acc.cachedQuota;
+    if (!poolSnap) continue;
+    const matched = findModelInQuotaSnapshot(poolSnap, m);
+    if (!matched) continue;
+    const dual = extractModelDualQuotaUi(poolSnap, matched, m);
+    if (dual.weeklyPct <= 0 || dual.fiveHourPct <= 0) continue;
 
-      const weeklyLow = dual.weeklyPct <= thresholdPct;
-      const effectiveWeeklyResetMs = dual.weeklyResetMs + (weeklyLow ? WEEK_PENALTY_MS : 0);
-      const fiveHourAboveThreshold = dual.fiveHourPct > thresholdPct;
+    const weeklyLow = dual.weeklyPct <= thresholdPct;
+    const effectiveWeeklyResetMs = dual.weeklyResetMs + (weeklyLow ? WEEK_PENALTY_MS : 0);
+    const fiveHourAboveThreshold = dual.fiveHourPct > thresholdPct;
 
-      candidates.push({
-        acc,
-        pool: poolKey,
-        matched,
-        dual,
-        isGcp: false,
-        weeklyPct: dual.weeklyPct,
-        fiveHourPct: dual.fiveHourPct,
-        fiveHourAboveThreshold,
-        effectiveWeeklyResetMs,
-        fiveHourResetMs: dual.fiveHourResetMs,
-        isPreferredPool: poolKey === preferredPool,
-        isCurrent: acc.id === activeChannelId
-      });
-    }
+    candidates.push({
+      acc,
+      pool: "daily",
+      matched,
+      dual,
+      isGcp: false,
+      weeklyPct: dual.weeklyPct,
+      fiveHourPct: dual.fiveHourPct,
+      fiveHourAboveThreshold,
+      effectiveWeeklyResetMs,
+      fiveHourResetMs: dual.fiveHourResetMs,
+      isPreferredPool: true,
+      isCurrent: acc.id === activeChannelId
+    });
   }
   if (candidates.length === 0) return null;
 
@@ -516,10 +505,9 @@ function selectAutoPollChannel(accounts, m, activeChannelId, thresholdPct = 5) {
     if (Math.abs(a.fiveHourResetMs - b.fiveHourResetMs) > 60000) {
       return a.fiveHourResetMs - b.fiveHourResetMs;
     }
+    if (a.isCurrent !== b.isCurrent) return a.isCurrent ? -1 : 1;
     if (b.weeklyPct !== a.weeklyPct) return b.weeklyPct - a.weeklyPct;
     if (b.fiveHourPct !== a.fiveHourPct) return b.fiveHourPct - a.fiveHourPct;
-    if (a.isPreferredPool !== b.isPreferredPool) return a.isPreferredPool ? -1 : 1;
-    if (a.isCurrent !== b.isCurrent) return a.isCurrent ? -1 : 1;
     return 0;
   });
 
@@ -531,14 +519,12 @@ function formatModelQuotaSubText(m, selectedRoute) {
   const accounts = state.accounts || [];
   const activeChannelId = state.activeAccount?.channelId || "";
   const thresholdPct = Number(state.routing?.lowQuotaThresholdPct ?? 5);
-  const activePool = String(state?.personalQuotaPool || state?.routing?.personalQuotaPool || "prod").toLowerCase() === "daily" ? "daily" : "prod";
 
   if (selectedRoute === "auto_poll") {
     const picked = selectAutoPollChannel(accounts, m, activeChannelId, thresholdPct);
     if (picked) {
-      const { acc: bestAcc, pool: bestPool, matched: bestModel, dual, isGcp } = picked;
-      const poolTag = bestPool === "daily" ? (t.poolTagDailyShort || "Daily") : (t.poolTagProdShort || "Prod");
-      const shortName = isGcp ? `${t.channelGcpBadge}·${bestAcc.gcpProjectId.slice(0, 12)}` : `${bestAcc.email.split("@")[0]} (${poolTag})`;
+      const { acc: bestAcc, matched: bestModel, dual, isGcp } = picked;
+      const shortName = isGcp ? `${t.channelGcpBadge}·${bestAcc.gcpProjectId.slice(0, 12)}` : bestAcc.email.split("@")[0];
       if (isGcp) {
         return `${t.autoPollSubPrefix}${shortName} · ${t.gcpRouteSubUnlimited}`;
       }
@@ -556,24 +542,20 @@ function formatModelQuotaSubText(m, selectedRoute) {
   }
 
   const formatPersonalAccountModelSub = (targetAcc) => {
-    const altPool = activePool === "daily" ? "prod" : "daily";
-    for (const pk of [activePool, altPool]) {
-      const snap = targetAcc.cachedQuotaByPool?.[pk] || (pk === activePool ? targetAcc.cachedQuota : null);
-      const matched = findModelInQuotaSnapshot(snap, m);
-      if (matched) {
-        const dual = extractModelDualQuotaUi(snap, matched, m);
-        const poolTag = pk === "daily" ? (t.poolTagDailyShort || "Daily") : (t.poolTagProdShort || "Prod");
-        const countdown = formatResetCountdown(dual.weeklyResetTime || matched.resetTime);
-        if (dual.hasDistinct5h) {
-          const wkLabel = currentLang === "zh" ? "周" : "Wk";
-          return countdown
-            ? `${poolTag} · ${wkLabel} ${dual.weeklyPct}% (${countdown}) · 5h ${dual.fiveHourPct}%`
-            : `${poolTag} · ${wkLabel} ${dual.weeklyPct}% · 5h ${dual.fiveHourPct}%`;
-        }
+    const snap = targetAcc.cachedQuotaByPool?.daily || targetAcc.cachedQuota;
+    const matched = findModelInQuotaSnapshot(snap, m);
+    if (matched) {
+      const dual = extractModelDualQuotaUi(snap, matched, m);
+      const countdown = formatResetCountdown(dual.weeklyResetTime || matched.resetTime);
+      if (dual.hasDistinct5h) {
+        const wkLabel = currentLang === "zh" ? "周" : "Wk";
         return countdown
-          ? `${poolTag} · ${t.remainingLabel} ${dual.weeklyPct}% · ${t.resetsInPrefix}${countdown}${t.resetsInSuffix}`
-          : `${poolTag} · ${t.remainingLabel} ${dual.weeklyPct}%`;
+          ? `${wkLabel} ${dual.weeklyPct}% (${countdown}) · 5h ${dual.fiveHourPct}%`
+          : `${wkLabel} ${dual.weeklyPct}% · 5h ${dual.fiveHourPct}%`;
       }
+      return countdown
+        ? `${t.remainingLabel} ${dual.weeklyPct}% · ${t.resetsInPrefix}${countdown}${t.resetsInSuffix}`
+        : `${t.remainingLabel} ${dual.weeklyPct}%`;
     }
     return t.gcpRouteSubUnsupported;
   };

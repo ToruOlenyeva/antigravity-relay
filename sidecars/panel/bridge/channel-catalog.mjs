@@ -497,11 +497,11 @@ export function isInternalConsumerPoolProject(projectId) {
 
 export function isDowngradedConsumerPoolProject(projectId) {
   const pid = String(projectId || "").trim();
-  return !pid || /^aicode-consumers$/i.test(pid);
+  return !pid;
 }
 
-export function normalizePersonalQuotaPool(rawPool) {
-  return String(rawPool || "").trim().toLowerCase() === "daily" ? "daily" : "prod";
+export function normalizePersonalQuotaPool(_rawPool) {
+  return "daily";
 }
 
 export function normalizeAccountChannels(cfg) {
@@ -518,7 +518,10 @@ export function normalizeAccountChannels(cfg) {
       }));
     }
   }
-  const activePool = normalizePersonalQuotaPool(cfg?.routing?.personalQuotaPool || cfg?.__meta__?.personalQuotaPool || "prod");
+  const activePool = "daily";
+  if (cfg.routing && typeof cfg.routing === "object") {
+    cfg.routing.personalQuotaPool = "daily";
+  }
   const deletedSet = new Set(Array.isArray(cfg.__meta__?.deletedChannelIds) ? cfg.__meta__.deletedChannelIds : []);
   const nextAccounts = {};
 
@@ -559,29 +562,22 @@ export function normalizeAccountChannels(cfg) {
         const rawByPool = item.cachedQuotaByPool && typeof item.cachedQuotaByPool === "object"
           ? item.cachedQuotaByPool
           : {};
-        for (const pKey of ["prod", "daily"]) {
-          if (rawByPool[pKey] && typeof rawByPool[pKey] === "object") {
-            cachedQuotaByPool[pKey] = sanitizeCachedQuotaModels(
-              rawByPool[pKey],
-              false,
-              liveTierTemplate,
-              cleanPersonalTier,
-              item.tierCode || ""
-            );
-          }
+        if (rawByPool.daily && typeof rawByPool.daily === "object") {
+          cachedQuotaByPool.daily = sanitizeCachedQuotaModels(
+            rawByPool.daily,
+            false,
+            liveTierTemplate,
+            cleanPersonalTier,
+            item.tierCode || ""
+          );
         }
         if (cachedQuota && Array.isArray(cachedQuota.quotaGroups) && cachedQuota.quotaGroups.length > 0) {
           const rawTag = cachedQuota.pool || cachedQuota.quotaPool || "";
-          const taggedPool = rawTag === "daily" ? "daily" : (rawTag === "prod" ? "prod" : activePool);
-          if (!cachedQuotaByPool[taggedPool]) {
-            cachedQuotaByPool[taggedPool] = cachedQuota;
+          if (rawTag !== "prod" && !cachedQuotaByPool.daily) {
+            cachedQuotaByPool.daily = cachedQuota;
           }
         }
-        if (cachedQuotaByPool[activePool]?.quotaGroups?.length) {
-          cachedQuota = cachedQuotaByPool[activePool];
-        } else if (cachedQuotaByPool.prod?.quotaGroups?.length) {
-          cachedQuota = cachedQuotaByPool.prod;
-        } else if (cachedQuotaByPool.daily?.quotaGroups?.length) {
+        if (cachedQuotaByPool.daily?.quotaGroups?.length) {
           cachedQuota = cachedQuotaByPool.daily;
         }
       }

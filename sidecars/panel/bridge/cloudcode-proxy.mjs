@@ -212,11 +212,15 @@ export function extractModelDualQuota(accOrQuota, matched, baseFamily) {
   };
 }
 
+export function hasActivePersonalRoutingConfig(cfg) {
+  const models = cfg?.routing?.models || {};
+  return Object.values(models).some((v) => v && v !== "follow_current");
+}
+
 export function selectBestPersonalRouteCandidate(baseFamily, cfg, excludedIds = null) {
   const accounts = Object.values(cfg?.accounts || {});
   const activeEmail = (cfg?.__meta__?.activeEmail || "").trim();
   const activeChannelId = activeEmail ? `${activeEmail}#personal` : "";
-  const preferredPool = getActivePersonalQuotaPool(cfg);
   const thresholdPct = Number(cfg?.routing?.lowQuotaThresholdPct ?? 5);
   const targetLower = (baseFamily || "").toLowerCase();
   const excludeSet = excludedIds instanceof Set ? excludedIds : new Set(Array.isArray(excludedIds) ? excludedIds : []);
@@ -224,48 +228,44 @@ export function selectBestPersonalRouteCandidate(baseFamily, cfg, excludedIds = 
 
   for (const acc of accounts) {
     const isGcp = acc.channelType === "gcp" || Boolean(acc.gcpProjectId);
-    if (isGcp || acc.authExpired || excludeSet.has(acc.id)) continue;
+    if (isGcp || acc.authExpired || excludeSet.has(acc.id) || excludeSet.has(`${acc.id}@daily`)) continue;
 
-    for (const poolKey of ["prod", "daily"]) {
-      const candidateKey = `${acc.id}@${poolKey}`;
-      if (excludeSet.has(candidateKey)) continue;
-      const poolQuota = acc.cachedQuotaByPool?.[poolKey] || (poolKey === preferredPool ? acc.cachedQuota : null);
-      if (!poolQuota || typeof poolQuota !== "object") continue;
+    const poolQuota = acc.cachedQuotaByPool?.daily || acc.cachedQuota || null;
+    if (!poolQuota || typeof poolQuota !== "object") continue;
 
-      const models = poolQuota.availableModels || [];
-      const matched = models.find((m) => {
-        const id = (m.modelId || m.label || "").toLowerCase();
-        if (id === targetLower) return true;
-        return Array.isArray(m.variantIds) && m.variantIds.some((v) => String(v).toLowerCase() === targetLower);
-      });
-      if (!matched && targetLower) continue;
+    const models = poolQuota.availableModels || [];
+    const matched = models.find((m) => {
+      const id = (m.modelId || m.label || "").toLowerCase();
+      if (id === targetLower) return true;
+      return Array.isArray(m.variantIds) && m.variantIds.some((v) => String(v).toLowerCase() === targetLower);
+    });
+    if (!matched && targetLower) continue;
 
-      const dual = extractModelDualQuota(poolQuota, matched, baseFamily);
-      if (dual.weeklyPct <= 0 || dual.fiveHourPct <= 0) continue;
+    const dual = extractModelDualQuota(poolQuota, matched, baseFamily);
+    if (dual.weeklyPct <= 0 || dual.fiveHourPct <= 0) continue;
 
-      const weeklyLow = dual.weeklyPct <= thresholdPct;
-      const effectiveWeeklyResetMs = dual.weeklyResetMs + (weeklyLow ? WEEK_PENALTY_MS : 0);
-      const fiveHourAboveThreshold = dual.fiveHourPct > thresholdPct;
+    const weeklyLow = dual.weeklyPct <= thresholdPct;
+    const effectiveWeeklyResetMs = dual.weeklyResetMs + (weeklyLow ? WEEK_PENALTY_MS : 0);
+    const fiveHourAboveThreshold = dual.fiveHourPct > thresholdPct;
 
-      candidates.push({
-        acc,
-        pool: poolKey,
-        upstreamHostname: getCloudCodeHostnameForPool(poolKey, false),
-        matched,
-        weeklyPct: dual.weeklyPct,
-        fiveHourPct: dual.fiveHourPct,
-        fiveHourAboveThreshold,
-        effectiveWeeklyResetMs,
-        fiveHourResetMs: dual.fiveHourResetMs,
-        isCurrentAcc: acc.id === activeChannelId,
-        isPreferredPool: poolKey === preferredPool
-      });
-    }
+    candidates.push({
+      acc,
+      pool: "daily",
+      upstreamHostname: "daily-cloudcode-pa.googleapis.com",
+      matched,
+      weeklyPct: dual.weeklyPct,
+      fiveHourPct: dual.fiveHourPct,
+      fiveHourAboveThreshold,
+      effectiveWeeklyResetMs,
+      fiveHourResetMs: dual.fiveHourResetMs,
+      isCurrentAcc: acc.id === activeChannelId,
+      isPreferredPool: true
+    });
   }
 
   if (candidates.length === 0) return null;
   candidates.sort((a, b) => {
-    // 0. 5小时限额门控：优先排 fiveHourPct > 5% 的 (acc, pool) 桶
+    // 0. 5小时限额门控：优先排 fiveHourPct > 5% 的账号
     if (a.fiveHourAboveThreshold !== b.fiveHourAboveThreshold) {
       return a.fiveHourAboveThreshold ? -1 : 1;
     }
@@ -277,9 +277,8 @@ export function selectBestPersonalRouteCandidate(baseFamily, cfg, excludedIds = 
     if (Math.abs(a.fiveHourResetMs - b.fiveHourResetMs) > 60000) {
       return a.fiveHourResetMs - b.fiveHourResetMs;
     }
-    // 3. 当两层重置时间处于同一窗口时，优先命中当前激活账号与当前选定额度池，避免因微小百分比差无谓跨号
+    // 3. 当两层重置时间处于同一窗口时，优先命中当前激活账号，避免因微小百分比差无谓跨号
     if (a.isCurrentAcc !== b.isCurrentAcc) return a.isCurrentAcc ? -1 : 1;
-    if (a.isPreferredPool !== b.isPreferredPool) return a.isPreferredPool ? -1 : 1;
     if (b.weeklyPct !== a.weeklyPct) return b.weeklyPct - a.weeklyPct;
     if (b.fiveHourPct !== a.fiveHourPct) return b.fiveHourPct - a.fiveHourPct;
     return 0;
@@ -409,28 +408,12 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
 
   const excludedIds = new Set();
 
-  const pickBestPoolForAccount = (targetAcc, modelFamily) => {
-    if (!targetAcc) return defaultPool;
-    const altPool = defaultPool === "daily" ? "prod" : "daily";
-    for (const p of [defaultPool, altPool]) {
-      if (excludedIds.has(`${targetAcc.id}@${p}`)) continue;
-      const pq = targetAcc.cachedQuotaByPool?.[p];
-      if (!pq) return p;
-      const matched = (pq.availableModels || []).find(
-        (m) => (m.modelId || m.label || "").toLowerCase() === String(modelFamily || "").toLowerCase()
-      );
-      const dual = extractModelDualQuota(pq, matched, modelFamily);
-      if (dual.weeklyPct > 0 && dual.fiveHourPct > 0) return p;
-    }
-    return !excludedIds.has(`${targetAcc.id}@${defaultPool}`) ? defaultPool : altPool;
-  };
-
   const prepareAttemptPayload = async () => {
     const outHeaders = { ...baseHeaders };
     let outBodyBuf = rawBodyBuf || Buffer.alloc(0);
     let routedTargetAcc = null;
-    let targetPool = defaultPool;
-    let targetHostname = defaultUpstreamHostname;
+    let targetPool = "daily";
+    let targetHostname = "daily-cloudcode-pa.googleapis.com";
     let strippedSigCount = 0;
 
     if (isGenerateEndpoint && parsedBodyJson) {
@@ -439,33 +422,23 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
         const bestCand = selectBestPersonalRouteCandidate(baseFamily, cfg, excludedIds);
         if (bestCand) {
           routedTargetAcc = bestCand.acc;
-          targetPool = bestCand.pool;
-        } else if (activePersonalAcc && !excludedIds.has(activePersonalAcc.id)) {
+        } else if (activePersonalAcc && !excludedIds.has(activePersonalAcc.id) && !excludedIds.has(`${activePersonalAcc.id}@daily`)) {
           routedTargetAcc = activePersonalAcc;
-          targetPool = pickBestPoolForAccount(activePersonalAcc, baseFamily);
         }
       } else if (typeof routeSpec === "string" && routeSpec.startsWith("account:")) {
         const rawRef = routeSpec.slice(8).trim();
-        const [refId, explicitPool] = rawRef.split("@");
+        const [refId] = rawRef.split("@");
         const candidateAcc = cfg.accounts?.[refId];
-        if (candidateAcc && candidateAcc.channelType !== "gcp" && !candidateAcc.gcpProjectId && !excludedIds.has(candidateAcc.id)) {
+        if (candidateAcc && candidateAcc.channelType !== "gcp" && !candidateAcc.gcpProjectId && !excludedIds.has(candidateAcc.id) && !excludedIds.has(`${candidateAcc.id}@daily`)) {
           routedTargetAcc = candidateAcc;
-          targetPool = explicitPool ? normalizePersonalQuotaPool(explicitPool) : defaultPool;
         }
-      } else if (activePersonalAcc && !excludedIds.has(activePersonalAcc.id)) {
+      } else if (activePersonalAcc && !excludedIds.has(activePersonalAcc.id) && !excludedIds.has(`${activePersonalAcc.id}@daily`)) {
         routedTargetAcc = activePersonalAcc;
-        targetPool = defaultPool;
       }
 
-      targetHostname = getCloudCodeHostnameForPool(targetPool, false);
       outHeaders["Host"] = targetHostname;
 
-      const isCrossPersonalRoute = Boolean(
-        routedTargetAcc &&
-        (!activePersonalAcc || routedTargetAcc.id !== activePersonalAcc.id)
-      );
-
-      if (isCrossPersonalRoute) {
+      if (routedTargetAcc) {
         // 个人号之间共享同一套消费级 Tink 签名密钥，仅剥离跨通道遗留的 GCP 签名，避免带 functionCall 的对话报 400
         strippedSigCount = stripThoughtSignaturesFromJson(bodyClone, { onlyGcpSignatures: true });
         const targetToken = await getValidPersonalAccessToken(cfg, routedTargetAcc);
@@ -475,11 +448,7 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
           delete outHeaders["x-goog-user-project"];
           delete outHeaders["X-Goog-User-Project"];
           const targetCompanionPid = await ensurePersonalCompanionProjectId(cfg, routedTargetAcc, targetToken, targetHostname);
-          if (targetCompanionPid && !isDowngradedConsumerPoolProject(targetCompanionPid)) {
-            bodyClone.project = targetCompanionPid;
-          } else if (targetPool === "daily") {
-            bodyClone.project = "aicode-consumers";
-          }
+          bodyClone.project = targetCompanionPid || "aicode-consumers";
           cfg.__meta__.lastRoutedChannelId = routedTargetAcc.id;
           cfg.__meta__.lastRoutedPool = targetPool;
           cfg.__meta__.lastProxyHit = {
@@ -498,41 +467,6 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
           };
           writeRelayConfig(cfg);
         }
-      } else if (activePersonalAcc) {
-        strippedSigCount = stripThoughtSignaturesFromJson(bodyClone, { onlyGcpSignatures: true });
-        let activeCompanionPid = String(
-          activePersonalAcc.companionProjectId ||
-          activePersonalAcc.cachedQuota?.companionProjectId ||
-          activePersonalAcc.cachedQuotaByPool?.prod?.companionProjectId ||
-          activePersonalAcc.cachedQuotaByPool?.daily?.companionProjectId ||
-          ""
-        ).trim();
-        if (isDowngradedConsumerPoolProject(activeCompanionPid)) {
-          const activeTok = await getValidPersonalAccessToken(cfg, activePersonalAcc);
-          activeCompanionPid = await ensurePersonalCompanionProjectId(cfg, activePersonalAcc, activeTok, targetHostname);
-        }
-        if (activeCompanionPid && !isDowngradedConsumerPoolProject(activeCompanionPid)) {
-          bodyClone.project = activeCompanionPid;
-        } else if (!bodyClone.project && targetPool === "daily") {
-          bodyClone.project = "aicode-consumers";
-        }
-        cfg.__meta__.lastRoutedChannelId = activePersonalAcc.id;
-        cfg.__meta__.lastRoutedPool = targetPool;
-        cfg.__meta__.lastProxyHit = {
-          at: new Date().toISOString(),
-          endpoint: reqUrl,
-          rawModel,
-          mappedModel: bodyClone.model || rawModel,
-          baseFamily,
-          routeSpec,
-          targetChannelId: activePersonalAcc.id,
-          targetEmail: activePersonalAcc.email,
-          targetPool,
-          targetHostname,
-          targetCompanionProject: bodyClone.project || "",
-          strippedSignatures: strippedSigCount
-        };
-        writeRelayConfig(cfg);
       }
       outBodyBuf = Buffer.from(JSON.stringify(bodyClone), "utf8");
     }
@@ -813,17 +747,23 @@ function persistAndSyncProxyUrl(proxyUrl) {
     const ctx = resolveCurrentInstanceContext();
     const instMeta = getInstanceMeta(cfg, ctx);
     const isLiveGcp = Boolean(instMeta.lastAppliedGcpProject || (!ctx.isIsolatedInstance && cfg.__meta__?.lastAppliedGcpProject));
-    const isLocalProxy = !isLiveGcp;
-    const directUpstreamUrl = "https://cloudcode-pa.googleapis.com";
+    const hasPersonalRouting = hasActivePersonalRoutingConfig(cfg);
+    const isLocalProxy = !isLiveGcp && hasPersonalRouting;
+    const directUpstreamUrl = isLiveGcp
+      ? "https://cloudcode-pa.googleapis.com"
+      : "https://daily-cloudcode-pa.googleapis.com";
     const desiredUrl = isLocalProxy ? effectiveUrl : directUpstreamUrl;
+    const desiredMode = isLocalProxy ? "local_proxy" : "direct";
     const prevMode = instMeta.cloudCodeProxyMode;
     let changed = false;
-    if (instMeta.cloudCodeProxyUrl !== desiredUrl) {
+    if (instMeta.cloudCodeProxyUrl !== desiredUrl || instMeta.cloudCodeProxyMode !== desiredMode) {
       instMeta.cloudCodeProxyUrl = desiredUrl;
+      instMeta.cloudCodeProxyMode = desiredMode;
       changed = true;
     }
-    if (!ctx.isIsolatedInstance && cfg.__meta__.cloudCodeProxyUrl !== desiredUrl) {
+    if (!ctx.isIsolatedInstance && (cfg.__meta__.cloudCodeProxyUrl !== desiredUrl || cfg.__meta__.cloudCodeProxyMode !== desiredMode)) {
       cfg.__meta__.cloudCodeProxyUrl = desiredUrl;
+      cfg.__meta__.cloudCodeProxyMode = desiredMode;
       changed = true;
     }
     if (changed) {
