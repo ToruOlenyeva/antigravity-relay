@@ -19,7 +19,7 @@ const PORT = Number(process.env.ANTIGRAVITY_SIDECAR_WEB_PORT || process.env.PORT
 globalThis.__AGY_RELAY_MAIN_V2__ = true;
 
 function checkParentLanguageServerAlive() {
-  const ppid = Number(process.ppid || 0);
+  const ppid = Number(process.env.AGY_PARENT_LS_PID || process.ppid || 0);
   if (ppid <= 0) return true;
   try {
     process.kill(ppid, 0);
@@ -38,7 +38,10 @@ try {
   process.stdin.on("close", () => process.exit(0));
 } catch {}
 
+let isRestartingSelf = false;
 function restartSelfGracefully() {
+  if (isRestartingSelf) return;
+  isRestartingSelf = true;
   setTimeout(() => {
     process.exit(0);
   }, 120);
@@ -46,14 +49,25 @@ function restartSelfGracefully() {
 
 let lsBridge = await import("./ls-bridge.mjs");
 
-const bridgePath = path.join(__dirname, "ls-bridge.mjs");
-try {
-  fs.watchFile(bridgePath, { interval: 1000 }, async (curr, prev) => {
-    if (curr.mtimeMs !== prev.mtimeMs) {
-      restartSelfGracefully();
-    }
-  });
-} catch (e) {}
+const watchedBackendFiles = [
+  path.join(__dirname, "ls-bridge.mjs"),
+  path.join(__dirname, "store.mjs"),
+  path.join(__dirname, "bridge", "wincred-ls.mjs"),
+  path.join(__dirname, "bridge", "channel-catalog.mjs"),
+  path.join(__dirname, "bridge", "quota-probe.mjs"),
+  path.join(__dirname, "bridge", "cloudcode-proxy.mjs"),
+  path.join(__dirname, "bridge", "oauth-launcher.mjs"),
+  path.join(__dirname, "bridge", "signature-scrub.mjs")
+];
+for (const wp of watchedBackendFiles) {
+  try {
+    fs.watchFile(wp, { interval: 1000 }, (curr, prev) => {
+      if (curr.mtimeMs !== prev.mtimeMs) {
+        restartSelfGracefully();
+      }
+    });
+  } catch {}
+}
 
 process.on("uncaughtException", (err) => {
   console.error("[AGY Relay Sidecar] Uncaught exception:", err?.message || err);

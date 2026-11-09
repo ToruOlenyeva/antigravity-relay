@@ -693,7 +693,10 @@ function renderQuotaGroups() {
 
   const activePool = getActivePersonalPoolUi();
   const poolSnapshot = !isGcpChannel
-    ? (viewedAcc?.cachedQuotaByPool?.[activePool] || viewedAcc?.cachedQuota || null)
+    ? (viewedAcc?.cachedQuotaByPool?.[activePool] ||
+       ((viewedAcc?.cachedQuota?.pool || viewedAcc?.cachedQuota?.quotaPool || "") === activePool
+         ? viewedAcc?.cachedQuota
+         : null))
     : (viewedAcc?.cachedQuota || null);
 
   const rawSourceGroups = !isGcpChannel
