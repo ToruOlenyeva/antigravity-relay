@@ -87,11 +87,13 @@ export function ensureInstanceIsolatedHome(userDataDir) {
         if (entry.name === "config" && entry.isDirectory()) {
           try {
             if (fs.existsSync(dst) && fs.lstatSync(dst).isSymbolicLink()) {
-              fs.unlinkSync(dst);
+              fs.rmSync(dst, { recursive: true, force: true });
             }
           } catch {}
           try {
             fs.mkdirSync(dst, { recursive: true });
+            fs.mkdirSync(path.join(dst, "projects"), { recursive: true });
+            fs.mkdirSync(path.join(dst, "sidecars"), { recursive: true });
             for (const sub of fs.readdirSync(src, { withFileTypes: true })) {
               const subSrc = path.join(src, sub.name);
               const subDst = path.join(dst, sub.name);

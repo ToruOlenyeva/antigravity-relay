@@ -28,10 +28,20 @@ import {
   learnModelsFromCloudCodeResponse
 } from "./quota-probe.mjs";
 
+const GCP_SIG_BIN_MAGIC = Buffer.from([0x01, 0x8f, 0x3d, 0x6b, 0x5f]);
+
 export function isGcpThoughtSignature(sigVal) {
   if (typeof sigVal !== "string") return false;
   const s = sigVal.trim();
-  return s.startsWith("AY89a18") || s.startsWith("IDxACGAIqQ") || s.startsWith("CA8QAhgCKk");
+  if (!s) return false;
+  if (s.includes("AY89a18") || s.includes("IDxACGAIqQ") || s.includes("CA8QAhgCKk")) {
+    return true;
+  }
+  try {
+    const buf = Buffer.from(s, "base64");
+    if (buf.length >= 5 && buf.includes(GCP_SIG_BIN_MAGIC)) return true;
+  } catch {}
+  return false;
 }
 
 export function stripThoughtSignaturesFromJson(node, opts = {}) {
@@ -44,14 +54,33 @@ export function stripThoughtSignaturesFromJson(node, opts = {}) {
     }
     return count;
   }
+  let strippedHere = false;
   for (const key of Object.keys(node)) {
     if (key === "thoughtSignature" || key === "thought_signature") {
       if (!onlyGcpSignatures || isGcpThoughtSignature(node[key])) {
         delete node[key];
+        strippedHere = true;
         count++;
       }
     } else if (node[key] && typeof node[key] === "object") {
-      count += stripThoughtSignaturesFromJson(node[key], opts);
+      const subCount = stripThoughtSignaturesFromJson(node[key], opts);
+      count += subCount;
+      if (subCount > 0 && key === "parts" && Array.isArray(node.parts)) {
+        const filteredParts = node.parts.filter((p) => {
+          if (!p || typeof p !== "object" || Array.isArray(p)) return true;
+          const keys = Object.keys(p);
+          if (keys.length === 0) return false;
+          if (keys.length === 1 && keys[0] === "thought" && p.thought === true) return false;
+          return true;
+        });
+        node.parts = filteredParts.length > 0 ? filteredParts : [{ text: "..." }];
+      }
+    }
+  }
+  if (strippedHere && (!node.text || String(node.text).trim() === "")) {
+    const remainingKeys = Object.keys(node).filter((k) => k !== "thought");
+    if (remainingKeys.length === 0) {
+      delete node.thought;
     }
   }
   return count;
@@ -292,18 +321,16 @@ export function extractModelDualQuota(accOrQuota, matched, baseFamily) {
   };
 }
 
-export function hasActivePersonalRoutingConfig(cfg) {
-  if (getActivePersonalQuotaPool(cfg) === "prod") return true;
-  const models = cfg?.routing?.models || {};
-  return Object.values(models).some((v) => v && v !== "follow_current");
+export function hasActivePersonalRoutingConfig(_cfg) {
+  return true;
 }
 
 export function selectBestPersonalRouteCandidate(baseFamily, cfg, excludedIds = null) {
   const accounts = Object.values(cfg?.accounts || {});
   const activeEmail = (cfg?.__meta__?.activeEmail || "").trim();
   const activeChannelId = activeEmail ? `${activeEmail}#personal` : "";
-  const preferredPool = getActivePersonalQuotaPool(cfg);
-  const poolsOrder = preferredPool === "daily" ? ["daily", "prod"] : ["prod", "daily"];
+  const preferredPool = "daily";
+  const poolsOrder = ["daily"];
   const thresholdPct = Number(cfg?.routing?.lowQuotaThresholdPct ?? 5);
   const targetLower = (baseFamily || "").toLowerCase();
   const excludeSet = excludedIds instanceof Set ? excludedIds : new Set(Array.isArray(excludedIds) ? excludedIds : []);
@@ -563,10 +590,10 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
       }
 
       outHeaders["Host"] = targetHostname;
+      // 个人号之间共享同一套消费级 Tink 签名密钥，无感剥离跨通道遗留的 GCP 签名（含带 6 字节 Protobuf 长度头的长签名），防未手动点清除签名时触发 400
+      strippedSigCount = stripThoughtSignaturesFromJson(bodyClone, { onlyGcpSignatures: true });
 
       if (routedTargetAcc) {
-        // 个人号之间共享同一套消费级 Tink 签名密钥，仅剥离跨通道遗留的 GCP 签名，避免带 functionCall 的对话报 400
-        strippedSigCount = stripThoughtSignaturesFromJson(bodyClone, { onlyGcpSignatures: true });
         const targetToken = await getValidPersonalAccessToken(cfg, routedTargetAcc);
         if (targetToken) {
           outHeaders["authorization"] = `Bearer ${targetToken}`;

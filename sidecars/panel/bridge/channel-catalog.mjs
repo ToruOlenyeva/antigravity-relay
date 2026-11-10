@@ -647,9 +647,8 @@ export function resolvePersonalCompanionProjectId(cfg, email, candidatePid = "")
   return "";
 }
 
-export function normalizePersonalQuotaPool(rawPool) {
-  const v = String(rawPool || "").trim().toLowerCase();
-  return v === "daily" ? "daily" : "prod";
+export function normalizePersonalQuotaPool(_rawPool) {
+  return "daily";
 }
 
 export function normalizeAccountChannels(cfg) {
@@ -722,7 +721,7 @@ export function normalizeAccountChannels(cfg) {
         const rawByPool = item.cachedQuotaByPool && typeof item.cachedQuotaByPool === "object"
           ? item.cachedQuotaByPool
           : {};
-        for (const pKey of ["prod", "daily"]) {
+        for (const pKey of ["daily"]) {
           if (rawByPool[pKey] && typeof rawByPool[pKey] === "object") {
             const sanitizedPool = sanitizeCachedQuotaModels(
               rawByPool[pKey],
@@ -732,29 +731,24 @@ export function normalizeAccountChannels(cfg) {
               item.tierCode || ""
             );
             if (sanitizedPool) {
-              sanitizedPool.pool = pKey;
-              sanitizedPool.quotaPool = pKey;
-              sanitizedPool.upstreamHostname = pKey === "daily" ? "daily-cloudcode-pa.googleapis.com" : "cloudcode-pa.googleapis.com";
+              sanitizedPool.pool = "daily";
+              sanitizedPool.quotaPool = "daily";
+              sanitizedPool.upstreamHostname = "daily-cloudcode-pa.googleapis.com";
               if (cleanCompanionPid) sanitizedPool.companionProjectId = cleanCompanionPid;
-              cachedQuotaByPool[pKey] = sanitizedPool;
+              cachedQuotaByPool.daily = sanitizedPool;
             }
           }
         }
         if (cachedQuota && Array.isArray(cachedQuota.quotaGroups) && cachedQuota.quotaGroups.length > 0) {
           const rawTag = cachedQuota.pool || cachedQuota.quotaPool || "daily";
-          const normTag = rawTag === "prod" ? "prod" : "daily";
-          if (!cachedQuotaByPool[normTag]) {
-            cachedQuota.pool = normTag;
-            cachedQuota.quotaPool = normTag;
+          if (rawTag === "daily" && !cachedQuotaByPool.daily) {
+            cachedQuota.pool = "daily";
+            cachedQuota.quotaPool = "daily";
             if (cleanCompanionPid) cachedQuota.companionProjectId = cleanCompanionPid;
-            cachedQuotaByPool[normTag] = cachedQuota;
+            cachedQuotaByPool.daily = cachedQuota;
           }
         }
-        if (cachedQuotaByPool[activePool]?.quotaGroups?.length) {
-          cachedQuota = cachedQuotaByPool[activePool];
-        } else if (cachedQuotaByPool.prod?.quotaGroups?.length) {
-          cachedQuota = cachedQuotaByPool.prod;
-        } else if (cachedQuotaByPool.daily?.quotaGroups?.length) {
+        if (cachedQuotaByPool.daily?.quotaGroups?.length) {
           cachedQuota = cachedQuotaByPool.daily;
         }
       }

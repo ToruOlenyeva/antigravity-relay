@@ -206,8 +206,8 @@ function resolveBestAvailableChannelSpec(baseModelName, relayCfg) {
   if (accounts.length === 0) return null;
   const activeEmail = (relayCfg?.__meta__?.activeEmail || "").trim();
   const activeChannelId = activeEmail ? `${activeEmail}#personal` : "";
-  const preferredPool = String(relayCfg?.routing?.personalQuotaPool || "prod").toLowerCase() === "daily" ? "daily" : "prod";
-  const poolOrder = preferredPool === "daily" ? ["daily", "prod"] : ["prod", "daily"];
+  const preferredPool = "daily";
+  const poolOrder = ["daily"];
   const thresholdPct = Number(relayCfg?.routing?.lowQuotaThresholdPct ?? 5);
   const targetLower = (baseModelName || "").toLowerCase();
 

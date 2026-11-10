@@ -69,14 +69,15 @@ export {
 
 export function getActivePersonalQuotaPool(cfg = null) {
   const c = cfg || readRelayConfig();
-  return normalizePersonalQuotaPool(c?.routing?.personalQuotaPool);
+  if (c?.routing && c.routing.personalQuotaPool !== "daily") {
+    c.routing.personalQuotaPool = "daily";
+  }
+  return "daily";
 }
 
-export function getCloudCodeHostnameForPool(pool = "prod", isGcp = false) {
+export function getCloudCodeHostnameForPool(_pool = "daily", isGcp = false) {
   if (isGcp) return "cloudcode-pa.googleapis.com";
-  return normalizePersonalQuotaPool(pool) === "daily"
-    ? "daily-cloudcode-pa.googleapis.com"
-    : "cloudcode-pa.googleapis.com";
+  return "daily-cloudcode-pa.googleapis.com";
 }
 
 function fetchCloudResourceProjects(accessToken, quotaProjectId = "") {
@@ -732,18 +733,14 @@ export async function probeChannelQuotaSnapshot(channelId) {
       };
     }
 
-    const [prodProbe, dailyProbe] = await Promise.all([
-      tryProbeSinglePersonalPool(tok, companionPid, PROD_HOSTNAME),
-      tryProbeSinglePersonalPool(tok, companionPid, DAILY_HOSTNAME)
-    ]);
+    const dailyProbe = await tryProbeSinglePersonalPool(tok, companionPid, DAILY_HOSTNAME);
     return {
       loadResp,
-      modelsResp: prodProbe.modelsResp?.data ? prodProbe.modelsResp : dailyProbe.modelsResp,
-      quotaSummaryResp: prodProbe.quotaSummaryResp?.data ? prodProbe.quotaSummaryResp : dailyProbe.quotaSummaryResp,
+      modelsResp: dailyProbe.modelsResp,
+      quotaSummaryResp: dailyProbe.quotaSummaryResp,
       companionPid,
       userTier,
       byPool: {
-        prod: prodProbe,
         daily: dailyProbe
       }
     };
@@ -841,37 +838,28 @@ export async function probeChannelQuotaSnapshot(channelId) {
       }
     }
 
-    if ( !isGcp && (probeRes.byPool?.prod?.modelsResp?.data || probeRes.byPool?.daily?.modelsResp?.data)) {
-      if (probeRes.byPool?.prod?.modelsResp?.data) {
-        learnModelsFromCloudCodeResponse(cfg, probeRes.byPool.prod.modelsResp.data);
-      }
-      if (probeRes.byPool?.daily?.modelsResp?.data) {
-        learnModelsFromCloudCodeResponse(cfg, probeRes.byPool.daily.modelsResp.data);
-      }
-      const nextByPool = { ...(acc.cachedQuotaByPool || {}) };
+    if (!isGcp && probeRes.byPool?.daily?.modelsResp?.data) {
+      learnModelsFromCloudCodeResponse(cfg, probeRes.byPool.daily.modelsResp.data);
+      const nextByPool = {};
       const finalCompPid = resolvePersonalCompanionProjectId(cfg, acc.email, probeRes.companionPid || acc.companionProjectId);
-      for (const pKey of ["prod", "daily"]) {
-        const poolData = probeRes.byPool?.[pKey];
-        if (!poolData?.modelsResp?.data) continue;
-        const prevPoolQuota = acc.cachedQuotaByPool?.[pKey] || acc.cachedQuota || null;
-        const parsedPool = parseCloudCodeModelsAndQuota(
-          poolData.modelsResp.data,
-          poolData.quotaSummaryResp?.data || null,
-          false,
-          probeRes.userTier,
-          prevPoolQuota,
-          []
-        );
-        if (parsedPool && Array.isArray(parsedPool.quotaGroups) && parsedPool.quotaGroups.length > 0) {
-          parsedPool.pool = pKey;
-          parsedPool.quotaPool = pKey;
-          parsedPool.upstreamHostname = pKey === "daily" ? DAILY_HOSTNAME : PROD_HOSTNAME;
-          parsedPool.companionProjectId = finalCompPid;
-          nextByPool[pKey] = parsedPool;
-        }
+      const poolData = probeRes.byPool.daily;
+      const prevPoolQuota = acc.cachedQuotaByPool?.daily || acc.cachedQuota || null;
+      const parsedPool = parseCloudCodeModelsAndQuota(
+        poolData.modelsResp.data,
+        poolData.quotaSummaryResp?.data || null,
+        false,
+        probeRes.userTier,
+        prevPoolQuota,
+        []
+      );
+      if (parsedPool && Array.isArray(parsedPool.quotaGroups) && parsedPool.quotaGroups.length > 0) {
+        parsedPool.pool = "daily";
+        parsedPool.quotaPool = "daily";
+        parsedPool.upstreamHostname = DAILY_HOSTNAME;
+        parsedPool.companionProjectId = finalCompPid;
+        nextByPool.daily = parsedPool;
       }
-      const activePoolKey = getActivePersonalQuotaPool(cfg);
-      const chosenPrimary = nextByPool[activePoolKey] || nextByPool.prod || nextByPool.daily || null;
+      const chosenPrimary = nextByPool.daily || null;
       if (chosenPrimary && Array.isArray(chosenPrimary.quotaGroups) && chosenPrimary.quotaGroups.length > 0) {
         acc.companionProjectId = finalCompPid;
         acc.cachedQuotaByPool = nextByPool;
