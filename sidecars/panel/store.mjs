@@ -92,7 +92,10 @@ export function ensureInstanceIsolatedHome(userDataDir) {
           } catch {}
           try {
             fs.mkdirSync(dst, { recursive: true });
-            fs.mkdirSync(path.join(dst, "projects"), { recursive: true });
+            const isoProjectsDir = path.join(dst, "projects");
+            if (fs.existsSync(isoProjectsDir) && !fs.lstatSync(isoProjectsDir).isSymbolicLink()) {
+              fs.rmSync(isoProjectsDir, { recursive: true, force: true });
+            }
             fs.mkdirSync(path.join(dst, "sidecars"), { recursive: true });
             for (const sub of fs.readdirSync(src, { withFileTypes: true })) {
               const subSrc = path.join(src, sub.name);

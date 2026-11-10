@@ -70,13 +70,22 @@ export function hasThoughtSignatureMagic(buf, magics = THOUGHT_SIG_MAGICS) {
   return false;
 }
 
+const BASE64_LEAF_RE = /^[A-Za-z0-9+/=_-]{48,1024}$/;
+
 function isDirectThoughtSigLeaf(sub, magics = THOUGHT_SIG_MAGICS) {
-  if (!sub || sub.length < 5) return false;
+  if (!sub || sub.length < 40 || sub.length > 1024) return false;
   const head = sub.subarray(0, 28);
+  let matchedMagic = null;
   for (let i = 0; i < magics.length; i++) {
-    if (head.includes(magics[i])) return true;
+    if (head.includes(magics[i])) {
+      matchedMagic = magics[i];
+      break;
+    }
   }
-  return false;
+  if (!matchedMagic) return false;
+  if (matchedMagic[0] === 0x01) return true;
+  const str = sub.toString("utf8");
+  return BASE64_LEAF_RE.test(str);
 }
 
 function isValidProtoSubMessage(buf) {
@@ -138,9 +147,13 @@ export function scrubThoughtSignaturesFromProto(buf, magicsToScrub = THOUGHT_SIG
       const sub = buf.subarray(valStart, valEnd);
       pos = valEnd;
       if (hasThoughtSignatureMagic(sub, magicsToScrub)) {
-        if (!isDirectThoughtSigLeaf(sub, magicsToScrub) && isValidProtoSubMessage(sub)) {
+        if (isDirectThoughtSigLeaf(sub, magicsToScrub)) {
+          changed = true;
+          continue;
+        }
+        if (isValidProtoSubMessage(sub)) {
           const res = scrubThoughtSignaturesFromProto(sub, magicsToScrub);
-          if (res.changed && !hasThoughtSignatureMagic(res.buf, magicsToScrub)) {
+          if (res.changed) {
             changed = true;
             if (res.buf.length > 0) {
               out.push(buf.subarray(start, tag.next), encodeProtoVarint(res.buf.length), res.buf);
@@ -148,9 +161,6 @@ export function scrubThoughtSignaturesFromProto(buf, magicsToScrub = THOUGHT_SIG
             continue;
           }
         }
-        // 兜底剥离：无论是直接签名叶子字段，还是递归后仍残留签名魔数，一律整体剥离该 length-delimited 字段
-        changed = true;
-        continue;
       }
       out.push(buf.subarray(start, pos));
     } else if (wire === 5) {
@@ -286,11 +296,11 @@ export function inspectConversationSignatureStatus(convIdOrPrefix, activeIsGcp =
           const m = r.metadata ? Buffer.from(r.metadata) : null;
           const p = r.step_payload ? Buffer.from(r.step_payload) : null;
           const stepHasGcp =
-            (m && hasThoughtSignatureMagic(m, GCP_SIG_MAGICS)) ||
-            (p && hasThoughtSignatureMagic(p, GCP_SIG_MAGICS));
+            (m && scrubThoughtSignaturesFromProto(m, GCP_SIG_MAGICS).changed) ||
+            (p && scrubThoughtSignaturesFromProto(p, GCP_SIG_MAGICS).changed);
           const stepHasPers =
-            (m && hasThoughtSignatureMagic(m, PERSONAL_SIG_MAGICS)) ||
-            (p && hasThoughtSignatureMagic(p, PERSONAL_SIG_MAGICS));
+            (m && scrubThoughtSignaturesFromProto(m, PERSONAL_SIG_MAGICS).changed) ||
+            (p && scrubThoughtSignaturesFromProto(p, PERSONAL_SIG_MAGICS).changed);
           if (stepHasGcp) {
             hasGcpSig = true;
             lastSigType = "gcp";
@@ -306,11 +316,11 @@ export function inspectConversationSignatureStatus(convIdOrPrefix, activeIsGcp =
             for (const g of gens) {
               const d = g.data ? Buffer.from(g.data) : null;
               if (!d) continue;
-              if (hasThoughtSignatureMagic(d, GCP_SIG_MAGICS)) {
+              if (scrubThoughtSignaturesFromProto(d, GCP_SIG_MAGICS).changed) {
                 hasGcpSig = true;
                 lastSigType = "gcp";
               }
-              if (hasThoughtSignatureMagic(d, PERSONAL_SIG_MAGICS)) {
+              if (scrubThoughtSignaturesFromProto(d, PERSONAL_SIG_MAGICS).changed) {
                 hasPersonalSig = true;
                 lastSigType = "personal";
               }
