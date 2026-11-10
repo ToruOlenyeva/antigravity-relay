@@ -23,7 +23,9 @@ import {
   resolvePersonalCompanionProjectId,
   normalizePersonalQuotaPool,
   getActivePersonalQuotaPool,
-  getCloudCodeHostnameForPool
+  getCloudCodeHostnameForPool,
+  deriveCloudCodeSlugFromLabel,
+  learnModelsFromCloudCodeResponse
 } from "./quota-probe.mjs";
 
 export function isGcpThoughtSignature(sigVal) {
@@ -59,50 +61,121 @@ export function resolveBaseModelFamilyFromId(rawModelStr, cfg) {
   const s = String(rawModelStr || "").trim();
   if (!s) return "";
   const lower = s.toLowerCase();
-  if (/argon|m417|m418|m419/i.test(lower)) return "Gemini 4 Argon";
-  if (/3[._-]8[._-]flash|m318|m319|m320|m420|m421|m422/i.test(lower)) return "Gemini 3.8 Flash";
-  if (/3[._-]7[._-]flash|m55|m62|m63/i.test(lower)) return "Gemini 3.7 Flash";
-  if (/3[._-]6[._-]flash|m51|m60|m61/i.test(lower)) return "Gemini 3.6 Flash";
-  if (/3[._-]1[._-]pro|m36|m37/i.test(lower)) return "Gemini 3.1 Pro";
-  if (/opus[._-\s]*5[._-]5|m400|m401|m402|m409|m410|m411|m412/i.test(lower)) return "Claude Opus 5.5";
-  if (/sonnet[._-\s]*5[._-]5|m403|m404|m405|m413|m414|m415|m416/i.test(lower)) return "Claude Sonnet 5.5";
-  if (/sonnet[._-\s]*4[._-]6/i.test(lower)) return "Claude Sonnet 4.6 (Thinking)";
-  if (/opus[._-\s]*4[._-]6/i.test(lower)) return "Claude Opus 4.6 (Thinking)";
-  if (/gpt[._-\s]*oss/i.test(lower)) return "GPT-OSS 120B";
 
+  // 1. 优先从动态自学习注册表（随客户端版本自动更新）解析模型家族
+  const dynFamily = cfg?.__meta__?.dynamicModelRegistry?.placeholderToFamily?.[lower];
+  if (dynFamily) return dynFamily;
+
+  // 2. 扫描当前所有已收录账号的 availableModels 变体表
   for (const acc of Object.values(cfg?.accounts || {})) {
-    for (const m of (acc?.cachedQuota?.availableModels || [])) {
-      const mLabel = String(m.modelId || m.label || "").trim();
-      if (mLabel.toLowerCase() === lower) return mLabel;
-      if (Array.isArray(m.variantIds) && m.variantIds.some((v) => String(v).toLowerCase() === lower)) {
-        return mLabel;
+    const pools = [
+      acc?.cachedQuota?.availableModels,
+      acc?.cachedQuotaByPool?.prod?.availableModels,
+      acc?.cachedQuotaByPool?.daily?.availableModels
+    ];
+    for (const list of pools) {
+      for (const m of (list || [])) {
+        const mLabel = String(m.modelId || m.label || "").trim();
+        if (mLabel.toLowerCase() === lower) return mLabel;
+        if (Array.isArray(m.variantIds) && m.variantIds.some((v) => String(v).toLowerCase() === lower)) {
+          return mLabel;
+        }
       }
     }
   }
+
+  // 3. 通用语义匹配与离线静态兜底
+  if (/argon|m417|m418|m419/i.test(lower)) return "Gemini 4 Argon";
+  if (/3[._-]8[._-]flash|m47\b|m318|m319|m320|m420|m421|m422/i.test(lower)) return "Gemini 3.8 Flash";
+  if (/3[._-]7[._-]flash|m55|m62|m63|m298|m299|m300/i.test(lower)) return "Gemini 3.7 Flash";
+  if (/3[._-]6[._-]flash|m51|m60|m61|m71|m72|m73/i.test(lower)) return "Gemini 3.6 Flash";
+  if (/3[._-]1[._-]pro|m36|m37/i.test(lower)) return "Gemini 3.1 Pro";
+  if (/opus[._-\s]*5[._-]5|m400|m401|m402|m406|m409|m410|m411|m412/i.test(lower)) return "Claude Opus 5.5";
+  if (/sonnet[._-\s]*5[._-]5|m403|m404|m405|m407|m413|m414|m415|m416/i.test(lower)) return "Claude Sonnet 5.5";
+  if (/sonnet[._-\s]*4[._-]6|m35\b/i.test(lower)) return "Claude Sonnet 4.6 (Thinking)";
+  if (/opus[._-\s]*4[._-]6|m26\b/i.test(lower)) return "Claude Opus 4.6 (Thinking)";
+  if (/gpt[._-\s]*oss|m12\b/i.test(lower)) return "GPT-OSS 120B";
+
   return s.replace(/\s*\((Low|Medium|High|Max)\)\s*$/i, "").trim();
 }
 
-const CONSUMER_MODEL_ID_MAP = {
+const FALLBACK_CONSUMER_MODEL_ID_MAP = {
   "model_placeholder_m417": "gemini-4-argon-high",
   "model_placeholder_m418": "gemini-4-argon-medium",
   "model_placeholder_m419": "gemini-4-argon-low",
+  "model_placeholder_m420": "gemini-3.8-flash-high",
+  "model_placeholder_m421": "gemini-3.8-flash-medium",
+  "model_placeholder_m422": "gemini-3.8-flash-low",
   "model_placeholder_m318": "gemini-3.8-flash-high",
   "model_placeholder_m319": "gemini-3.8-flash-medium",
   "model_placeholder_m320": "gemini-3.8-flash-low",
+  "model_placeholder_m47": "gemini-3.8-flash-medium",
+  "model_placeholder_m409": "claude-opus-5-5-low",
+  "model_placeholder_m410": "claude-opus-5-5-medium",
+  "model_placeholder_m411": "claude-opus-5-5-high",
+  "model_placeholder_m412": "claude-opus-5-5-max",
   "model_placeholder_m400": "claude-opus-5-5-low",
   "model_placeholder_m401": "claude-opus-5-5-medium",
   "model_placeholder_m402": "claude-opus-5-5-high",
+  "model_placeholder_m406": "claude-opus-5-5-max",
+  "model_placeholder_m413": "claude-sonnet-5-5-low",
+  "model_placeholder_m414": "claude-sonnet-5-5-medium",
+  "model_placeholder_m415": "claude-sonnet-5-5-high",
+  "model_placeholder_m416": "claude-sonnet-5-5-max",
   "model_placeholder_m403": "claude-sonnet-5-5-low",
   "model_placeholder_m404": "claude-sonnet-5-5-medium",
   "model_placeholder_m405": "claude-sonnet-5-5-high",
+  "model_placeholder_m407": "claude-sonnet-5-5-max",
+  "model_placeholder_m35": "claude-sonnet-4-6-thinking",
+  "model_placeholder_m26": "claude-opus-4-6-thinking",
+  "model_placeholder_m36": "gemini-3.1-pro-low",
+  "model_placeholder_m37": "gemini-3.1-pro-high",
+  "model_placeholder_m12": "gpt-oss-120b-medium",
   "model_openai_gpt_oss_120b_medium": "gpt-oss-120b-medium"
 };
 
-export function normalizeConsumerModelId(rawModelStr) {
+export function normalizeConsumerModelId(rawModelStr, cfg = null) {
   const s = String(rawModelStr || "").trim();
   if (!s) return s;
-  const mapped = CONSUMER_MODEL_ID_MAP[s.toLowerCase()];
-  return mapped || s;
+  const lower = s.toLowerCase();
+
+  // 1. 优先查询动态自学习注册表（随客户端版本与 GetUserStatus / fetchAvailableModels 实时同步）
+  const activeCfg = cfg || (() => { try { return readRelayConfig(); } catch { return null; } })();
+  const dynReg = activeCfg?.__meta__?.dynamicModelRegistry;
+  if (dynReg?.placeholderToSlug?.[lower]) {
+    return dynReg.placeholderToSlug[lower];
+  }
+  if (dynReg?.labelToSlug?.[lower]) {
+    return dynReg.labelToSlug[lower];
+  }
+
+  // 2. 若在已探测的 availableModels.variantIds 中同时存在 placeholder 与真实云端 slug，自动反查
+  for (const acc of Object.values(activeCfg?.accounts || {})) {
+    const pools = [
+      acc?.cachedQuota?.availableModels,
+      acc?.cachedQuotaByPool?.prod?.availableModels,
+      acc?.cachedQuotaByPool?.daily?.availableModels
+    ];
+    for (const list of pools) {
+      for (const m of (list || [])) {
+        if (!Array.isArray(m.variantIds)) continue;
+        if (m.variantIds.some((v) => String(v).toLowerCase() === lower)) {
+          const realSlug = m.variantIds.find(
+            (v) => /^[a-z0-9._-]+$/.test(String(v)) && !/^model_placeholder_/i.test(String(v))
+          );
+          if (realSlug) return realSlug;
+        }
+      }
+    }
+  }
+
+  // 3. 若传入的是带空格或括号的展示名，动态按语义规则转成标准云端 slug
+  if (/\s|\(/.test(s)) {
+    return deriveCloudCodeSlugFromLabel(s);
+  }
+
+  // 4. 静态冷启动兜底
+  return FALLBACK_CONSUMER_MODEL_ID_MAP[lower] || s;
 }
 
 export async function ensurePersonalCompanionProjectId(cfg, acc, accessToken, targetHostname = "cloudcode-pa.googleapis.com") {
@@ -417,7 +490,7 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
       const routeMap = cfg.routing?.models || {};
       routeSpec = routeMap[baseFamily] || routeMap[rawModel] || "follow_current";
       if (parsedBodyJson.model) {
-        parsedBodyJson.model = normalizeConsumerModelId(parsedBodyJson.model);
+        parsedBodyJson.model = normalizeConsumerModelId(parsedBodyJson.model, cfg);
       }
     } catch {}
   }
@@ -428,8 +501,8 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
     const outHeaders = { ...baseHeaders };
     let outBodyBuf = rawBodyBuf || Buffer.alloc(0);
     let routedTargetAcc = null;
-    let targetPool = preferredPool;
-    let targetHostname = defaultHostname;
+    let targetPool = defaultPool;
+    let targetHostname = defaultUpstreamHostname;
     let strippedSigCount = 0;
 
     if (isGenerateEndpoint && parsedBodyJson) {
@@ -440,29 +513,32 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
           routedTargetAcc = bestCand.acc;
           targetPool = bestCand.pool;
           targetHostname = getCloudCodeHostnameForPool(targetPool);
-        } else if (activePersonalAcc && !excludedIds.has(`${activePersonalAcc.id}@${preferredPool}`)) {
+        } else if (activePersonalAcc && !excludedIds.has(`${activePersonalAcc.id}@${defaultPool}`)) {
           routedTargetAcc = activePersonalAcc;
-          targetPool = preferredPool;
+          targetPool = defaultPool;
           targetHostname = getCloudCodeHostnameForPool(targetPool);
         }
       } else if (typeof routeSpec === "string" && routeSpec.startsWith("account:")) {
         const rawRef = routeSpec.slice(8).trim();
-        const [refId, explicitPool] = rawRef.split("@");
-        const candidateAcc = cfg.accounts?.[refId];
+        const hashIdx = rawRef.indexOf("#");
+        const poolAtIdx = hashIdx >= 0 ? rawRef.indexOf("@", hashIdx) : -1;
+        const refId = poolAtIdx >= 0 ? rawRef.slice(0, poolAtIdx) : rawRef;
+        const explicitPool = poolAtIdx >= 0 ? rawRef.slice(poolAtIdx + 1) : "";
+        const candidateAcc = cfg.accounts?.[refId] || (!refId.includes("#") ? cfg.accounts?.[`${refId}#personal`] : null);
         if (candidateAcc && candidateAcc.channelType !== "gcp" && !candidateAcc.gcpProjectId) {
-          let chosenPool = explicitPool ? normalizePersonalQuotaPool(explicitPool) : preferredPool;
-          const chosenQuota = candidateAcc.cachedQuotaByPool?.[chosenPool] || (chosenPool === preferredPool ? candidateAcc.cachedQuota : null);
+          let chosenPool = explicitPool ? normalizePersonalQuotaPool(explicitPool) : defaultPool;
+          const chosenQuota = candidateAcc.cachedQuotaByPool?.[chosenPool] || (chosenPool === defaultPool ? candidateAcc.cachedQuota : null);
           const matchedChosen = (chosenQuota?.availableModels || []).find(
             (m) => (m.modelId || m.label || "").toLowerCase() === baseFamily.toLowerCase()
           );
-          const chosenDual = extractModelDualQuotaSnapshot(chosenQuota, matchedChosen, baseFamily);
+          const chosenDual = extractModelDualQuota(chosenQuota, matchedChosen, baseFamily);
           if (!explicitPool && (chosenDual.weeklyPct <= 0 || chosenDual.fiveHourPct <= 0 || excludedIds.has(`${candidateAcc.id}@${chosenPool}`))) {
             const altPool = chosenPool === "prod" ? "daily" : "prod";
             const altQuota = candidateAcc.cachedQuotaByPool?.[altPool];
             const matchedAlt = (altQuota?.availableModels || []).find(
               (m) => (m.modelId || m.label || "").toLowerCase() === baseFamily.toLowerCase()
             );
-            const altDual = extractModelDualQuotaSnapshot(altQuota, matchedAlt, baseFamily);
+            const altDual = extractModelDualQuota(altQuota, matchedAlt, baseFamily);
             if (altDual.weeklyPct > 0 && altDual.fiveHourPct > 0 && !excludedIds.has(`${candidateAcc.id}@${altPool}`)) {
               chosenPool = altPool;
             }
@@ -474,7 +550,7 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
           }
         }
       } else if (activePersonalAcc) {
-        let chosenPool = preferredPool;
+        let chosenPool = defaultPool;
         if (excludedIds.has(`${activePersonalAcc.id}@${chosenPool}`)) {
           const altPool = chosenPool === "prod" ? "daily" : "prod";
           if (!excludedIds.has(`${activePersonalAcc.id}@${altPool}`)) {
@@ -605,6 +681,7 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
               try {
                 const respJson = JSON.parse(respBuf.toString("utf8"));
                 if (respJson?.models && typeof respJson.models === "object") {
+                  learnModelsFromCloudCodeResponse(cfg, respJson);
                   const routeMap = cfg.routing?.models || {};
                   const curPool = getActivePersonalQuotaPool(cfg);
                   let modified = false;
@@ -621,8 +698,12 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
                         tPool = bestCand.pool;
                       }
                     } else if (typeof rSpec === "string" && rSpec.startsWith("account:")) {
-                      const [refId, expPool] = rSpec.slice(8).trim().split("@");
-                      tAcc = cfg.accounts?.[refId] || null;
+                      const rawRef = rSpec.slice(8).trim();
+                      const hashIdx = rawRef.indexOf("#");
+                      const poolAtIdx = hashIdx >= 0 ? rawRef.indexOf("@", hashIdx) : -1;
+                      const refId = poolAtIdx >= 0 ? rawRef.slice(0, poolAtIdx) : rawRef;
+                      const expPool = poolAtIdx >= 0 ? rawRef.slice(poolAtIdx + 1) : "";
+                      tAcc = cfg.accounts?.[refId] || (!refId.includes("#") ? cfg.accounts?.[`${refId}#personal`] : null);
                       if (expPool) tPool = normalizePersonalQuotaPool(expPool);
                     }
                     if (tAcc && tAcc.channelType !== "gcp" && !tAcc.gcpProjectId) {
@@ -655,7 +736,11 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
             return;
           }
 
-          res.writeHead(upRes.statusCode || 200, upRes.headers);
+          res.writeHead(upRes.statusCode || 200, {
+            ...upRes.headers,
+            "x-agy-routed-channel": routedTargetAcc?.id || "",
+            "x-agy-routed-pool": targetPool || ""
+          });
           let firstChunkAt = 0;
           const streamSampleChunks = [];
           let streamSampleLen = 0;
@@ -668,7 +753,6 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
             try { res.write(chunk); } catch {}
           });
           upRes.on("end", () => {
-            try { res.end(); } catch {}
             if (isStreamOrGenerate && streamSampleChunks.length > 0) {
               try {
                 const endAt = Date.now();
@@ -705,6 +789,7 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
                 }
               } catch {}
             }
+            try { res.end(); } catch {}
             if (routedTargetAcc?.id && isStreamOrGenerate) {
               setTimeout(() => {
                 probeChannelQuotaSnapshot(routedTargetAcc.id).catch(() => {});

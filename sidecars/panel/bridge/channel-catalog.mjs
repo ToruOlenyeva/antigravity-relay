@@ -30,10 +30,13 @@ export const AGENT_PLATFORM_DEFAULT_MODELS = [
     variantIds: [
       "Gemini 3.8 Flash",
       "Gemini 3.8 Flash (Medium)",
+      "MODEL_PLACEHOLDER_M319",
       "MODEL_PLACEHOLDER_M421",
       "Gemini 3.8 Flash (High)",
+      "MODEL_PLACEHOLDER_M318",
       "MODEL_PLACEHOLDER_M420",
       "Gemini 3.8 Flash (Low)",
+      "MODEL_PLACEHOLDER_M320",
       "MODEL_PLACEHOLDER_M422"
     ],
     remainingPct: 100,
@@ -46,10 +49,13 @@ export const AGENT_PLATFORM_DEFAULT_MODELS = [
     variantIds: [
       "Gemini 3.7 Flash",
       "Gemini 3.7 Flash (Medium)",
+      "MODEL_PLACEHOLDER_M299",
       "MODEL_PLACEHOLDER_M62",
       "Gemini 3.7 Flash (High)",
+      "MODEL_PLACEHOLDER_M298",
       "MODEL_PLACEHOLDER_M55",
       "Gemini 3.7 Flash (Low)",
+      "MODEL_PLACEHOLDER_M300",
       "MODEL_PLACEHOLDER_M63"
     ],
     remainingPct: 100,
@@ -62,10 +68,13 @@ export const AGENT_PLATFORM_DEFAULT_MODELS = [
     variantIds: [
       "Gemini 3.6 Flash",
       "Gemini 3.6 Flash (Medium)",
+      "MODEL_PLACEHOLDER_M72",
       "MODEL_PLACEHOLDER_M60",
       "Gemini 3.6 Flash (High)",
+      "MODEL_PLACEHOLDER_M71",
       "MODEL_PLACEHOLDER_M51",
       "Gemini 3.6 Flash (Low)",
+      "MODEL_PLACEHOLDER_M73",
       "MODEL_PLACEHOLDER_M61"
     ],
     remainingPct: 100,
@@ -92,12 +101,16 @@ export const AGENT_PLATFORM_DEFAULT_MODELS = [
     variantIds: [
       "Claude Opus 5.5",
       "Claude Opus 5.5 (Low)",
+      "MODEL_PLACEHOLDER_M400",
       "MODEL_PLACEHOLDER_M409",
       "Claude Opus 5.5 (Medium)",
+      "MODEL_PLACEHOLDER_M401",
       "MODEL_PLACEHOLDER_M410",
       "Claude Opus 5.5 (High)",
+      "MODEL_PLACEHOLDER_M402",
       "MODEL_PLACEHOLDER_M411",
       "Claude Opus 5.5 (Max)",
+      "MODEL_PLACEHOLDER_M406",
       "MODEL_PLACEHOLDER_M412"
     ],
     remainingPct: 100,
@@ -110,12 +123,16 @@ export const AGENT_PLATFORM_DEFAULT_MODELS = [
     variantIds: [
       "Claude Sonnet 5.5",
       "Claude Sonnet 5.5 (Low)",
+      "MODEL_PLACEHOLDER_M403",
       "MODEL_PLACEHOLDER_M413",
       "Claude Sonnet 5.5 (Medium)",
+      "MODEL_PLACEHOLDER_M404",
       "MODEL_PLACEHOLDER_M414",
       "Claude Sonnet 5.5 (High)",
+      "MODEL_PLACEHOLDER_M405",
       "MODEL_PLACEHOLDER_M415",
       "Claude Sonnet 5.5 (Max)",
+      "MODEL_PLACEHOLDER_M407",
       "MODEL_PLACEHOLDER_M416"
     ],
     remainingPct: 100,
@@ -132,9 +149,99 @@ export function isLegacyDeprecatedModel(labelOrId) {
   );
 }
 
+export function stripModelVariantSuffix(rawLabel) {
+  return String(rawLabel || "")
+    .replace(/\s*\((Low|Medium|High|Max)\)\s*$/i, "")
+    .trim();
+}
+
+export function deriveCloudCodeSlugFromLabel(rawLabel) {
+  const clean = String(rawLabel || "").trim();
+  if (!clean) return "";
+  let slug = clean
+    .toLowerCase()
+    .replace(/[()]/g, "")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-");
+  if (slug.startsWith("claude-")) {
+    slug = slug.replace(/(\d)\.(\d)/g, "$1-$2");
+  }
+  return slug;
+}
+
+export function ensureDynamicModelRegistry(cfg) {
+  if (!cfg || typeof cfg !== "object") return { placeholderToSlug: {}, placeholderToFamily: {}, labelToSlug: {} };
+  if (!cfg.__meta__ || typeof cfg.__meta__ !== "object") cfg.__meta__ = {};
+  if (!cfg.__meta__.dynamicModelRegistry || typeof cfg.__meta__.dynamicModelRegistry !== "object") {
+    cfg.__meta__.dynamicModelRegistry = {
+      placeholderToSlug: {},
+      placeholderToFamily: {},
+      labelToSlug: {}
+    };
+  }
+  const reg = cfg.__meta__.dynamicModelRegistry;
+  if (!reg.placeholderToSlug) reg.placeholderToSlug = {};
+  if (!reg.placeholderToFamily) reg.placeholderToFamily = {};
+  if (!reg.labelToSlug) reg.labelToSlug = {};
+  return reg;
+}
+
+export function learnModelsFromCloudCodeResponse(cfg, rawModelsResp) {
+  const modelsObj = rawModelsResp?.models;
+  if (!modelsObj || typeof modelsObj !== "object") return false;
+  const reg = ensureDynamicModelRegistry(cfg);
+  let changed = false;
+  for (const [modelKey, m] of Object.entries(modelsObj)) {
+    if (!m || typeof m !== "object" || /disabled$/i.test(modelKey)) continue;
+    const rawLabel = String(m.displayName || m.label || "").trim();
+    if (!rawLabel || isLegacyDeprecatedModel(rawLabel) || isLegacyDeprecatedModel(modelKey)) continue;
+    const lowerLabel = rawLabel.toLowerCase();
+    const baseFamily = stripModelVariantSuffix(rawLabel);
+    if (reg.labelToSlug[lowerLabel] !== modelKey) {
+      reg.labelToSlug[lowerLabel] = modelKey;
+      changed = true;
+    }
+    const lowerKey = modelKey.toLowerCase();
+    if (baseFamily && reg.placeholderToFamily[lowerKey] !== baseFamily) {
+      reg.placeholderToFamily[lowerKey] = baseFamily;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+export function learnModelsFromLsClientConfigs(cfg, clientModelConfigs) {
+  if (!Array.isArray(clientModelConfigs) || clientModelConfigs.length === 0) return false;
+  const reg = ensureDynamicModelRegistry(cfg);
+  let changed = false;
+  for (const m of clientModelConfigs) {
+    if (!m || typeof m !== "object") continue;
+    const rawLabel = String(m.label || m.displayName || "").trim();
+    const modelId = String(m.modelOrAlias?.model || m.modelOrAlias?.alias || m.model || "").trim();
+    if (!rawLabel || !modelId || isLegacyDeprecatedModel(rawLabel)) continue;
+    const baseFamily = stripModelVariantSuffix(rawLabel);
+    const lowerId = modelId.toLowerCase();
+    const lowerLabel = rawLabel.toLowerCase();
+    const cloudSlug = reg.labelToSlug[lowerLabel] || deriveCloudCodeSlugFromLabel(rawLabel);
+    if (baseFamily && reg.placeholderToFamily[lowerId] !== baseFamily) {
+      reg.placeholderToFamily[lowerId] = baseFamily;
+      changed = true;
+    }
+    if (cloudSlug && reg.placeholderToSlug[lowerId] !== cloudSlug) {
+      reg.placeholderToSlug[lowerId] = cloudSlug;
+      changed = true;
+    }
+    if (cloudSlug && !reg.labelToSlug[lowerLabel]) {
+      reg.labelToSlug[lowerLabel] = cloudSlug;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 export function isGcpOnlyModel(labelOrId) {
   const s = String(labelOrId || "").trim();
-  return /3[._-\s]*[67][._-\s]*flash|3[._-\s]*1[._-\s]*pro|\b(m36|m37|m51|m55|m60)\b/i.test(s);
+  return /3[._-\s]*[67][._-\s]*flash|3[._-\s]*1[._-\s]*pro|\b(m36|m37|m51|m55|m60|m61|m62|m63|m71|m72|m73|m298|m299|m300)\b/i.test(s);
 }
 
 export function isModelEntryRestrictedOrSunset(m) {
@@ -786,8 +893,11 @@ export function normalizeAccountChannels(cfg) {
         continue;
       }
       if (typeof targetVal === "string" && targetVal.startsWith("account:")) {
-        const refId = targetVal.slice(8).split("@")[0].trim();
-        const refAcc = nextAccounts[refId];
+        const rawRef = targetVal.slice(8).trim();
+        const hashIdx = rawRef.indexOf("#");
+        const poolAtIdx = hashIdx >= 0 ? rawRef.indexOf("@", hashIdx) : -1;
+        const refId = (poolAtIdx >= 0 ? rawRef.slice(0, poolAtIdx) : rawRef).trim();
+        const refAcc = nextAccounts[refId] || (!refId.includes("#") ? nextAccounts[`${refId}#personal`] : null);
         if (!refAcc || refAcc.channelType === "gcp" || refAcc.gcpProjectId) {
           delete cfg.routing.models[mKey];
         }

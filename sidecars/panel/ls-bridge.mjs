@@ -53,7 +53,8 @@ import {
   probeAllChannelsQuotaSnapshot,
   normalizePersonalQuotaPool,
   getActivePersonalQuotaPool,
-  getDetectedClientVersion
+  getDetectedClientVersion,
+  learnModelsFromLsClientConfigs
 } from "./bridge/quota-probe.mjs";
 import {
   hasActivePersonalRoutingConfig,
@@ -235,6 +236,9 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
   const planStatus = us?.planStatus || {};
   const cascadeConfig = us?.cascadeModelConfigData || {};
   let clientModelConfigs = cascadeConfig?.clientModelConfigs || [];
+  if (Array.isArray(clientModelConfigs) && clientModelConfigs.length > 0) {
+    learnModelsFromLsClientConfigs(cfg, clientModelConfigs);
+  }
 
   const lsEmail = (us.email || "").trim();
   const credEmail = (cred?.id_token_email || "").trim();
@@ -243,11 +247,17 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
   const activeTierId = us.userTier?.id || "";
 
   const tierIndicatesGcp = /agent\s*platform|enterprise/i.test(rawTierName);
+  const tierIndicatesConsumer =
+    /\b(pro|ultra|plus|free)\b|g1-|standard-tier|free-tier/i.test(`${rawTierName} ${activeTierId}`) &&
+    !tierIndicatesGcp;
   const credPid = String(cred?.project_id || "").trim();
   let logPid = String(logInfo.lastProjectId || "").trim();
   const instPinnedId = String(instMeta.activeChannelId || "").trim();
   const instPinnedAcc = instPinnedId ? cfg.accounts?.[instPinnedId] : null;
   const recentlySwitched = Boolean(instMeta.switchedAt && Date.now() - Number(instMeta.switchedAt) < 15000);
+  const credMatchesLsEmail = Boolean(cred && credEmail && (!lsEmail || credEmail === lsEmail));
+  const credIsGcpMethod = Boolean(credMatchesLsEmail && (cred.auth_method === "gcp" || cred.auth_method === "adc" || credPid));
+  const credIsExplicitConsumer = Boolean(credMatchesLsEmail && cred.auth_method === "consumer" && !credPid);
 
   let activeEmail = "";
   let isLiveGcp = false;
@@ -272,9 +282,17 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
         : "";
     }
   } else {
-    // 主窗口：兼容面板切号重启后 LS 尚未收到 ValidateProject 时的项目状态恢复，以及用户原生重登与修改项目 ID
-    const credIsGcpMethod = Boolean(cred && (cred.auth_method === "gcp" || cred.auth_method === "adc" || credPid));
-    const lsActuallyGcp = Boolean(logPid || tierIndicatesGcp || logInfo.enableBusinessLogin || credIsGcpMethod);
+    // 主窗口：严格区分用户原生登录个人号与 GCP 项目通道，杜绝跨账号旧日志/旧状态污染
+    const sameEmailPinnedGcp = Boolean(
+      instPinnedAcc &&
+      instPinnedAcc.gcpProjectId &&
+      lsEmail &&
+      lsEmail === instPinnedAcc.email &&
+      recentlySwitched
+    );
+    const lsActuallyGcp = (tierIndicatesConsumer || (credIsExplicitConsumer && !sameEmailPinnedGcp))
+      ? false
+      : Boolean(tierIndicatesGcp || credIsGcpMethod || logPid || logInfo.enableBusinessLogin);
     const pinnedMatchesLs = Boolean(
       instPinnedAcc &&
       lsEmail &&
@@ -282,28 +300,94 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
       lsActuallyGcp === Boolean(instPinnedAcc.gcpProjectId) &&
       (!lsActuallyGcp || !logPid || logPid === instPinnedAcc.gcpProjectId)
     );
-    if (instPinnedAcc && ((recentlySwitched && lsActuallyGcp === Boolean(instPinnedAcc.gcpProjectId)) || !lsEmail || pinnedMatchesLs)) {
+    if (instPinnedAcc && ((recentlySwitched && lsActuallyGcp === Boolean(instPinnedAcc.gcpProjectId) && (!lsEmail || lsEmail === instPinnedAcc.email)) || !lsEmail || pinnedMatchesLs)) {
       activeEmail = instPinnedAcc.email;
       isLiveGcp = instPinnedAcc.channelType === "gcp" || Boolean(instPinnedAcc.gcpProjectId);
-      activeGcpProject = isLiveGcp ? (instPinnedAcc.gcpProjectId || logPid || credPid) : "";
+      activeGcpProject = isLiveGcp ? (instPinnedAcc.gcpProjectId || (credMatchesLsEmail ? credPid : "") || logPid) : "";
     } else if (lsEmail) {
       instMeta.switchedViaPanel = false;
       activeEmail = lsEmail;
       isLiveGcp = lsActuallyGcp;
-      activeGcpProject = isLiveGcp
-        ? (logPid || credPid || instMeta.lastAppliedGcpProject || findFirstGcpProjectForEmail(cfg, activeEmail))
-        : "";
+      if (isLiveGcp) {
+        const logPidOwnedByActive = Boolean(logPid && cfg.accounts?.[`${activeEmail}#gcp:${logPid}`]);
+        const pinnedPidForActive = (instPinnedAcc && instPinnedAcc.email === activeEmail && instPinnedAcc.gcpProjectId)
+          ? instPinnedAcc.gcpProjectId
+          : "";
+        activeGcpProject =
+          (credMatchesLsEmail && credPid) ||
+          (logPidOwnedByActive ? logPid : "") ||
+          pinnedPidForActive ||
+          findFirstGcpProjectForEmail(cfg, activeEmail) ||
+          (tierIndicatesGcp ? logPid : "");
+        if (!activeGcpProject) {
+          isLiveGcp = false;
+        }
+      } else {
+        activeGcpProject = "";
+      }
     } else {
       activeEmail = credEmail || instMeta.activeEmail || cfg.__meta__?.activeEmail || "";
       if (cred) {
         isLiveGcp = Boolean(cred.auth_method === "gcp" || cred.auth_method === "adc" || credPid);
-      } else if (instMeta.lastAppliedGcpProject || cfg.__meta__?.lastAppliedGcpProject) {
+      } else if (instMeta.lastAppliedGcpProject && instPinnedAcc?.email === activeEmail) {
         isLiveGcp = true;
       }
       activeGcpProject = isLiveGcp
-        ? (credPid || instMeta.lastAppliedGcpProject || cfg.__meta__?.lastAppliedGcpProject || findFirstGcpProjectForEmail(cfg, activeEmail))
+        ? (credPid || (instPinnedAcc?.email === activeEmail ? instPinnedAcc.gcpProjectId : "") || findFirstGcpProjectForEmail(cfg, activeEmail))
         : "";
+      if (!activeGcpProject) {
+        isLiveGcp = false;
+      }
     }
+  }
+
+  // 若当前确认为个人通道，自动净空宿主遗留的 GCP 环境标记与 Language Server 残留 ProjectID，彻底修复原生登录个人号可用性
+  if (!isLiveGcp && activeEmail) {
+    logPid = "";
+    const needsPersonalSanitize = Boolean(
+      logInfo.lastProjectId ||
+      (cred && credEmail === activeEmail && (cred.project_id || cred.auth_method === "gcp" || cred.auth_method === "adc")) ||
+      instMeta.lastCleanPersonalSyncEmail !== activeEmail
+    );
+    if (needsPersonalSanitize) {
+      instMeta.lastCleanPersonalSyncEmail = activeEmail;
+      try {
+        syncInstanceAppStorage(
+          ctx.userDataDir,
+          activeEmail,
+          false,
+          Boolean(ctx.isIsolatedInstance),
+          "",
+          "",
+          ""
+        );
+        const rawBaseForClean = (cred && credEmail === activeEmail)
+          ? cred
+          : findStoredTokenForEmail(cfg, activeEmail, false);
+        if (rawBaseForClean) {
+          const cleanPersTok = buildCleanChannelToken(rawBaseForClean, "", "");
+          if (cred && credEmail === activeEmail && (cred.project_id || cred.auth_method === "gcp")) {
+            if (ctx.isIsolatedInstance && ctx.userDataDir) {
+              writeInstanceTokenFile(ctx.userDataDir, cleanPersTok);
+            } else {
+              writeWinCredToken(cleanPersTok);
+            }
+          }
+          syncInstanceStateVscdb(
+            ctx.userDataDir,
+            cleanPersTok,
+            activeEmail,
+            "",
+            `${activeEmail}#personal`
+          );
+        }
+      } catch {}
+      if (ls && logInfo.lastProjectId) {
+        await callLsRpc(ls, "ValidateProject", { projectId: "", location: "" }).catch(() => {});
+      }
+    }
+  } else if (isLiveGcp) {
+    instMeta.lastCleanPersonalSyncEmail = "";
   }
 
   const activeGcpBillingMode = isLiveGcp
@@ -338,6 +422,7 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
   }
 
   const deletedSet = new Set(Array.isArray(cfg.__meta__?.deletedChannelIds) ? cfg.__meta__.deletedChannelIds : []);
+  const hasAnySavedAccounts = Object.keys(cfg.accounts || {}).length > 0;
 
   if (cred && credEmail && !isLiveGcp && cred.auth_method !== "gcp" && cred.auth_method !== "adc" && !credPid) {
     if (!cfg.__meta__.oauthTokensByEmail || typeof cfg.__meta__.oauthTokensByEmail !== "object") {
@@ -348,7 +433,7 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
     }
     const credPersonalKey = `${credEmail}#personal`;
     const existingCredPersonal = cfg.accounts[credPersonalKey];
-    if (!deletedSet.has(credPersonalKey) && (existingCredPersonal || credEmail === activeEmail)) {
+    if (!deletedSet.has(credPersonalKey) && existingCredPersonal) {
       const cleanedPersonalTok = buildCleanChannelToken(cred, "", "");
       cfg.accounts[credPersonalKey] = {
         ...existingCredPersonal,
@@ -379,12 +464,19 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
 
     if (!isLiveGcp) {
       const personalKey = `${activeEmail}#personal`;
-      if (!deletedSet.has(personalKey)) {
-        const existingPersonal = cfg.accounts[personalKey];
-        const rawPersBase = isLiveCredMatch
-          ? cred
-          : (existingPersonal?.storedToken?.token?.refresh_token ? existingPersonal.storedToken : matchingCred);
-        const cleanedPersTok = rawPersBase ? buildCleanChannelToken(rawPersBase, "", "") : null;
+      const existingPersonal = cfg.accounts[personalKey];
+      const rawPersBase = isLiveCredMatch
+        ? cred
+        : (existingPersonal?.storedToken?.token?.refresh_token ? existingPersonal.storedToken : matchingCred);
+      const cleanedPersTok = rawPersBase ? buildCleanChannelToken(rawPersBase, "", "") : null;
+      if (cleanedPersTok?.token?.refresh_token) {
+        if (!cfg.__meta__.oauthTokensByEmail || typeof cfg.__meta__.oauthTokensByEmail !== "object") {
+          cfg.__meta__.oauthTokensByEmail = {};
+        }
+        cfg.__meta__.oauthTokensByEmail[activeEmail] = JSON.parse(JSON.stringify(cleanedPersTok));
+      }
+      // 严禁后台轮询自动新建未收录账号卡片（除非通道池完全为空首次初始化）；仅更新已存在卡片的凭据
+      if (!deletedSet.has(personalKey) && (existingPersonal || !hasAnySavedAccounts)) {
         cfg.accounts[personalKey] = {
           ...existingPersonal,
           id: personalKey,
@@ -399,10 +491,6 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
           storedToken: cleanedPersTok
         };
         if (cleanedPersTok?.token?.refresh_token) {
-          if (!cfg.__meta__.oauthTokensByEmail || typeof cfg.__meta__.oauthTokensByEmail !== "object") {
-            cfg.__meta__.oauthTokensByEmail = {};
-          }
-          cfg.__meta__.oauthTokensByEmail[activeEmail] = JSON.parse(JSON.stringify(cleanedPersTok));
           if (!cfg.__meta__.channelTokensById || typeof cfg.__meta__.channelTokensById !== "object") {
             cfg.__meta__.channelTokensById = {};
           }
@@ -411,8 +499,9 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
       }
     } else if (activeGcpProject) {
       const gcpKey = `${activeEmail}#gcp:${activeGcpProject}`;
-      if (!deletedSet.has(gcpKey)) {
-        const existingGcp = cfg.accounts[gcpKey];
+      const existingGcp = cfg.accounts[gcpKey];
+      // 严禁后台轮询把原生登录误判后凭空新建未收录的 GCP 卡片；仅当该 GCP 卡片已被用户显式添加收录时才更新凭据
+      if (!deletedSet.has(gcpKey) && existingGcp) {
         const resolvedMode = activeGcpBillingMode || existingGcp?.gcpBillingMode || "agent_platform";
         const resolvedLoc = activeGcpLocation || existingGcp?.gcpLocation || "global";
         const rawGcpBase = isLiveCredMatch
@@ -451,9 +540,6 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
           }
           cfg.__meta__.channelTokensById[gcpKey] = JSON.parse(JSON.stringify(cleanedGcpTok));
         }
-      }
-      if (!cfg.gcpProjects.includes(activeGcpProject)) {
-        cfg.gcpProjects.push(activeGcpProject);
       }
     }
   }
@@ -532,17 +618,20 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
   let lsHasGcpModels = clientModelConfigs.some(
     (m) => !isModelEntryRestrictedOrSunset(m) && isGcpOnlyModel(m.label || m.modelOrAlias?.model || "")
   );
+  const hasRegisteredGcpCard = Boolean(activeEmail && activeGcpProject && cfg.accounts?.[`${activeEmail}#gcp:${activeGcpProject}`]);
   if (
     ls &&
     isLiveGcp &&
     activeGcpProject &&
+    hasRegisteredGcpCard &&
+    !tierIndicatesConsumer &&
     activeGcpBillingMode === "agent_platform" &&
     (!lsHasGcpModels || logPid !== activeGcpProject || Boolean(logInfo.lastUserTier) || Boolean(cred?.user_tier) || cred?.auth_method !== "gcp") &&
     instMeta.lastValidateProjectPid !== ls.pid
   ) {
     instMeta.lastValidateProjectPid = ls.pid;
     try {
-      if (cred && (cred.user_tier || cred.tier_display_name || cred.auth_method !== "gcp" || cred.project_id !== activeGcpProject)) {
+      if (cred && credEmail === activeEmail && (cred.user_tier || cred.tier_display_name || cred.auth_method !== "gcp" || cred.project_id !== activeGcpProject)) {
         const healedTok = buildCleanChannelToken(
           cred,
           activeGcpProject,
@@ -568,6 +657,7 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
       if (Array.isArray(refreshedModels) && refreshedModels.length > 0) {
         userStatusResp = refreshedStatus;
         clientModelConfigs = refreshedModels;
+        learnModelsFromLsClientConfigs(cfg, clientModelConfigs);
         lsHasGcpModels = clientModelConfigs.some(
           (m) => !isModelEntryRestrictedOrSunset(m) && isGcpOnlyModel(m.label || m.modelOrAlias?.model || "")
         );
@@ -865,6 +955,7 @@ export async function switchPersonalQuotaPool(targetPool) {
     cfg.routing = {};
   }
   cfg.routing.personalQuotaPool = pool;
+  cfg.routing.updatedAt = Date.now();
   normalizeAccountChannels(cfg);
   writeRelayConfig(cfg);
 
@@ -891,6 +982,8 @@ export async function switchBillingProjectInstant(projectId, opts = {}) {
     throw new Error(`个人通道已在另一实例 (${fieldStatus.otherPersonalInstance.email}) 运行中，当前实例固定为 GCP 通道（可启用其他 GCP 通道或使用算力路由）`);
   }
 
+  const instMeta = getInstanceMeta(cfg, ctx);
+  const prevChannelId = String(instMeta.activeChannelId || (!ctx.isIsolatedInstance ? cfg.__meta__?.activeChannelId : "") || "").trim();
   const cred = readWinCredToken(true) || readWinCredToken(false);
   const activeEmail = (cred?.id_token_email || cfg.__meta__?.activeEmail || "").trim();
   const existingGcp = cleanId && activeEmail ? cfg.accounts[`${activeEmail}#gcp:${cleanId}`] : null;
@@ -918,10 +1011,19 @@ export async function switchBillingProjectInstant(projectId, opts = {}) {
       gcpBillingMode,
       gcpLocation
     );
-    syncInstanceStateVscdb(ctx.userDataDir, cleanedCred, activeEmail, cleanId);
+    syncInstanceStateVscdb(ctx.userDataDir, cleanedCred, activeEmail, cleanId, prevChannelId);
   }
 
-  cfg.__meta__.lastAppliedGcpProject = cleanId;
+  instMeta.lastAppliedGcpProject = cleanId;
+  if (activeEmail) {
+    instMeta.activeChannelId = cleanId ? `${activeEmail}#gcp:${cleanId}` : `${activeEmail}#personal`;
+  }
+  if (!ctx.isIsolatedInstance) {
+    cfg.__meta__.lastAppliedGcpProject = cleanId;
+    if (activeEmail) {
+      cfg.__meta__.activeChannelId = cleanId ? `${activeEmail}#gcp:${cleanId}` : `${activeEmail}#personal`;
+    }
+  }
 
   if (cleanId && activeEmail) {
     if (!cfg.gcpProjects.includes(cleanId)) {
@@ -949,13 +1051,17 @@ export async function switchBillingProjectInstant(projectId, opts = {}) {
   }
   writeRelayConfig(cfg);
 
-  if (ls && cleanId) {
-    try {
-      await callLsRpc(ls, "ValidateProject", { projectId: cleanId, location });
-    } catch {
+  if (ls) {
+    if (cleanId) {
       try {
-        await callLsRpc(ls, "ValidateProject", { projectId: cleanId });
-      } catch {}
+        await callLsRpc(ls, "ValidateProject", { projectId: cleanId, location });
+      } catch {
+        try {
+          await callLsRpc(ls, "ValidateProject", { projectId: cleanId });
+        } catch {}
+      }
+    } else {
+      await callLsRpc(ls, "ValidateProject", { projectId: "", location: "" }).catch(() => {});
     }
   }
 
@@ -1052,6 +1158,11 @@ export async function switchActiveGoogleAccount(accountId, opts = {}) {
   cfg.__meta__.channelTokensById[target.id] = JSON.parse(JSON.stringify(tokenToWrite));
 
   const nowTs = Date.now();
+  const prevChannelId = String(
+    instMeta.activeChannelId ||
+    (!ctx.isIsolatedInstance ? cfg.__meta__?.activeChannelId : "") ||
+    ""
+  ).trim();
   instMeta.activeChannelId = target.id;
   instMeta.activeEmail = target.email;
   instMeta.lastAppliedGcpProject = targetProject;
@@ -1088,7 +1199,8 @@ export async function switchActiveGoogleAccount(accountId, opts = {}) {
     ctx.userDataDir,
     tokenToWrite,
     target.email,
-    targetProject
+    targetProject,
+    prevChannelId
   );
   instMeta.cloudCodeProxyMode = desiredProxyMode;
   instMeta.cloudCodeProxyUrl = targetUrl;
@@ -1130,6 +1242,8 @@ export async function switchActiveGoogleAccount(accountId, opts = {}) {
     gcpProjectId: targetProject,
     gcpBillingMode: targetBillingMode,
     gcpLocation: targetLocation || "global",
+    prevChannelId,
+    targetChannelId: target.id,
     scrubConvId: shouldScrub ? currentActiveConvId : "",
     lsPid: Number(currentLs?.pid || 0)
   }).catch(() => {});

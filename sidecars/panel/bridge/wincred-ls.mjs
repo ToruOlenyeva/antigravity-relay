@@ -6,11 +6,14 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import {
+  HOME_DIR,
   APP_DATA_DIR,
+  CHANNEL_ENVS_DIR,
   INSTANCES_ROOT_DIR,
   LS_LOG_FILE,
   JETSKI_TOKEN_FILE,
   readRelayConfig,
+  writeRelayConfig,
   resolveCurrentInstanceContext,
   readInstanceDescriptor,
   getInstanceMeta,
@@ -502,6 +505,7 @@ export function syncInstanceAppStorage(
     }
     delete storageObj["jetski.onboarding.lastLoginUsername"];
     delete storageObj["jetski.onboarding.lastLoginIsGcpTos"];
+    delete storageObj["auth-session"];
     storageObj["agy.onboarding.lastLoginIsGcpTos"] = isGcp ? "true" : "false";
     storageObj["agy.onboarding.lastLoginStrategy"] = isGcp ? "gcp" : "google";
     const cleanPid = isGcp ? String(gcpProjectId || "").trim() : "";
@@ -526,6 +530,8 @@ export function syncInstanceAppStorage(
           }
           if (cleanPid) {
             gCfg.userSettings.gcpRegion = gcpLocation || "global";
+          } else {
+            delete gCfg.userSettings.gcpRegion;
           }
           fs.writeFileSync(geminiCfgPath, JSON.stringify(gCfg, null, 2), "utf8");
         }
@@ -614,20 +620,110 @@ export function buildStateVscdbSyncPayload(tokenObj, email = "", gcpProjectId = 
   };
 }
 
-export function syncInstanceStateVscdb(userDataDir, tokenObj, email = "", gcpProjectId = "") {
+export function getChannelEnvSnapshotPath(channelId) {
+  const raw = String(channelId || "").trim();
+  if (!raw) return "";
+  const safe = raw.replace(/[^a-zA-Z0-9._-]+/g, "_");
+  return path.join(CHANNEL_ENVS_DIR, `${safe}.json`);
+}
+
+export function syncInstanceStateVscdb(userDataDir, tokenObj, email = "", gcpProjectId = "", prevChannelIdHint = "") {
   if (!userDataDir || !tokenObj) return false;
   try {
     const dbPath = path.join(userDataDir, "User", "globalStorage", "state.vscdb");
     if (!fs.existsSync(dbPath)) return false;
     const payload = buildStateVscdbSyncPayload(tokenObj, email, gcpProjectId);
+    const targetChannelId = String(
+      payload.email ? (payload.gcpProjectId ? `${payload.email}#gcp:${payload.gcpProjectId}` : `${payload.email}#personal`) : ""
+    ).trim();
+
+    try {
+      fs.mkdirSync(CHANNEL_ENVS_DIR, { recursive: true });
+    } catch {}
+
     const db = new DatabaseSync(dbPath);
     try {
+      try { db.exec("PRAGMA busy_timeout = 5000;"); } catch {}
       db.exec("CREATE TABLE IF NOT EXISTS ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)");
+
+      // 1. 归档旧通道在 state.vscdb 中的专属会话状态（含隐私许可同意快照）
+      try {
+        const authRow = db.prepare("SELECT value FROM ItemTable WHERE key = ?").get("antigravityAuthStatus");
+        const gcaRow = db.prepare("SELECT value FROM ItemTable WHERE key = ?").get("google.geminicodeassist");
+        const entRow = db.prepare("SELECT value FROM ItemTable WHERE key = ?").get("antigravityUnifiedStateSync.enterprisePreferences");
+        let prevEmail = "";
+        let prevPid = "";
+        if (authRow?.value) {
+          const parsedAuth = JSON.parse(String(authRow.value));
+          prevEmail = String(parsedAuth?.email || "").trim();
+        }
+        if (gcaRow?.value) {
+          const parsedGca = JSON.parse(String(gcaRow.value));
+          prevPid = String(parsedGca?.["geminicodeassist.project"] || "").trim();
+        }
+        const prevIsGcp = Boolean(prevPid || entRow?.value || (prevChannelIdHint && prevChannelIdHint.includes("#gcp:")));
+        const dbPrevChannelId = prevEmail
+          ? (prevIsGcp && prevPid ? `${prevEmail}#gcp:${prevPid}` : (!prevIsGcp ? `${prevEmail}#personal` : ""))
+          : "";
+        const prevChannelId = (prevChannelIdHint && prevChannelIdHint !== targetChannelId)
+          ? prevChannelIdHint
+          : dbPrevChannelId;
+        if (prevChannelId && prevChannelId !== targetChannelId) {
+          const prevSnapPath = getChannelEnvSnapshotPath(prevChannelId);
+          const syncRows = db
+            .prepare("SELECT key, value FROM ItemTable WHERE key LIKE 'antigravityUnifiedStateSync.%' OR key LIKE 'jetskiStateSync.%'")
+            .all();
+          const savedItems = {};
+          for (const r of syncRows) {
+            if (!r?.key || r.key === "antigravityUnifiedStateSync.oauthToken") continue;
+            if (!prevIsGcp && r.key === "antigravityUnifiedStateSync.enterprisePreferences") continue;
+            savedItems[r.key] = String(r.value ?? "");
+          }
+          if (prevSnapPath && Object.keys(savedItems).length > 0) {
+            const snapEmail = prevChannelId.split("#")[0] || prevEmail || "";
+            const snapPid = prevChannelId.includes("#gcp:") ? prevChannelId.split("#gcp:")[1] : prevPid;
+            fs.writeFileSync(
+              prevSnapPath,
+              JSON.stringify({ channelId: prevChannelId, email: snapEmail, gcpProjectId: snapPid, updatedAt: Date.now(), items: savedItems }, null, 2),
+              "utf8"
+            );
+          }
+        }
+      } catch {}
+
+      // 2. 彻底净空 state.vscdb 中所有旧账号/旧通道的同步键，实现 100% 净室环境隔离
+      db.prepare(
+        "DELETE FROM ItemTable WHERE key LIKE 'antigravityUnifiedStateSync.%' OR key LIKE 'jetskiStateSync.%' OR key IN ('antigravityAuthStatus', 'google.geminicodeassist')"
+      ).run();
+
       const upsert = db.prepare("INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)");
+
+      // 3. 若目标通道已有独立环境快照（如该账号此前已点过隐私许可同意），恢复其专属非凭据快照
+      let restoredUserStatus = false;
+      if (targetChannelId) {
+        const targetSnapPath = getChannelEnvSnapshotPath(targetChannelId);
+        if (targetSnapPath && fs.existsSync(targetSnapPath)) {
+          try {
+            const snapObj = JSON.parse(fs.readFileSync(targetSnapPath, "utf8"));
+            if (snapObj && (!snapObj.channelId || snapObj.channelId === targetChannelId) && snapObj.items && typeof snapObj.items === "object") {
+              for (const [k, v] of Object.entries(snapObj.items)) {
+                if (k === "antigravityUnifiedStateSync.oauthToken") continue;
+                if (!payload.isGcp && k === "antigravityUnifiedStateSync.enterprisePreferences") continue;
+                upsert.run(k, String(v));
+                if (k === "antigravityUnifiedStateSync.userStatus" && v) {
+                  restoredUserStatus = true;
+                }
+              }
+            }
+          } catch {}
+        }
+      }
+
+      // 4. 写入目标通道全新的纯净凭据与项目状态（绝不合并旧账号字段）
       if (payload.oauthTokenB64) {
         upsert.run("antigravityUnifiedStateSync.oauthToken", payload.oauthTokenB64);
       }
-      if (payload.userStatusB64) {
+      if (!restoredUserStatus && payload.userStatusB64) {
         upsert.run("antigravityUnifiedStateSync.userStatus", payload.userStatusB64);
       }
       if (payload.isGcp && payload.enterprisePrefsB64) {
@@ -636,26 +732,17 @@ export function syncInstanceStateVscdb(userDataDir, tokenObj, email = "", gcpPro
         db.prepare("DELETE FROM ItemTable WHERE key = ?").run("antigravityUnifiedStateSync.enterprisePreferences");
       }
 
-      let authStatusObj = {
+      const cleanGcaObj = payload.isGcp && payload.gcpProjectId
+        ? { "geminicodeassist.project": payload.gcpProjectId }
+        : {};
+      upsert.run("google.geminicodeassist", JSON.stringify(cleanGcaObj));
+
+      const cleanAuthStatusObj = {
         name: payload.email ? payload.email.split("@")[0] : "User",
-        email: payload.email,
-        apiKey: payload.accessToken
+        email: payload.email || "",
+        apiKey: payload.accessToken || ""
       };
-      try {
-        const row = db.prepare("SELECT value FROM ItemTable WHERE key = ?").get("antigravityAuthStatus");
-        if (row && row.value) {
-          const parsed = JSON.parse(String(row.value));
-          if (parsed && typeof parsed === "object") {
-            authStatusObj = {
-              ...parsed,
-              email: payload.email || parsed.email || "",
-              apiKey: payload.accessToken || parsed.apiKey || ""
-            };
-            delete authStatusObj.userStatusProtoBinaryBase64;
-          }
-        }
-      } catch {}
-      upsert.run("antigravityAuthStatus", JSON.stringify(authStatusObj));
+      upsert.run("antigravityAuthStatus", JSON.stringify(cleanAuthStatusObj));
     } finally {
       db.close();
     }
@@ -777,6 +864,7 @@ let cachedLsInfo = null;
 let cachedLsInfoAt = 0;
 let cachedLsInstanceId = "";
 let cachedClientVersion = "";
+let cachedClientCl = "";
 let cachedClientVersionAt = 0;
 
 export function parseLsLogInfo(customLogFile = "") {
@@ -790,6 +878,7 @@ export function parseLsLogInfo(customLogFile = "") {
   let lastUserTier = "";
   let enableBusinessLogin = null;
   let lsVersion = "";
+  let lsCl = "";
   try {
     if (fs.existsSync(targetLogFile)) {
       const logText = fs.readFileSync(targetLogFile, "utf8");
@@ -811,6 +900,10 @@ export function parseLsLogInfo(customLogFile = "") {
           lsVersion = (allVerMatches[allVerMatches.length - 1][1] || "").trim();
         }
       }
+      const clMatches = [...activeSegment.matchAll(/\bcl=(\d{7,15})\b/gi)];
+      if (clMatches.length > 0) {
+        lsCl = (clMatches[clMatches.length - 1][1] || "").trim();
+      }
       const httpsMatches = [...activeSegment.matchAll(/listening on \w+ port at (\d+) for HTTPS/gi)];
       if (httpsMatches.length > 0) {
         httpsPort = Number(httpsMatches[httpsMatches.length - 1][1]);
@@ -819,27 +912,55 @@ export function parseLsLogInfo(customLogFile = "") {
       if (httpMatches.length > 0) {
         httpPort = Number(httpMatches[httpMatches.length - 1][1]);
       }
-      const projMatches = [...activeSegment.matchAll(/SetProjectID called with projectID:\s*"([^"]*)"/gi)];
+
+      // 按最新一次退出登录/清除凭据或关闭企业登录边界切片，杜绝同一进程内旧账号的 SetProjectID 跨账号残留
+      let authScopeSegment = activeSegment;
+      const resetBoundaries = [
+        ...activeSegment.matchAll(/(?:ClearAuthToken|SignOut|Logout|SetEnableBusinessLogin called with enable:\s*false)/gi)
+      ];
+      if (resetBoundaries.length > 0) {
+        const lastReset = resetBoundaries[resetBoundaries.length - 1];
+        if (typeof lastReset.index === "number") {
+          authScopeSegment = activeSegment.slice(lastReset.index);
+        }
+      }
+
+      const bizMatches = [...authScopeSegment.matchAll(/SetEnableBusinessLogin called with enable:\s*(true|false)/gi)];
+      if (bizMatches.length > 0) {
+        enableBusinessLogin = bizMatches[bizMatches.length - 1][1].toLowerCase() === "true";
+      }
+      const projMatches = [...authScopeSegment.matchAll(/SetProjectID called with projectID:\s*"([^"]*)"/gi)];
       if (projMatches.length > 0) {
         lastProjectId = (projMatches[projMatches.length - 1][1] || "").trim();
       }
-      const locMatches = [...activeSegment.matchAll(/SetLocation called with location:\s*"([^"]*)"/gi)];
+      if (enableBusinessLogin === false) {
+        lastProjectId = "";
+      }
+      const locMatches = [...authScopeSegment.matchAll(/SetLocation called with location:\s*"([^"]*)"/gi)];
       if (locMatches.length > 0) {
         lastLocation = (locMatches[locMatches.length - 1][1] || "").trim();
       }
-      const tierMatches = [...activeSegment.matchAll(/SetUserTier called with userTier:\s*"([^"]*)"/gi)];
+      const tierMatches = [...authScopeSegment.matchAll(/SetUserTier called with userTier:\s*"([^"]*)"/gi)];
       if (tierMatches.length > 0) {
         lastUserTier = (tierMatches[tierMatches.length - 1][1] || "").trim();
-      }
-      const bizMatches = [...activeSegment.matchAll(/SetEnableBusinessLogin called with enable:\s*(true|false)/gi)];
-      if (bizMatches.length > 0) {
-        enableBusinessLogin = bizMatches[bizMatches.length - 1][1].toLowerCase() === "true";
       }
     }
   } catch {}
   if (lsVersion) {
+    const versionChanged = lsVersion !== cachedClientVersion || (lsCl && lsCl !== cachedClientCl);
     cachedClientVersion = lsVersion;
+    if (lsCl) cachedClientCl = lsCl;
     cachedClientVersionAt = Date.now();
+    if (versionChanged) {
+      try {
+        const cfg = readRelayConfig();
+        if (cfg?.__meta__ && cfg.__meta__.lastDetectedClientVersion !== lsVersion) {
+          cfg.__meta__.lastDetectedClientVersion = lsVersion;
+          if (lsCl) cfg.__meta__.lastDetectedClientCl = lsCl;
+          writeRelayConfig(cfg);
+        }
+      } catch {}
+    }
   }
   return {
     pid,
@@ -850,6 +971,7 @@ export function parseLsLogInfo(customLogFile = "") {
     lastUserTier,
     enableBusinessLogin,
     lsVersion,
+    lsCl,
     instanceId: ctx.instanceId,
     isIsolatedInstance: ctx.isIsolatedInstance,
     logFile: targetLogFile
@@ -879,16 +1001,17 @@ export function getDetectedClientVersion(customLogFile = "") {
       return savedVer;
     }
   } catch {}
-  return cachedClientVersion || "2.29.0";
+  return cachedClientVersion || "2.30.0";
 }
 
 export function getCloudCodeUserAgent(customVersion = "") {
-  const ver = String(customVersion || getDetectedClientVersion() || "2.29.0").trim();
-  return `antigravity/hub/${ver} (aidev_client; os_type=windows; arch=amd64; cl=1009437749)`;
+  const ver = String(customVersion || getDetectedClientVersion() || "2.30.0").trim();
+  const cl = cachedClientCl || "1009437749";
+  return `antigravity/hub/${ver} (aidev_client; os_type=windows; arch=amd64; cl=${cl})`;
 }
 
 export function buildLoadCodeAssistMetadata(duetProject = "", customVersion = "") {
-  const ver = String(customVersion || getDetectedClientVersion() || "2.29.0").trim();
+  const ver = String(customVersion || getDetectedClientVersion() || "2.30.0").trim();
   const meta = {
     ideType: "JETSKI",
     pluginType: "GEMINI",

@@ -24,6 +24,7 @@ export const APP_DATA_DIR = (process.platform === "win32" && fs.existsSync(path.
 
 export const PLUGINS_DIR = path.join(HOME_DIR, ".gemini", "config", "plugins");
 export const RELAY_DATA_DIR = path.join(PLUGINS_DIR, "antigravity-relay", "data");
+export const CHANNEL_ENVS_DIR = path.join(RELAY_DATA_DIR, "channel-envs");
 export const RELAY_CONFIG_FILE = path.join(RELAY_DATA_DIR, "agy-relay-config.json");
 export const OLD_RELAY_CONFIG_FILE = path.join(HOME_DIR, ".gemini", "config", "agy-relay-config.json");
 export const RELAY_CONFIG_BAK = `${RELAY_CONFIG_FILE}.bak`;
@@ -83,6 +84,27 @@ export function ensureInstanceIsolatedHome(userDataDir) {
         if (entry.name === "cache" || entry.name === "jetski-standalone-oauth-token") continue;
         const src = path.join(realGemini, entry.name);
         const dst = path.join(isoGemini, entry.name);
+        if (entry.name === "config" && entry.isDirectory()) {
+          try {
+            if (fs.existsSync(dst) && fs.lstatSync(dst).isSymbolicLink()) {
+              fs.unlinkSync(dst);
+            }
+          } catch {}
+          try {
+            fs.mkdirSync(dst, { recursive: true });
+            for (const sub of fs.readdirSync(src, { withFileTypes: true })) {
+              const subSrc = path.join(src, sub.name);
+              const subDst = path.join(dst, sub.name);
+              if (fs.existsSync(subDst)) continue;
+              if (sub.isDirectory()) {
+                fs.symlinkSync(subSrc, subDst, "junction");
+              } else if (sub.isFile()) {
+                fs.copyFileSync(subSrc, subDst);
+              }
+            }
+          } catch {}
+          continue;
+        }
         if (fs.existsSync(dst)) continue;
         try {
           if (entry.isDirectory()) {
@@ -475,6 +497,17 @@ function ensureConfigDefaults(cfg) {
   delete cfg.routing.subagentDefaultTarget;
   if (!cfg.__meta__ || typeof cfg.__meta__ !== "object") cfg.__meta__ = {};
   if (!cfg.__meta__.instances || typeof cfg.__meta__.instances !== "object") cfg.__meta__.instances = {};
+  if (!cfg.__meta__.dynamicModelRegistry || typeof cfg.__meta__.dynamicModelRegistry !== "object") {
+    cfg.__meta__.dynamicModelRegistry = {
+      placeholderToSlug: {},
+      placeholderToFamily: {},
+      labelToSlug: {}
+    };
+  } else {
+    if (!cfg.__meta__.dynamicModelRegistry.placeholderToSlug) cfg.__meta__.dynamicModelRegistry.placeholderToSlug = {};
+    if (!cfg.__meta__.dynamicModelRegistry.placeholderToFamily) cfg.__meta__.dynamicModelRegistry.placeholderToFamily = {};
+    if (!cfg.__meta__.dynamicModelRegistry.labelToSlug) cfg.__meta__.dynamicModelRegistry.labelToSlug = {};
+  }
   if (!Array.isArray(cfg.__meta__.recentSidecarPorts)) cfg.__meta__.recentSidecarPorts = [];
   if (!Array.isArray(cfg.__meta__.deletedChannelIds)) cfg.__meta__.deletedChannelIds = [];
   if (!cfg.__meta__.legacyProfilesMigrated) {
@@ -583,6 +616,42 @@ export function writeRelayConfig(cfg) {
               cfg.__meta__.activeChannelId = cfg.__meta__.instances.main.activeChannelId || cfg.__meta__.activeChannelId || "";
               cfg.__meta__.activeEmail = cfg.__meta__.instances.main.activeEmail || cfg.__meta__.activeEmail || "";
               cfg.__meta__.lastAppliedGcpProject = cfg.__meta__.instances.main.lastAppliedGcpProject ?? cfg.__meta__.lastAppliedGcpProject ?? "";
+            }
+
+            if (diskCfg.__meta__?.lastDetectedClientVersion && !cfg.__meta__.lastDetectedClientVersion) {
+              cfg.__meta__.lastDetectedClientVersion = diskCfg.__meta__.lastDetectedClientVersion;
+            }
+            if (diskCfg.__meta__?.lastDetectedClientCl && !cfg.__meta__.lastDetectedClientCl) {
+              cfg.__meta__.lastDetectedClientCl = diskCfg.__meta__.lastDetectedClientCl;
+            }
+            if (diskCfg.routing && typeof diskCfg.routing === "object") {
+              const diskRouteTs = Number(diskCfg.routing.updatedAt || 0);
+              const memRouteTs = Number(cfg.routing?.updatedAt || 0);
+              if (diskRouteTs > memRouteTs) {
+                cfg.routing = diskCfg.routing;
+              }
+            }
+            const diskProxyAt = String(diskCfg.__meta__?.lastProxyHit?.at || "");
+            const memProxyAt = String(cfg.__meta__?.lastProxyHit?.at || "");
+            if (diskProxyAt && (!memProxyAt || diskProxyAt > memProxyAt)) {
+              cfg.__meta__.lastProxyHit = diskCfg.__meta__.lastProxyHit;
+              if (diskCfg.__meta__.lastRoutedChannelId) {
+                cfg.__meta__.lastRoutedChannelId = diskCfg.__meta__.lastRoutedChannelId;
+              }
+              if (diskCfg.__meta__.lastRoutedPool) {
+                cfg.__meta__.lastRoutedPool = diskCfg.__meta__.lastRoutedPool;
+              }
+            }
+            if (diskCfg.__meta__?.dynamicModelRegistry && typeof diskCfg.__meta__.dynamicModelRegistry === "object") {
+              if (!cfg.__meta__.dynamicModelRegistry || typeof cfg.__meta__.dynamicModelRegistry !== "object") {
+                cfg.__meta__.dynamicModelRegistry = { placeholderToSlug: {}, placeholderToFamily: {}, labelToSlug: {} };
+              }
+              for (const subKey of ["placeholderToSlug", "placeholderToFamily", "labelToSlug"]) {
+                cfg.__meta__.dynamicModelRegistry[subKey] = {
+                  ...(diskCfg.__meta__.dynamicModelRegistry[subKey] || {}),
+                  ...(cfg.__meta__.dynamicModelRegistry[subKey] || {})
+                };
+              }
             }
 
             // 保护各通道刚探测出的非空配额缓存不被慢速并发快照回退为空数组

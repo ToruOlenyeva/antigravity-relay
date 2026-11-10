@@ -9,6 +9,7 @@ import { DatabaseSync } from "node:sqlite";
 import {
   HOME_DIR,
   JETSKI_TOKEN_FILE,
+  CHANNEL_ENVS_DIR,
   readRelayConfig,
   writeRelayConfig,
   resolveCurrentInstanceContext,
@@ -28,6 +29,7 @@ import {
   writeWinCredToken,
   writeInstanceTokenFile,
   syncInstanceAppStorage,
+  getChannelEnvSnapshotPath,
   buildStateVscdbSyncPayload,
   syncInstanceStateVscdb,
   buildCleanChannelToken,
@@ -285,6 +287,17 @@ export async function restartCurrentAntigravityInstance(ctx = null, opts = {}) {
   const configPath = path.join(geminiDir, `agy-relay-restart-${safeId}.json`);
   const scriptPath = path.join(geminiDir, `agy-relay-restart-${safeId}.ps1`);
   const vscdbSyncScriptPath = path.join(geminiDir, "agy-relay-sync-vscdb.mjs");
+  const targetChannelId = String(
+    opts?.targetChannelId ||
+    (opts?.email ? (opts?.gcpProjectId ? `${opts.email}#gcp:${opts.gcpProjectId}` : `${opts.email}#personal`) : "")
+  ).trim();
+  const prevChannelId = String(opts?.prevChannelId || "").trim();
+  const prevSnapshotPath = prevChannelId && prevChannelId !== targetChannelId
+    ? getChannelEnvSnapshotPath(prevChannelId)
+    : "";
+  const targetSnapshotPath = targetChannelId
+    ? getChannelEnvSnapshotPath(targetChannelId)
+    : "";
 
   const vscdbSyncMjs = [
     'import fs from "node:fs";',
@@ -294,6 +307,9 @@ export async function restartCurrentAntigravityInstance(ctx = null, opts = {}) {
     'if (!cfgPath || !fs.existsSync(cfgPath)) process.exit(0);',
     'try {',
     '  const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));',
+    '  if (cfg.lsLogPath && fs.existsSync(cfg.lsLogPath)) {',
+    '    try { fs.writeFileSync(cfg.lsLogPath, "", "utf8"); } catch {}',
+    '  }',
     '  if (cfg.appStoragePath && cfg.appStorageContent) {',
     '    try { fs.writeFileSync(cfg.appStoragePath, cfg.appStorageContent, "utf8"); } catch {}',
     '  }',
@@ -307,6 +323,8 @@ export async function restartCurrentAntigravityInstance(ctx = null, opts = {}) {
     '          if (!gCfg.userSettings || typeof gCfg.userSettings !== "object") gCfg.userSettings = {};',
     '          if (cfg.vscdbPayload?.isGcp) {',
     '            gCfg.userSettings.gcpRegion = cfg.gcpLocation || "global";',
+    '          } else {',
+    '            delete gCfg.userSettings.gcpRegion;',
     '          }',
     '          fs.writeFileSync(geminiCfgPath, JSON.stringify(gCfg, null, 2), "utf8");',
     '        }',
@@ -320,39 +338,38 @@ export async function restartCurrentAntigravityInstance(ctx = null, opts = {}) {
     '    try {',
     '      try { db.exec("PRAGMA busy_timeout = 5000;"); } catch {}',
     '      db.exec("CREATE TABLE IF NOT EXISTS ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)");',
+    '      if (cfg.prevSnapshotPath && !fs.existsSync(cfg.prevSnapshotPath)) {',
+    '        try {',
+    '          const rows = db.prepare("SELECT key, value FROM ItemTable WHERE key LIKE \'antigravityUnifiedStateSync.%\' OR key LIKE \'jetskiStateSync.%\'").all();',
+    '          const snapItems = {};',
+    '          for (const r of rows) {',
+    '            if (!r || !r.key || r.key === "antigravityUnifiedStateSync.oauthToken" || r.key === "antigravityUnifiedStateSync.userStatus" || r.key === "antigravityUnifiedStateSync.enterprisePreferences") continue;',
+    '            snapItems[String(r.key)] = String(r.value ?? "");',
+    '          }',
+    '          fs.mkdirSync(path.dirname(cfg.prevSnapshotPath), { recursive: true });',
+    '          fs.writeFileSync(cfg.prevSnapshotPath, JSON.stringify({ updatedAt: Date.now(), items: snapItems }, null, 2), "utf8");',
+    '        } catch {}',
+    '      }',
+    '      db.prepare("DELETE FROM ItemTable WHERE key LIKE \'antigravityUnifiedStateSync.%\' OR key LIKE \'jetskiStateSync.%\' OR key IN (\'antigravityAuthStatus\', \'google.geminicodeassist\')").run();',
     '      const upsert = db.prepare("INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)");',
+    '      if (cfg.targetSnapshotPath && fs.existsSync(cfg.targetSnapshotPath)) {',
+    '        try {',
+    '          const snap = JSON.parse(fs.readFileSync(cfg.targetSnapshotPath, "utf8"));',
+    '          if (snap && snap.items && typeof snap.items === "object") {',
+    '            for (const [k, v] of Object.entries(snap.items)) {',
+    '              if (typeof v === "string") upsert.run(k, v);',
+    '            }',
+    '          }',
+    '        } catch {}',
+    '      }',
     '      if (p.oauthTokenB64) upsert.run("antigravityUnifiedStateSync.oauthToken", p.oauthTokenB64);',
     '      if (p.userStatusB64) upsert.run("antigravityUnifiedStateSync.userStatus", p.userStatusB64);',
     '      if (p.isGcp && p.enterprisePrefsB64) {',
     '        upsert.run("antigravityUnifiedStateSync.enterprisePreferences", p.enterprisePrefsB64);',
-    '      } else {',
-    '        db.prepare("DELETE FROM ItemTable WHERE key = ?").run("antigravityUnifiedStateSync.enterprisePreferences");',
     '      }',
-    '      let gcaObj = {};',
-    '      try {',
-    '        const gcaRow = db.prepare("SELECT value FROM ItemTable WHERE key = ?").get("google.geminicodeassist");',
-    '        if (gcaRow && gcaRow.value) {',
-    '          const parsedGca = JSON.parse(String(gcaRow.value));',
-    '          if (parsedGca && typeof parsedGca === "object") gcaObj = { ...parsedGca };',
-    '        }',
-    '      } catch {}',
-    '      if (p.isGcp && p.gcpProjectId) {',
-    '        gcaObj["geminicodeassist.project"] = p.gcpProjectId;',
-    '      } else {',
-    '        delete gcaObj["geminicodeassist.project"];',
-    '      }',
+    '      const gcaObj = (p.isGcp && p.gcpProjectId) ? { "geminicodeassist.project": p.gcpProjectId } : {};',
     '      upsert.run("google.geminicodeassist", JSON.stringify(gcaObj));',
-    '      let authObj = { name: p.email ? p.email.split("@")[0] : "User", email: p.email || "", apiKey: p.accessToken || "" };',
-    '      try {',
-    '        const row = db.prepare("SELECT value FROM ItemTable WHERE key = ?").get("antigravityAuthStatus");',
-    '        if (row && row.value) {',
-    '          const parsed = JSON.parse(String(row.value));',
-    '          if (parsed && typeof parsed === "object") {',
-    '            authObj = { ...parsed, email: p.email || parsed.email || "", apiKey: p.accessToken || parsed.apiKey || "" };',
-    '            delete authObj.userStatusProtoBinaryBase64;',
-    '          }',
-    '        }',
-    '      } catch {}',
+    '      const authObj = { name: p.email ? p.email.split("@")[0] : "User", email: p.email || "", apiKey: p.accessToken || "" };',
     '      upsert.run("antigravityAuthStatus", JSON.stringify(authObj));',
     '      try { db.exec("PRAGMA wal_checkpoint(TRUNCATE);"); } catch {}',
     '    } finally {',
@@ -403,6 +420,9 @@ export async function restartCurrentAntigravityInstance(ctx = null, opts = {}) {
     protoScrubPath,
     stateVscdbPath,
     vscdbPayload,
+    prevSnapshotPath,
+    targetSnapshotPath,
+    lsLogPath: String(activeCtx?.lsLogFile || ""),
     gcpLocation: String(opts?.gcpLocation || "global"),
     scrubConvId: String(opts?.scrubConvId || ""),
     lsPid: Number(opts?.lsPid || 0),
@@ -1209,6 +1229,10 @@ export async function launchIsolatedAntigravityInstance(accountId) {
     if (fs.existsSync(srcStateVscdb) && !fs.existsSync(dstStateVscdb)) {
       fs.copyFileSync(srcStateVscdb, dstStateVscdb);
     }
+    const isoLsLogPath = path.join(instanceLogsDir, "google.antigravity", "language_server.log");
+    if (fs.existsSync(isoLsLogPath)) {
+      try { fs.writeFileSync(isoLsLogPath, "", "utf8"); } catch {}
+    }
     syncInstanceAppStorage(
       instanceUserDataDir,
       target.email,
@@ -1218,7 +1242,7 @@ export async function launchIsolatedAntigravityInstance(accountId) {
       targetBillingMode,
       targetLocation
     );
-    syncInstanceStateVscdb(instanceUserDataDir, tokenToWrite, target.email, targetProject);
+    syncInstanceStateVscdb(instanceUserDataDir, tokenToWrite, target.email, targetProject, "");
   } catch {}
 
   const launchedAt = Date.now();

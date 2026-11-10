@@ -21,6 +21,11 @@ import {
 import {
   AGENT_PLATFORM_DEFAULT_MODELS,
   isLegacyDeprecatedModel,
+  stripModelVariantSuffix,
+  deriveCloudCodeSlugFromLabel,
+  ensureDynamicModelRegistry,
+  learnModelsFromCloudCodeResponse,
+  learnModelsFromLsClientConfigs,
   isGcpOnlyModel,
   isModelEntryRestrictedOrSunset,
   detectPersonalAccountTier,
@@ -39,6 +44,11 @@ import {
 export {
   AGENT_PLATFORM_DEFAULT_MODELS,
   isLegacyDeprecatedModel,
+  stripModelVariantSuffix,
+  deriveCloudCodeSlugFromLabel,
+  ensureDynamicModelRegistry,
+  learnModelsFromCloudCodeResponse,
+  learnModelsFromLsClientConfigs,
   isGcpOnlyModel,
   isModelEntryRestrictedOrSunset,
   detectPersonalAccountTier,
@@ -831,7 +841,13 @@ export async function probeChannelQuotaSnapshot(channelId) {
       }
     }
 
-    if (!isGcp && (probeRes.byPool?.prod?.modelsResp?.data || probeRes.byPool?.daily?.modelsResp?.data)) {
+    if ( !isGcp && (probeRes.byPool?.prod?.modelsResp?.data || probeRes.byPool?.daily?.modelsResp?.data)) {
+      if (probeRes.byPool?.prod?.modelsResp?.data) {
+        learnModelsFromCloudCodeResponse(cfg, probeRes.byPool.prod.modelsResp.data);
+      }
+      if (probeRes.byPool?.daily?.modelsResp?.data) {
+        learnModelsFromCloudCodeResponse(cfg, probeRes.byPool.daily.modelsResp.data);
+      }
       const nextByPool = { ...(acc.cachedQuotaByPool || {}) };
       const finalCompPid = resolvePersonalCompanionProjectId(cfg, acc.email, probeRes.companionPid || acc.companionProjectId);
       for (const pKey of ["prod", "daily"]) {

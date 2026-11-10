@@ -258,18 +258,23 @@ async function requestHandler(req, res) {
     }
   }
 
-  // 1. 识别并保存当前已登录账户（若当前处于云项目通道且尚未收录同邮箱个人通道，同步补齐个人通道卡片）
+  // 1. 识别并保存当前已登录账户（仅当用户主动点击「收录当前」时才把当前原生登录账号写入通道池）
   if (req.method === "POST" && pathname === "/api/save-current-account") {
     try {
       let snap = await lsBridge.fetchLiveSystemSnapshot(true);
       const email = snap.activeAccount?.email || "";
+      const gcpProjectId = snap.activeAccount?.gcpProjectId || "";
       if (email) {
-        const hasPersonal = (snap.accounts || []).some((a) => a.id === `${email}#personal`);
-        if (!hasPersonal) {
+        if (gcpProjectId) {
+          lsBridge.addOrUpdateGcpChannelCard(email, gcpProjectId, {
+            gcpBillingMode: snap.activeAccount?.gcpBillingMode || "agent_platform",
+            gcpLocation: snap.activeAccount?.gcpLocation || "global"
+          });
+        } else {
           lsBridge.addOrUpdatePersonalChannelCard(email);
           await lsBridge.probeChannelQuotaSnapshot(`${email}#personal`).catch(() => {});
-          snap = await lsBridge.fetchLiveSystemSnapshot(false);
         }
+        snap = await lsBridge.fetchLiveSystemSnapshot(false);
       }
       broadcastSnapshot(snap);
       return sendJson(res, 200, {
@@ -596,6 +601,7 @@ async function requestHandler(req, res) {
       if (autoRelayOnLowQuota !== undefined) {
         cfg.routing.autoRelayOnLowQuota = Boolean(autoRelayOnLowQuota);
       }
+      cfg.routing.updatedAt = Date.now();
       writeRelayConfig(cfg);
       const snap = await lsBridge.fetchLiveSystemSnapshot(false);
       broadcastSnapshot(snap);
