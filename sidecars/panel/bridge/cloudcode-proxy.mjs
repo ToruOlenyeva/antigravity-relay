@@ -628,9 +628,14 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
             attemptIdx < 5
           ) {
             excludedIds.add(`${routedTargetAcc.id}@${targetPool}`);
+            const altPool = targetPool === "prod" ? "daily" : "prod";
+            const hasExplicitPoolLock = typeof routeSpec === "string" &&
+              routeSpec.startsWith("account:") &&
+              routeSpec.indexOf("#") >= 0 &&
+              routeSpec.indexOf("@", routeSpec.indexOf("#")) >= 0;
             const hasNextCandidate = routeSpec === "auto_poll"
               ? Boolean(selectBestPersonalRouteCandidate(baseFamily, cfg, excludedIds))
-              : false;
+              : (!hasExplicitPoolLock && !excludedIds.has(`${routedTargetAcc.id}@${altPool}`));
             if (hasNextCandidate) {
               upRes.resume();
               setTimeout(() => {
