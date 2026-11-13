@@ -24,6 +24,7 @@ import {
   normalizePersonalQuotaPool,
   getActivePersonalQuotaPool,
   getCloudCodeHostnameForPool,
+  stripModelVariantSuffix,
   deriveCloudCodeSlugFromLabel,
   learnModelsFromCloudCodeResponse
 } from "./quota-probe.mjs";
@@ -92,76 +93,43 @@ export function resolveBaseModelFamilyFromId(rawModelStr, cfg) {
   const lower = s.toLowerCase();
 
   // 1. 优先从动态自学习注册表（随客户端版本自动更新）解析模型家族
-  const dynFamily = cfg?.__meta__?.dynamicModelRegistry?.placeholderToFamily?.[lower];
-  if (dynFamily) return dynFamily;
-
-  // 2. 扫描当前所有已收录账号的 availableModels 变体表
-  for (const acc of Object.values(cfg?.accounts || {})) {
-    const pools = [
-      acc?.cachedQuota?.availableModels,
-      acc?.cachedQuotaByPool?.prod?.availableModels,
-      acc?.cachedQuotaByPool?.daily?.availableModels
-    ];
-    for (const list of pools) {
-      for (const m of (list || [])) {
-        const mLabel = String(m.modelId || m.label || "").trim();
-        if (mLabel.toLowerCase() === lower) return mLabel;
-        if (Array.isArray(m.variantIds) && m.variantIds.some((v) => String(v).toLowerCase() === lower)) {
-          return mLabel;
-        }
+  const dynReg = cfg?.__meta__?.dynamicModelRegistry;
+  if (dynReg?.placeholderToFamily?.[lower]) {
+    return stripModelVariantSuffix(dynReg.placeholderToFamily[lower]);
+  }
+  const strippedLower = stripModelVariantSuffix(s).toLowerCase();
+  if (dynReg?.placeholderToFamily?.[strippedLower]) {
+    return stripModelVariantSuffix(dynReg.placeholderToFamily[strippedLower]);
+  }
+  if (dynReg?.labelToSlug) {
+    for (const [lbl, slug] of Object.entries(dynReg.labelToSlug)) {
+      if (lbl === lower || String(slug || "").toLowerCase() === lower) {
+        const fam = dynReg.placeholderToFamily?.[String(slug || "").toLowerCase()];
+        if (fam) return stripModelVariantSuffix(fam);
       }
     }
   }
 
-  // 3. 通用语义匹配与离线静态兜底
-  if (/argon|m417|m418|m419/i.test(lower)) return "Gemini 4 Argon";
-  if (/3[._-]8[._-]flash|m47\b|m318|m319|m320|m420|m421|m422/i.test(lower)) return "Gemini 3.8 Flash";
-  if (/3[._-]7[._-]flash|m55|m62|m63|m298|m299|m300/i.test(lower)) return "Gemini 3.7 Flash";
-  if (/3[._-]6[._-]flash|m51|m60|m61|m71|m72|m73/i.test(lower)) return "Gemini 3.6 Flash";
-  if (/3[._-]1[._-]pro|m36|m37/i.test(lower)) return "Gemini 3.1 Pro";
-  if (/opus[._-\s]*5[._-]5|m400|m401|m402|m406|m409|m410|m411|m412/i.test(lower)) return "Claude Opus 5.5";
-  if (/sonnet[._-\s]*5[._-]5|m403|m404|m405|m407|m413|m414|m415|m416/i.test(lower)) return "Claude Sonnet 5.5";
-  if (/sonnet[._-\s]*4[._-]6|m35\b/i.test(lower)) return "Claude Sonnet 4.6 (Thinking)";
-  if (/opus[._-\s]*4[._-]6|m26\b/i.test(lower)) return "Claude Opus 4.6 (Thinking)";
-  if (/gpt[._-\s]*oss|m12\b/i.test(lower)) return "GPT-OSS 120B";
+  // 2. 扫描 liveTierModels 与已收录账号的 availableModels 变体表
+  const liveLists = Object.values(cfg?.__meta__?.liveTierModels || {});
+  const accLists = Object.values(cfg?.accounts || {}).flatMap((acc) => [
+    acc?.cachedQuota?.availableModels,
+    acc?.cachedQuotaByPool?.daily?.availableModels,
+    acc?.cachedQuotaByPool?.prod?.availableModels
+  ]);
+  for (const list of [...liveLists, ...accLists]) {
+    for (const m of (list || [])) {
+      const mLabel = stripModelVariantSuffix(m.modelId || m.label || "");
+      if (!mLabel) continue;
+      if (mLabel.toLowerCase() === lower || mLabel.toLowerCase() === strippedLower) return mLabel;
+      if (Array.isArray(m.variantIds) && m.variantIds.some((v) => String(v).toLowerCase() === lower)) {
+        return mLabel;
+      }
+    }
+  }
 
-  return s.replace(/\s*\((Low|Medium|High|Max)\)\s*$/i, "").trim();
+  return stripModelVariantSuffix(s);
 }
-
-const FALLBACK_CONSUMER_MODEL_ID_MAP = {
-  "model_placeholder_m417": "gemini-4-argon-high",
-  "model_placeholder_m418": "gemini-4-argon-medium",
-  "model_placeholder_m419": "gemini-4-argon-low",
-  "model_placeholder_m420": "gemini-3.8-flash-high",
-  "model_placeholder_m421": "gemini-3.8-flash-medium",
-  "model_placeholder_m422": "gemini-3.8-flash-low",
-  "model_placeholder_m318": "gemini-3.8-flash-high",
-  "model_placeholder_m319": "gemini-3.8-flash-medium",
-  "model_placeholder_m320": "gemini-3.8-flash-low",
-  "model_placeholder_m47": "gemini-3.8-flash-medium",
-  "model_placeholder_m409": "claude-opus-5-5-low",
-  "model_placeholder_m410": "claude-opus-5-5-medium",
-  "model_placeholder_m411": "claude-opus-5-5-high",
-  "model_placeholder_m412": "claude-opus-5-5-max",
-  "model_placeholder_m400": "claude-opus-5-5-low",
-  "model_placeholder_m401": "claude-opus-5-5-medium",
-  "model_placeholder_m402": "claude-opus-5-5-high",
-  "model_placeholder_m406": "claude-opus-5-5-max",
-  "model_placeholder_m413": "claude-sonnet-5-5-low",
-  "model_placeholder_m414": "claude-sonnet-5-5-medium",
-  "model_placeholder_m415": "claude-sonnet-5-5-high",
-  "model_placeholder_m416": "claude-sonnet-5-5-max",
-  "model_placeholder_m403": "claude-sonnet-5-5-low",
-  "model_placeholder_m404": "claude-sonnet-5-5-medium",
-  "model_placeholder_m405": "claude-sonnet-5-5-high",
-  "model_placeholder_m407": "claude-sonnet-5-5-max",
-  "model_placeholder_m35": "claude-sonnet-4-6-thinking",
-  "model_placeholder_m26": "claude-opus-4-6-thinking",
-  "model_placeholder_m36": "gemini-3.1-pro-low",
-  "model_placeholder_m37": "gemini-3.1-pro-high",
-  "model_placeholder_m12": "gpt-oss-120b-medium",
-  "model_openai_gpt_oss_120b_medium": "gpt-oss-120b-medium"
-};
 
 export function normalizeConsumerModelId(rawModelStr, cfg = null) {
   const s = String(rawModelStr || "").trim();
@@ -179,21 +147,20 @@ export function normalizeConsumerModelId(rawModelStr, cfg = null) {
   }
 
   // 2. 若在已探测的 availableModels.variantIds 中同时存在 placeholder 与真实云端 slug，自动反查
-  for (const acc of Object.values(activeCfg?.accounts || {})) {
-    const pools = [
-      acc?.cachedQuota?.availableModels,
-      acc?.cachedQuotaByPool?.prod?.availableModels,
-      acc?.cachedQuotaByPool?.daily?.availableModels
-    ];
-    for (const list of pools) {
-      for (const m of (list || [])) {
-        if (!Array.isArray(m.variantIds)) continue;
-        if (m.variantIds.some((v) => String(v).toLowerCase() === lower)) {
-          const realSlug = m.variantIds.find(
-            (v) => /^[a-z0-9._-]+$/.test(String(v)) && !/^model_placeholder_/i.test(String(v))
-          );
-          if (realSlug) return realSlug;
-        }
+  const liveLists = Object.values(activeCfg?.__meta__?.liveTierModels || {});
+  const accLists = Object.values(activeCfg?.accounts || {}).flatMap((acc) => [
+    acc?.cachedQuota?.availableModels,
+    acc?.cachedQuotaByPool?.daily?.availableModels,
+    acc?.cachedQuotaByPool?.prod?.availableModels
+  ]);
+  for (const list of [...liveLists, ...accLists]) {
+    for (const m of (list || [])) {
+      if (!Array.isArray(m.variantIds)) continue;
+      if (m.variantIds.some((v) => String(v).toLowerCase() === lower)) {
+        const realSlug = m.variantIds.find(
+          (v) => /^[a-z0-9._-]+$/.test(String(v)) && !/^model_placeholder_/i.test(String(v))
+        );
+        if (realSlug) return realSlug;
       }
     }
   }
@@ -203,8 +170,7 @@ export function normalizeConsumerModelId(rawModelStr, cfg = null) {
     return deriveCloudCodeSlugFromLabel(s);
   }
 
-  // 4. 静态冷启动兜底
-  return FALLBACK_CONSUMER_MODEL_ID_MAP[lower] || s;
+  return s;
 }
 
 export async function ensurePersonalCompanionProjectId(cfg, acc, accessToken, targetHostname = "cloudcode-pa.googleapis.com") {

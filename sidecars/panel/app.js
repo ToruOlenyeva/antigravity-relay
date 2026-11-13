@@ -153,7 +153,7 @@ function getPoolModelsForScope(isGcpScope = false) {
     if (!m) return;
     const rawLabel = String(m.label || m.modelId || "").trim();
     if (!rawLabel) return;
-    const baseLabel = rawLabel.replace(/\s*\((Low|Medium|High|Max)\)\s*$/i, "").trim();
+    const baseLabel = rawLabel.replace(/\s*\((Low|Medium|High|XHigh|Extra|Max)\)\s*$/i, "").trim();
     const vars = Array.isArray(m.variantIds) ? m.variantIds : [baseLabel, rawLabel];
     if (!modelMap.has(baseLabel)) {
       modelMap.set(baseLabel, {
@@ -175,7 +175,12 @@ function getPoolModelsForScope(isGcpScope = false) {
   };
 
   if (isGcpScope) {
-    // GCP 通道激活时，仅汇总已收录 GCP 通道与当前活跃 GCP 会话支持的模型
+    // 优先引用当前活跃 GCP 会话的 Antigravity 原生模型顺序，再补充其余已收录 GCP 通道模型
+    if (state.activeAccount?.gcpProjectId) {
+      for (const m of (state.availableModels || [])) {
+        addModelEntry(m, true);
+      }
+    }
     for (const acc of (state.accounts || [])) {
       const isGcp = acc.channelType === "gcp" || Boolean(acc.gcpProjectId);
       if (!isGcp) continue;
@@ -183,51 +188,29 @@ function getPoolModelsForScope(isGcpScope = false) {
         addModelEntry(m, true);
       }
     }
-    if (state.activeAccount?.gcpProjectId) {
+  } else {
+    // 优先引用当前活跃个人会话的 Antigravity 原生模型顺序，再补充其余已收录个人通道模型
+    if (!state.activeAccount?.gcpProjectId) {
       for (const m of (state.availableModels || [])) {
-        addModelEntry(m, true);
+        addModelEntry(m, false);
       }
     }
-  } else {
-    // 个人通道激活时，汇总已收录个人通道（Prod + Daily 双池）支持的可用模型
     for (const acc of (state.accounts || [])) {
       const isGcp = acc.channelType === "gcp" || Boolean(acc.gcpProjectId);
       if (isGcp) continue;
-      for (const m of (acc.cachedQuotaByPool?.prod?.availableModels || [])) {
-        addModelEntry(m, false);
-      }
       for (const m of (acc.cachedQuotaByPool?.daily?.availableModels || [])) {
         addModelEntry(m, false);
       }
       for (const m of (acc.cachedQuota?.availableModels || [])) {
         addModelEntry(m, false);
       }
-    }
-    if (modelMap.size === 0 && !state.activeAccount?.gcpProjectId) {
-      for (const m of (state.availableModels || [])) {
+      for (const m of (acc.cachedQuotaByPool?.prod?.availableModels || [])) {
         addModelEntry(m, false);
       }
     }
   }
 
-  const preferredOrder = [
-    "Gemini 4 Argon",
-    "Gemini 3.8 Flash",
-    "Gemini 3.7 Flash",
-    "Gemini 3.6 Flash",
-    "Gemini 3.1 Pro",
-    "Claude Opus 5.5",
-    "Claude Sonnet 5.5"
-  ];
-
-  return Array.from(modelMap.values()).sort((a, b) => {
-    const idxA = preferredOrder.findIndex((p) => p.toLowerCase() === a.modelId.toLowerCase());
-    const idxB = preferredOrder.findIndex((p) => p.toLowerCase() === b.modelId.toLowerCase());
-    if (idxA !== -1 && idxB !== -1) return idxA - idxB;
-    if (idxA !== -1) return -1;
-    if (idxB !== -1) return 1;
-    return a.label.localeCompare(b.label);
-  });
+  return Array.from(modelMap.values());
 }
 
 function buildRouteOptionsList(modelObj = null, isGcpScope = false) {

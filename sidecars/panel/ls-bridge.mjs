@@ -40,6 +40,7 @@ const {
 import {
   AGENT_PLATFORM_DEFAULT_MODELS,
   isLegacyDeprecatedModel,
+  stripModelVariantSuffix,
   isGcpOnlyModel,
   isModelEntryRestrictedOrSunset,
   detectPersonalAccountTier,
@@ -696,18 +697,16 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
 
   const groupedModelMap = new Map();
   for (const m of effectiveClientModels) {
+    if (isModelEntryRestrictedOrSunset(m)) continue;
     const rawLabel = (m.label || "").trim();
     const modelId = m.modelOrAlias?.model || m.modelOrAlias?.alias || "";
     if (!rawLabel || !modelId) continue;
-    const baseLabel = rawLabel.replace(/\s*\((Low|Medium|High|Max)\)\s*$/i, "").trim();
+    const baseLabel = stripModelVariantSuffix(rawLabel);
+    if (isLegacyDeprecatedModel(baseLabel) || isLegacyDeprecatedModel(rawLabel)) {
+      continue;
+    }
     if (!activeGcpProject) {
-      if (
-        isLegacyDeprecatedModel(baseLabel) ||
-        isLegacyDeprecatedModel(rawLabel) ||
-        isGcpOnlyModel(baseLabel) ||
-        isGcpOnlyModel(rawLabel) ||
-        isModelEntryRestrictedOrSunset(m)
-      ) {
+      if (isGcpOnlyModel(baseLabel) || isGcpOnlyModel(rawLabel)) {
         continue;
       }
       if (!hasLiveArgonAccess && /argon/i.test(baseLabel)) {
@@ -737,12 +736,42 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
     }
   }
   let availableModels = Array.from(groupedModelMap.values());
+  if (availableModels.length > 0 && effectiveClientModels.length > 0) {
+    if (!cfg.__meta__.liveTierModels || typeof cfg.__meta__.liveTierModels !== "object") {
+      cfg.__meta__.liveTierModels = {};
+    }
+    if (activeGcpProject && lsHasGcpModels) {
+      cfg.__meta__.liveTierModels.gcp = availableModels.map((m) => ({
+        label: m.label,
+        modelId: m.modelId,
+        variantIds: [...(m.variantIds || [m.label])]
+      }));
+      writeRelayConfig(cfg);
+    } else if (!activeGcpProject) {
+      cfg.__meta__.liveTierModels.personal = availableModels.map((m) => ({
+        label: m.label,
+        modelId: m.modelId,
+        variantIds: [...(m.variantIds || [m.label])]
+      }));
+      writeRelayConfig(cfg);
+    }
+  }
   if (
     activeGcpProject &&
     activeGcpBillingMode === "agent_platform" &&
     (availableModels.length === 0 || !availableModels.some((m) => isGcpOnlyModel(m.label || m.modelId || "")))
   ) {
-    availableModels = AGENT_PLATFORM_DEFAULT_MODELS.map((m) => ({ ...m, variantIds: [...m.variantIds] }));
+    const gcpTpl = cfg.__meta__?.liveTierModels?.gcp || [];
+    if (gcpTpl.length > 0) {
+      availableModels = gcpTpl.map((m) => ({
+        label: m.label,
+        modelId: m.modelId || m.label,
+        variantIds: [...(m.variantIds || [m.label])],
+        remainingPct: 100,
+        resetTime: "",
+        unlimited: true
+      }));
+    }
   }
 
   const rawQuotaGroups = (activeGcpProject || !lsModeMatches)
@@ -766,12 +795,13 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
     ? rawQuotaGroups.filter((g) => !/argon/i.test(g.id || g.displayName || ""))
     : rawQuotaGroups;
 
+  const personalNativeTemplate = cfg.__meta__?.liveTierModels?.personal || [];
   if (!activeGcpProject && quotaGroups.length > 0 && liveTierInfo.tierCode !== "Free") {
     availableModels = buildProModelsFromQuotaGroups(
       quotaGroups,
       cfg.accounts?.[liveChannelKey]?.cachedQuota?.availableModels || [],
       availableModels,
-      [],
+      personalNativeTemplate,
       hasLiveArgonAccess
     );
   }
@@ -783,17 +813,6 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
   const activeChannelId = (pinnedChannelId && cfg.accounts?.[pinnedChannelId])
     ? pinnedChannelId
     : detectedChannelId;
-
-  if (availableModels.length > 0 && effectiveClientModels.length > 0 && activeGcpProject && lsHasGcpModels) {
-    if (!cfg.__meta__.liveTierModels || typeof cfg.__meta__.liveTierModels !== "object") {
-      cfg.__meta__.liveTierModels = {};
-    }
-    cfg.__meta__.liveTierModels.gcp = availableModels.map((m) => ({
-      label: m.label,
-      modelId: m.modelId,
-      variantIds: [...(m.variantIds || [m.label])]
-    }));
-  }
 
   if (activeGcpProject && detectedChannelId && cfg.accounts[detectedChannelId]) {
     cfg.accounts[detectedChannelId].cachedQuota = {
@@ -841,18 +860,36 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
         }
       }
       if (probed) {
-        cfg.accounts[detectedChannelId].cachedQuota = probed;
         if (Array.isArray(probed.quotaGroups) && probed.quotaGroups.length > 0) {
           quotaGroups = probed.quotaGroups;
         }
         if (Array.isArray(probed.availableModels) && probed.availableModels.length > 0) {
-          availableModels = probed.availableModels;
+          availableModels = quotaGroups.length > 0 && liveTierInfo.tierCode !== "Free"
+            ? buildProModelsFromQuotaGroups(
+                quotaGroups,
+                probed.availableModels,
+                probed.availableModels,
+                cfg.__meta__?.liveTierModels?.personal || [],
+                hasLiveArgonAccess
+              )
+            : probed.availableModels;
+          probed.availableModels = availableModels;
         }
+        cfg.accounts[detectedChannelId].cachedQuota = probed;
       }
     } else {
       quotaGroups = detCached.quotaGroups;
       if (Array.isArray(detCached.availableModels) && detCached.availableModels.length > 0) {
-        availableModels = detCached.availableModels;
+        availableModels = quotaGroups.length > 0 && liveTierInfo.tierCode !== "Free"
+          ? buildProModelsFromQuotaGroups(
+              quotaGroups,
+              detCached.availableModels,
+              detCached.availableModels,
+              cfg.__meta__?.liveTierModels?.personal || [],
+              hasLiveArgonAccess
+            )
+          : detCached.availableModels;
+        detCached.availableModels = availableModels;
       }
     }
   }

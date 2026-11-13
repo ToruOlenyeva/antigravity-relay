@@ -7,139 +7,7 @@ import {
   buildCleanChannelToken
 } from "./wincred-ls.mjs";
 
-export const AGENT_PLATFORM_DEFAULT_MODELS = [
-  {
-    label: "Gemini 4 Argon",
-    modelId: "Gemini 4 Argon",
-    variantIds: [
-      "Gemini 4 Argon",
-      "Gemini 4 Argon (Medium)",
-      "MODEL_PLACEHOLDER_M418",
-      "Gemini 4 Argon (High)",
-      "MODEL_PLACEHOLDER_M417",
-      "Gemini 4 Argon (Low)",
-      "MODEL_PLACEHOLDER_M419"
-    ],
-    remainingPct: 100,
-    resetTime: "",
-    unlimited: true
-  },
-  {
-    label: "Gemini 3.8 Flash",
-    modelId: "Gemini 3.8 Flash",
-    variantIds: [
-      "Gemini 3.8 Flash",
-      "Gemini 3.8 Flash (Medium)",
-      "MODEL_PLACEHOLDER_M319",
-      "MODEL_PLACEHOLDER_M421",
-      "Gemini 3.8 Flash (High)",
-      "MODEL_PLACEHOLDER_M318",
-      "MODEL_PLACEHOLDER_M420",
-      "Gemini 3.8 Flash (Low)",
-      "MODEL_PLACEHOLDER_M320",
-      "MODEL_PLACEHOLDER_M422"
-    ],
-    remainingPct: 100,
-    resetTime: "",
-    unlimited: true
-  },
-  {
-    label: "Gemini 3.7 Flash",
-    modelId: "Gemini 3.7 Flash",
-    variantIds: [
-      "Gemini 3.7 Flash",
-      "Gemini 3.7 Flash (Medium)",
-      "MODEL_PLACEHOLDER_M299",
-      "MODEL_PLACEHOLDER_M62",
-      "Gemini 3.7 Flash (High)",
-      "MODEL_PLACEHOLDER_M298",
-      "MODEL_PLACEHOLDER_M55",
-      "Gemini 3.7 Flash (Low)",
-      "MODEL_PLACEHOLDER_M300",
-      "MODEL_PLACEHOLDER_M63"
-    ],
-    remainingPct: 100,
-    resetTime: "",
-    unlimited: true
-  },
-  {
-    label: "Gemini 3.6 Flash",
-    modelId: "Gemini 3.6 Flash",
-    variantIds: [
-      "Gemini 3.6 Flash",
-      "Gemini 3.6 Flash (Medium)",
-      "MODEL_PLACEHOLDER_M72",
-      "MODEL_PLACEHOLDER_M60",
-      "Gemini 3.6 Flash (High)",
-      "MODEL_PLACEHOLDER_M71",
-      "MODEL_PLACEHOLDER_M51",
-      "Gemini 3.6 Flash (Low)",
-      "MODEL_PLACEHOLDER_M73",
-      "MODEL_PLACEHOLDER_M61"
-    ],
-    remainingPct: 100,
-    resetTime: "",
-    unlimited: true
-  },
-  {
-    label: "Gemini 3.1 Pro",
-    modelId: "Gemini 3.1 Pro",
-    variantIds: [
-      "Gemini 3.1 Pro",
-      "Gemini 3.1 Pro (High)",
-      "MODEL_PLACEHOLDER_M37",
-      "Gemini 3.1 Pro (Low)",
-      "MODEL_PLACEHOLDER_M36"
-    ],
-    remainingPct: 100,
-    resetTime: "",
-    unlimited: true
-  },
-  {
-    label: "Claude Opus 5.5",
-    modelId: "Claude Opus 5.5",
-    variantIds: [
-      "Claude Opus 5.5",
-      "Claude Opus 5.5 (Low)",
-      "MODEL_PLACEHOLDER_M400",
-      "MODEL_PLACEHOLDER_M409",
-      "Claude Opus 5.5 (Medium)",
-      "MODEL_PLACEHOLDER_M401",
-      "MODEL_PLACEHOLDER_M410",
-      "Claude Opus 5.5 (High)",
-      "MODEL_PLACEHOLDER_M402",
-      "MODEL_PLACEHOLDER_M411",
-      "Claude Opus 5.5 (Max)",
-      "MODEL_PLACEHOLDER_M406",
-      "MODEL_PLACEHOLDER_M412"
-    ],
-    remainingPct: 100,
-    resetTime: "",
-    unlimited: true
-  },
-  {
-    label: "Claude Sonnet 5.5",
-    modelId: "Claude Sonnet 5.5",
-    variantIds: [
-      "Claude Sonnet 5.5",
-      "Claude Sonnet 5.5 (Low)",
-      "MODEL_PLACEHOLDER_M403",
-      "MODEL_PLACEHOLDER_M413",
-      "Claude Sonnet 5.5 (Medium)",
-      "MODEL_PLACEHOLDER_M404",
-      "MODEL_PLACEHOLDER_M414",
-      "Claude Sonnet 5.5 (High)",
-      "MODEL_PLACEHOLDER_M405",
-      "MODEL_PLACEHOLDER_M415",
-      "Claude Sonnet 5.5 (Max)",
-      "MODEL_PLACEHOLDER_M407",
-      "MODEL_PLACEHOLDER_M416"
-    ],
-    remainingPct: 100,
-    resetTime: "",
-    unlimited: true
-  }
-];
+export const AGENT_PLATFORM_DEFAULT_MODELS = [];
 
 export function isLegacyDeprecatedModel(labelOrId) {
   const s = String(labelOrId || "").trim();
@@ -151,7 +19,7 @@ export function isLegacyDeprecatedModel(labelOrId) {
 
 export function stripModelVariantSuffix(rawLabel) {
   return String(rawLabel || "")
-    .replace(/\s*\((Low|Medium|High|Max)\)\s*$/i, "")
+    .replace(/\s*\((Low|Medium|High|XHigh|Extra|Max)\)\s*$/i, "")
     .trim();
 }
 
@@ -183,6 +51,12 @@ export function ensureDynamicModelRegistry(cfg) {
   if (!reg.placeholderToSlug) reg.placeholderToSlug = {};
   if (!reg.placeholderToFamily) reg.placeholderToFamily = {};
   if (!reg.labelToSlug) reg.labelToSlug = {};
+  for (const [k, fam] of Object.entries(reg.placeholderToFamily)) {
+    const cleanFam = stripModelVariantSuffix(fam);
+    if (cleanFam && cleanFam !== fam) {
+      reg.placeholderToFamily[k] = cleanFam;
+    }
+  }
   return reg;
 }
 
@@ -205,6 +79,13 @@ export function learnModelsFromCloudCodeResponse(cfg, rawModelsResp) {
     if (baseFamily && reg.placeholderToFamily[lowerKey] !== baseFamily) {
       reg.placeholderToFamily[lowerKey] = baseFamily;
       changed = true;
+    }
+    if (baseFamily) {
+      const famSlug = deriveCloudCodeSlugFromLabel(baseFamily);
+      if (famSlug && reg.placeholderToFamily[famSlug] !== baseFamily) {
+        reg.placeholderToFamily[famSlug] = baseFamily;
+        changed = true;
+      }
     }
   }
   return changed;
@@ -234,6 +115,17 @@ export function learnModelsFromLsClientConfigs(cfg, clientModelConfigs) {
     if (cloudSlug && !reg.labelToSlug[lowerLabel]) {
       reg.labelToSlug[lowerLabel] = cloudSlug;
       changed = true;
+    }
+    if (baseFamily && cloudSlug && reg.placeholderToFamily[cloudSlug.toLowerCase()] !== baseFamily) {
+      reg.placeholderToFamily[cloudSlug.toLowerCase()] = baseFamily;
+      changed = true;
+    }
+    if (baseFamily) {
+      const famSlug = deriveCloudCodeSlugFromLabel(baseFamily);
+      if (famSlug && reg.placeholderToFamily[famSlug] !== baseFamily) {
+        reg.placeholderToFamily[famSlug] = baseFamily;
+        changed = true;
+      }
     }
   }
   return changed;
@@ -330,7 +222,7 @@ export function buildProModelsFromQuotaGroups(
   quotaGroups,
   prevModels = [],
   dynamicApiModels = [],
-  _liveTierTemplate = [],
+  liveTierTemplate = [],
   hasArgonAccess = true
 ) {
   const groups = Array.isArray(quotaGroups) ? quotaGroups : [];
@@ -373,7 +265,7 @@ export function buildProModelsFromQuotaGroups(
     if (!item) return;
     const rawLabel = String(item.label || item.modelId || "").trim();
     if (!rawLabel) return;
-    const baseLabel = rawLabel.replace(/\s*\((Low|Medium|High|Max)\)\s*$/i, "").trim();
+    const baseLabel = stripModelVariantSuffix(rawLabel);
     if (
       !baseLabel ||
       isLegacyDeprecatedModel(baseLabel) ||
@@ -413,6 +305,9 @@ export function buildProModelsFromQuotaGroups(
     }
   };
 
+  if (Array.isArray(liveTierTemplate) && liveTierTemplate.length > 0) {
+    for (const m of liveTierTemplate) upsertCandidate(m);
+  }
   const sourceModels = (Array.isArray(dynamicApiModels) && dynamicApiModels.length > 0)
     ? dynamicApiModels
     : (Array.isArray(prevModels) ? prevModels : []);
@@ -458,7 +353,7 @@ export function isValidOfficialQuotaGroup(g) {
   return true;
 }
 
-export function sanitizeCachedQuotaModels(cachedQuota, isGcp, _liveTierTemplate = [], hintTierName = "", hintTierId = "") {
+export function sanitizeCachedQuotaModels(cachedQuota, isGcp, liveTierTemplate = [], hintTierName = "", hintTierId = "") {
   if (!cachedQuota || typeof cachedQuota !== "object") return cachedQuota;
   const rawList = Array.isArray(cachedQuota.availableModels) ? cachedQuota.availableModels : [];
   const tierInfo = isGcp
@@ -476,7 +371,7 @@ export function sanitizeCachedQuotaModels(cachedQuota, isGcp, _liveTierTemplate 
   for (const m of rawList) {
     const rawLabel = String(m.label || m.modelId || "").trim();
     if (!rawLabel) continue;
-    const baseLabel = rawLabel.replace(/\s*\((Low|Medium|High|Max)\)\s*$/i, "").trim();
+    const baseLabel = stripModelVariantSuffix(rawLabel);
     if (isLegacyDeprecatedModel(baseLabel) || isLegacyDeprecatedModel(rawLabel)) {
       continue;
     }
@@ -524,7 +419,7 @@ export function sanitizeCachedQuotaModels(cachedQuota, isGcp, _liveTierTemplate 
         quotaGroups,
         availableModels,
         availableModels,
-        [],
+        liveTierTemplate,
         hasArgonAccess
       );
     }
@@ -663,15 +558,31 @@ export function normalizeAccountChannels(cfg) {
       cfg.__meta__.companionProjectsByEmail[kEmail] = kPid;
     }
   }
-  if (cfg.__meta__?.liveTierModels?.gcp && Array.isArray(cfg.__meta__.liveTierModels.gcp)) {
-    const gcpTpl = cfg.__meta__.liveTierModels.gcp;
-    const hasGcpExclusive = gcpTpl.some((m) => isGcpOnlyModel(m?.label || m?.modelId || ""));
-    if (!hasGcpExclusive || gcpTpl.length < 6) {
-      cfg.__meta__.liveTierModels.gcp = AGENT_PLATFORM_DEFAULT_MODELS.map((m) => ({
-        label: m.label,
-        modelId: m.modelId,
-        variantIds: [...m.variantIds]
-      }));
+  ensureDynamicModelRegistry(cfg);
+  if (cfg.__meta__?.liveTierModels && typeof cfg.__meta__.liveTierModels === "object") {
+    for (const tKey of ["gcp", "personal"]) {
+      const tpl = cfg.__meta__.liveTierModels[tKey];
+      if (!Array.isArray(tpl)) continue;
+      const mergedTpl = new Map();
+      for (const m of tpl) {
+        const rawLbl = String(m?.label || m?.modelId || "").trim();
+        const baseLbl = stripModelVariantSuffix(rawLbl);
+        if (!baseLbl || isLegacyDeprecatedModel(baseLbl)) continue;
+        const vars = Array.isArray(m.variantIds) ? m.variantIds : [baseLbl, rawLbl];
+        if (!mergedTpl.has(baseLbl)) {
+          mergedTpl.set(baseLbl, {
+            label: baseLbl,
+            modelId: baseLbl,
+            variantIds: Array.from(new Set([baseLbl, rawLbl, ...vars])).filter(Boolean)
+          });
+        } else {
+          const ex = mergedTpl.get(baseLbl);
+          for (const v of [rawLbl, ...vars]) {
+            if (v && !ex.variantIds.includes(v)) ex.variantIds.push(v);
+          }
+        }
+      }
+      cfg.__meta__.liveTierModels[tKey] = Array.from(mergedTpl.values());
     }
   }
   const activePool = normalizePersonalQuotaPool(cfg.routing?.personalQuotaPool);

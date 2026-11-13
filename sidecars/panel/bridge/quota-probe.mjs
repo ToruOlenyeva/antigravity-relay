@@ -383,10 +383,7 @@ export function parseCloudCodeModelsAndQuota(
     }
   } else {
     for (const [mid, m] of Object.entries(modelsObj)) {
-      const lbl = String(m?.displayName || m?.label || "").trim();
-      if (/gemini\s*4\s*argon|gemini\s*3\.8\s*flash|claude\s*opus|claude\s*sonnet|gpt-oss/i.test(lbl)) {
-        orderedEntries.push([mid, m]);
-      }
+      orderedEntries.push([mid, m]);
     }
   }
 
@@ -406,14 +403,15 @@ export function parseCloudCodeModelsAndQuota(
   for (const [modelId, m] of orderedEntries) {
     if (!m || typeof m !== "object") continue;
     if (/disabled$/i.test(modelId)) continue;
-    if (!isGcpChannel && (isModelEntryRestrictedOrSunset(m) || !m.quotaInfo)) continue;
+    if (isModelEntryRestrictedOrSunset(m)) continue;
+    if (!isGcpChannel && !m.quotaInfo && !allowedModelIds.has(modelId)) continue;
     const rawLabel = String(m.displayName || m.label || "").trim();
     if (!rawLabel) continue;
-    const baseLabel = rawLabel.replace(/\s*\((Low|Medium|High|Max)\)\s*$/i, "").trim();
+    const baseLabel = stripModelVariantSuffix(rawLabel);
+    if (isLegacyDeprecatedModel(baseLabel) || isLegacyDeprecatedModel(rawLabel) || isLegacyDeprecatedModel(modelId)) {
+      continue;
+    }
     if (!isGcpChannel) {
-      if (isLegacyDeprecatedModel(baseLabel) || isLegacyDeprecatedModel(rawLabel) || isLegacyDeprecatedModel(modelId)) {
-        continue;
-      }
       if (!hasArgonAccess && /argon/i.test(baseLabel)) {
         continue;
       }
@@ -548,12 +546,15 @@ export async function probeChannelQuotaSnapshot(channelId) {
           (logPid ? logPid === gcpPid : Boolean(/agent\s*platform|enterprise/i.test(usTierName) || lsHasGcpModels))
         );
         if (lsModeMatches && clientModels.length > 0) {
+          learnModelsFromLsClientConfigs(cfg, clientModels);
           const groupedMap = new Map();
           for (const m of clientModels) {
+            if (isModelEntryRestrictedOrSunset(m)) continue;
             const rawLabel = (m.label || "").trim();
             const modelId = m.modelOrAlias?.model || m.modelOrAlias?.alias || "";
             if (!rawLabel || !modelId) continue;
-            const baseLabel = rawLabel.replace(/\s*\((Low|Medium|High|Max)\)\s*$/i, "").trim();
+            const baseLabel = stripModelVariantSuffix(rawLabel);
+            if (isLegacyDeprecatedModel(baseLabel) || isLegacyDeprecatedModel(rawLabel)) continue;
             if (!groupedMap.has(baseLabel)) {
               groupedMap.set(baseLabel, {
                 label: baseLabel,
@@ -809,9 +810,9 @@ export async function probeChannelQuotaSnapshot(channelId) {
           cfg.__meta__.channelTokensById = {};
         }
         cfg.__meta__.channelTokensById[acc.id] = JSON.parse(JSON.stringify(cleanGcpTok));
-        break;
+      } else {
+        continue;
       }
-      continue;
     }
 
     let probeRes = await tryProbeWithToken(accessToken);
@@ -850,7 +851,7 @@ export async function probeChannelQuotaSnapshot(channelId) {
         false,
         probeRes.userTier,
         prevPoolQuota,
-        []
+        liveTierTemplate
       );
       if (parsedPool && Array.isArray(parsedPool.quotaGroups) && parsedPool.quotaGroups.length > 0) {
         parsedPool.pool = "daily";
@@ -883,13 +884,14 @@ export async function probeChannelQuotaSnapshot(channelId) {
         return acc.cachedQuota;
       }
     } else if (probeRes.modelsResp.status === 200 && probeRes.modelsResp.data) {
+      learnModelsFromCloudCodeResponse(cfg, probeRes.modelsResp.data);
       const parsed = parseCloudCodeModelsAndQuota(
         probeRes.modelsResp.data,
         probeRes.quotaSummaryResp?.data || null,
         isGcp,
         probeRes.userTier,
         acc.cachedQuota || null,
-        []
+        liveTierTemplate
       );
       if (parsed && isGcp && parsed.availableModels.length > 0) {
         acc.authExpired = false;

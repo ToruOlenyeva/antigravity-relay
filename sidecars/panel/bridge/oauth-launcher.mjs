@@ -57,26 +57,51 @@ function estimateTokensFromString(str) {
 
 function stripModelVariantSuffix(rawName) {
   return String(rawName || "")
-    .replace(/\s*\((Low|Medium|High|Max|Thinking)\)\s*$/i, "")
+    .replace(/\s*\((Low|Medium|High|XHigh|Extra|Max|Thinking)\)\s*$/i, "")
     .trim();
+}
+
+function toCanonicalModelSlug(rawStr) {
+  const clean = String(rawStr || "").trim();
+  if (!clean) return "";
+  let slug = clean
+    .toLowerCase()
+    .replace(/[()]/g, "")
+    .replace(/[\s_]+/g, "-")
+    .replace(/-+/g, "-");
+  if (slug.startsWith("claude-")) {
+    slug = slug.replace(/(\d)\.(\d)/g, "$1-$2");
+  }
+  return slug;
 }
 
 function buildKnownTelemetryModelDict(cfg) {
   const dict = new Map();
+  const registerAlias = (aliasStr, baseLabel) => {
+    const cleanAlias = String(aliasStr || "").trim();
+    const cleanBase = stripModelVariantSuffix(baseLabel);
+    if (!cleanAlias || !cleanBase) return;
+    dict.set(cleanAlias.toLowerCase(), cleanBase);
+    const strippedAlias = stripModelVariantSuffix(cleanAlias);
+    if (strippedAlias) {
+      dict.set(strippedAlias.toLowerCase(), cleanBase);
+      const slugged = toCanonicalModelSlug(strippedAlias);
+      if (slugged) dict.set(slugged, cleanBase);
+    }
+    const directSlug = toCanonicalModelSlug(cleanAlias);
+    if (directSlug) dict.set(directSlug, cleanBase);
+  };
+
   const registerModelObj = (m) => {
     if (!m || typeof m !== "object") return;
     const baseLabel = stripModelVariantSuffix(m.label || m.modelId || "");
     if (!baseLabel) return;
-    dict.set(baseLabel.toLowerCase(), baseLabel);
-    if (m.label) dict.set(String(m.label).trim().toLowerCase(), baseLabel);
-    if (m.modelId) dict.set(String(m.modelId).trim().toLowerCase(), baseLabel);
+    registerAlias(baseLabel, baseLabel);
+    if (m.label) registerAlias(m.label, baseLabel);
+    if (m.modelId) registerAlias(m.modelId, baseLabel);
     if (Array.isArray(m.variantIds)) {
       for (const v of m.variantIds) {
-        const vs = String(v || "").trim();
-        if (!vs) continue;
-        dict.set(vs.toLowerCase(), baseLabel);
-        const strippedV = stripModelVariantSuffix(vs);
-        if (strippedV) dict.set(strippedV.toLowerCase(), baseLabel);
+        registerAlias(v, baseLabel);
       }
     }
   };
@@ -89,6 +114,28 @@ function buildKnownTelemetryModelDict(cfg) {
     for (const list of Object.values(liveTierModels)) {
       if (Array.isArray(list)) {
         for (const m of list) registerModelObj(m);
+      }
+    }
+  }
+  const dynReg = cfg?.__meta__?.dynamicModelRegistry;
+  if (dynReg && typeof dynReg === "object") {
+    for (const [k, fam] of Object.entries(dynReg.placeholderToFamily || {})) {
+      registerAlias(k, fam);
+      registerAlias(fam, fam);
+    }
+    for (const [lbl, slug] of Object.entries(dynReg.labelToSlug || {})) {
+      const fam = dynReg.placeholderToFamily?.[String(slug || "").toLowerCase()] || lbl;
+      registerAlias(lbl, fam);
+      registerAlias(slug, fam);
+    }
+    for (const [ph, slug] of Object.entries(dynReg.placeholderToSlug || {})) {
+      const fam =
+        dynReg.placeholderToFamily?.[String(ph || "").toLowerCase()] ||
+        dynReg.placeholderToFamily?.[String(slug || "").toLowerCase()] ||
+        "";
+      if (fam) {
+        registerAlias(ph, fam);
+        registerAlias(slug, fam);
       }
     }
   }
@@ -106,9 +153,15 @@ function buildKnownTelemetryModelDict(cfg) {
   if (cfg?.accounts && typeof cfg.accounts === "object") {
     const accList = Array.isArray(cfg.accounts) ? cfg.accounts : Object.values(cfg.accounts);
     for (const acc of accList) {
-      const avail = acc?.cachedQuota?.availableModels;
-      if (Array.isArray(avail)) {
-        for (const m of avail) registerModelObj(m);
+      const pools = [
+        acc?.cachedQuota?.availableModels,
+        acc?.cachedQuotaByPool?.daily?.availableModels,
+        acc?.cachedQuotaByPool?.prod?.availableModels
+      ];
+      for (const avail of pools) {
+        if (Array.isArray(avail)) {
+          for (const m of avail) registerModelObj(m);
+        }
       }
     }
   }
@@ -125,17 +178,16 @@ function matchKnownTelemetryModel(rawCandidate, knownDict) {
     const stripped = stripModelVariantSuffix(raw);
     const strippedHit = knownDict.get(stripped.toLowerCase());
     if (strippedHit) return strippedHit;
+    const slugHit = knownDict.get(toCanonicalModelSlug(stripped));
+    if (slugHit) return slugHit;
+    const rawSlugHit = knownDict.get(toCanonicalModelSlug(raw));
+    if (rawSlugHit) return rawSlugHit;
   }
 
-  // 兼容 language_server.log 中的官方 API URL slug（如 gemini-4-argon / gemini-3.8-flash）
-  if (/^gemini[-_\s]*4[-_\s]*argon$/i.test(raw)) return "Gemini 4 Argon";
-  if (/^gemini[-_\s]*3[._-]*8[-_\s]*flash$/i.test(raw)) return "Gemini 3.8 Flash";
-  if (/^gemini[-_\s]*3[._-]*7[-_\s]*flash$/i.test(raw)) return "Gemini 3.7 Flash";
-  if (/^gemini[-_\s]*3[._-]*6[-_\s]*flash$/i.test(raw)) return "Gemini 3.6 Flash";
-  if (/^gemini[-_\s]*3[._-]*1[-_\s]*pro$/i.test(raw)) return "Gemini 3.1 Pro";
-  if (/^claude[-_\s]*opus[-_\s]*5[._-]*5$/i.test(raw)) return "Claude Opus 5.5";
-  if (/^claude[-_\s]*sonnet[-_\s]*5[._-]*5$/i.test(raw)) return "Claude Sonnet 5.5";
-  if (/^gemini[-_\s]*3(\s+\([a-z]+\))?$/i.test(raw)) return "Gemini 3";
+  const strippedFallback = stripModelVariantSuffix(raw);
+  if (/\s/.test(strippedFallback) && /^[A-Z]/.test(strippedFallback)) {
+    return strippedFallback;
+  }
   return "";
 }
 
@@ -660,11 +712,11 @@ function parseSettingsChangeModels(contentStr, knownDict) {
   const idx = contentStr.indexOf("changed setting `Model Selection` from ");
   if (idx < 0) return null;
   const sub = contentStr.slice(idx + "changed setting `Model Selection` from ".length);
-  const firstSentence = sub.split(/\.\s+No need|\r?\n/i)[0].replace(/\.\s*$/, "").trim();
-  const toIdx = firstSentence.indexOf(" to ");
-  if (toIdx < 0) return null;
-  const rawFrom = firstSentence.slice(0, toIdx).trim();
-  const rawTo = firstSentence.slice(toIdx + 4).trim();
+  const firstSentence = sub.split(/\.\s+No need|\r?\n/i)[0].replace(/\.\s*$/, "");
+  const m = /^\s*(.*?)\s*\bto\s+(.+?)\s*$/i.exec(firstSentence);
+  if (!m) return null;
+  const rawFrom = (m[1] || "").trim();
+  const rawTo = (m[2] || "").trim();
   return {
     fromModel: matchKnownTelemetryModel(rawFrom, knownDict),
     toModel: matchKnownTelemetryModel(rawTo, knownDict)
@@ -714,8 +766,15 @@ function parseSingleConversationTranscript(convId, brainDir, knownDict, fallback
     return emptyStat;
   }
 
+  const dictSize = knownDict ? knownDict.size : 0;
   const cached = convTranscriptCache.get(cleanId);
-  if (cached && cached.mtimeMs === st.mtimeMs && cached.size === st.size) {
+  if (
+    cached &&
+    cached.mtimeMs === st.mtimeMs &&
+    cached.size === st.size &&
+    cached.fallbackModel === fallbackModel &&
+    cached.dictSize === dictSize
+  ) {
     return cached.data;
   }
 
@@ -857,6 +916,8 @@ function parseSingleConversationTranscript(convId, brainDir, knownDict, fallback
   convTranscriptCache.set(cleanId, {
     mtimeMs: st.mtimeMs,
     size: st.size,
+    fallbackModel,
+    dictSize,
     data
   });
   return data;
