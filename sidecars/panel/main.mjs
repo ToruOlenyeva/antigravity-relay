@@ -55,6 +55,7 @@ const watchedBackendFiles = [
   path.join(__dirname, "bridge", "wincred-ls.mjs"),
   path.join(__dirname, "bridge", "channel-catalog.mjs"),
   path.join(__dirname, "bridge", "quota-probe.mjs"),
+  path.join(__dirname, "bridge", "route-selector.mjs"),
   path.join(__dirname, "bridge", "cloudcode-proxy.mjs"),
   path.join(__dirname, "bridge", "oauth-launcher.mjs"),
   path.join(__dirname, "bridge", "signature-scrub.mjs")
