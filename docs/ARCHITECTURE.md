@@ -27,9 +27,10 @@ antigravity-relay/
 │   └── panel/                   # 原生免构建前后端物理分离 Sidecar 面板
 │       ├── bridge/              # 后端高内聚业务子模块目录
 │       │   ├── channel-catalog.mjs # 五大通道等级判定、动态模型目录与凭据归一化
-│       │   ├── cloudcode-proxy.mjs # 本地透明反向代理与双层重置算力路由
+│       │   ├── cloudcode-proxy.mjs # 本地透明反向代理、请求改写与 429 故障转移
 │       │   ├── oauth-launcher.mjs  # 旁路 OAuth 登录、多开隔离实例与会话遥测
 │       │   ├── quota-probe.mjs     # 官方动态模型白名单与三配额池探针引擎
+│       │   ├── route-selector.mjs  # 模型家族映射与双层重置时间个人通道选路器
 │       │   ├── signature-scrub.mjs # SQLite Protobuf 思维签名离线无损剥离器
 │       │   └── wincred-ls.mjs      # WinCred 凭据读写、多客户端刷新与 LS RPC
 │       ├── app.js               # 前端核心交互、自定义下拉与状态同步引擎
@@ -111,6 +112,10 @@ antigravity-relay/
    - 在内存中将 HTTP 请求头替换为目标个人账号的 `Authorization: Bearer <AccessToken>`、将 `body.project` 替换为该账号真实的私有 `companionProjectId`，跨号路由时自动调用 `stripThoughtSignaturesFromJson` 剥离请求体 JSON 中的残留签名，并按目标账本 `pool` 动态路由至 `cloudcode-pa.googleapis.com`（`prod`）或 `daily-cloudcode-pa.googleapis.com`（`daily`），流式响应结束后 2 秒异步刷新目标账号双服配额。
 3. <b>拦截 `/v1internal:fetchAvailableModels` 防止主账号 `0%` 锁死</b>：
    - 当当前登录的主个人账号某模型配额降至 `0%`（或如 `Plus` / `Free` 账号本身无 `Gemini 4 Argon` 额度），但用户在底部路由中已将该模型路由至其他有额度的个人账号（或开启 `auto_poll` 且池内其他个人账号有额度）时，透明代理在返回模型列表给 `language_server.exe` 前自动注入目标路由账号的剩余配额百分比，防止客户端前端将模型下拉项置灰锁死。
+4. <b>个人通道与 `GCP` 通道不可通过本地反代跨通道路由的三大实测物理边界</b>：
+   - <b>上游推理网关与协议硬分流</b>：`language_server.exe` 处于 `GCP` 模式（`auth_method: "gcp"` 且注入 `SetProjectID`）时，底层客户端直接向 `https://aiplatform.googleapis.com/v1/projects/<gcpProjectId>/locations/global/publishers/google/models/<model>:streamGenerateContent` 发起标准 Vertex AI 请求，完全绕过 `SetCloudCodeURL` 本地反代；而个人模式的 `/v1internal:streamGenerateContent` 私有接口仅接受个人伴生项目池 ID（如 `rising-fact-p41fc`），传入外部用户 `GCP` 项目 ID 会因无法开通 Google 内部私有服务 `cloudcode-pa.googleapis.com` 直接触发 `HTTP 403 PERMISSION_DENIED (SERVICE_DISABLED)`。
+   - <b>进程级凭据缓存锁死</b>：`CLIAuthProvider`（`google/antigravity/TokenStorage`）仅在进程启动时读取一次系统凭据，运行期热改凭据并调用 `ValidateProject` 无法热切换底层认证客户端，唯有同步四重状态库并重启 `language_server.exe` 方可切换个人与 `GCP` 模式。
+   - <b>Tink `thoughtSignature` 密钥域隔离与内存常驻会话锁</b>：所有个人通道共享同一套 CloudCode 消费级 Tink 密钥域（Base64 前缀 `AWkUfR` / `FpFH0T` / `AEFNM`），跨个人号路由无需剥离签名即可 100% 验签通过；而 `GCP` 通道使用独立的 Vertex AI Tink 密钥域（前缀 `AY89a18` / `IDxACGAIqQ` / `CA8QAhgCKk`）。跨通道混发签名立即报 `HTTP 400 Invalid thought signature`，在多步 `functionCall` 中途动态剥离签名则会报 `HTTP 400 Function call is missing a thought_signature`，且不重启 `language_server.exe` 时 `LoadTrajectory` 会跳过已常驻内存的会话（`trajectory already loaded, skipping duplicate load`），故跨通道切换必须走第一层主通道重启与离线洗库流程。
 
 ### 3.3 透明代理端口冲突备用方案（`8091..8095` + 随机端口自动递增回退）
 为防止默认 `8091` 端口被本机其他软件占用导致免重载路由失效，系统内置四重保障：

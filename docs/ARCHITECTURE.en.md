@@ -27,9 +27,10 @@ antigravity-relay/
 │   └── panel/                   # Native build-free decoupled Sidecar panel
 │       ├── bridge/              # Cohesive backend domain sub-modules
 │       │   ├── channel-catalog.mjs # Five-tier detection, model catalog & normalization
-│       │   ├── cloudcode-proxy.mjs # Local transparent proxy & dual-bucket routing
+│       │   ├── cloudcode-proxy.mjs # Local transparent proxy, rewrite & 429 failover
 │       │   ├── oauth-launcher.mjs  # Isolated OAuth, multi-instance launcher & telemetry
 │       │   ├── quota-probe.mjs     # Official dynamic model whitelist & quota probes
+│       │   ├── route-selector.mjs  # Model family resolver & two-layer personal router
 │       │   ├── signature-scrub.mjs # Offline SQLite Protobuf signature scrubber
 │       │   └── wincred-ls.mjs      # WinCred P/Invoke, multi-client OAuth & LS RPC
 │       ├── app.js               # Frontend interaction, custom dropdowns, and sync engine
@@ -111,6 +112,10 @@ When the primary session is on any personal channel (`Free` / `Plus` / `Pro` / `
    - The proxy replaces `Authorization: Bearer <AccessToken>` in memory, sets `body.project` to the account's dedicated private `companionProjectId`, invokes `stripThoughtSignaturesFromJson` on cross-account routes to strip residual signatures in the JSON payload, dynamically routes to `cloudcode-pa.googleapis.com` (`prod`) or `daily-cloudcode-pa.googleapis.com` (`daily`), and refreshes both pools' quotas 2 seconds after stream completion.
 3. <b>Intercepting `/v1internal:fetchAvailableModels` to Prevent `0%` UI Lockout</b>:
    - When the currently active personal account hits `0%` quota on a model (or lacks access on a `Plus` / `Free` tier) while that model is routed to another personal channel with remaining quota (or `auto_poll`), the proxy injects the routed personal channel's `remainingFraction` into `fetchAvailableModels` before returning to `language_server.exe`, preventing the client UI from disabling the model selector.
+4. <b>Three Empirical Boundaries Preventing Proxy Cross-Routing Between Personal and `GCP` Channels</b>:
+   - <b>Upstream Gateway & Protocol Divergence</b>: When `language_server.exe` runs in `GCP` mode (`auth_method: "gcp"` with `SetProjectID`), its internal client sends standard Vertex AI requests directly to `https://aiplatform.googleapis.com/v1/projects/<gcpProjectId>/locations/global/publishers/google/models/<model>:streamGenerateContent`, completely bypassing the `SetCloudCodeURL` local proxy; conversely, the personal mode `/v1internal:streamGenerateContent` endpoint only accepts consumer companion project IDs (e.g., `rising-fact-p41fc`), and passing an external user `GCP` project ID fails immediately with `HTTP 403 PERMISSION_DENIED (SERVICE_DISABLED)` because Google's internal `cloudcode-pa.googleapis.com` service cannot be enabled on user GCP projects.
+   - <b>Process-Level Credential Cache Lock</b>: `CLIAuthProvider` (`google/antigravity/TokenStorage`) loads system credentials only once at process startup; hot-swapping credentials and calling `ValidateProject` mid-session cannot switch the active authentication client without synchronizing all four state stores and restarting `language_server.exe`.
+   - <b>Tink `thoughtSignature` Key Domain Isolation & In-Memory Trajectory Lock</b>: All personal channels share the same CloudCode consumer Tink key domain (Base64 prefixes `AWkUfR` / `FpFH0T` / `AEFNM`), allowing cross-account personal routing to pass verification without stripping signatures; `GCP` channels use an isolated Vertex AI Tink key domain (prefixes `AY89a18` / `IDxACGAIqQ` / `CA8QAhgCKk`). Sending mismatched signatures across channel types triggers `HTTP 400 Invalid thought signature`, stripping signatures mid-turn during multi-step `functionCall` loops triggers `HTTP 400 Function call is missing a thought_signature`, and `LoadTrajectory` skips already-resident trajectories in memory (`trajectory already loaded, skipping duplicate load`) unless `language_server.exe` is restarted via Layer 1 primary channel switching.
 
 ### 3.3 Transparent Proxy Port Conflict Fallback (`8091..8095` + Ephemeral Port)
 To guarantee reload-free routing even if default port `8091` is occupied by third-party software, the proxy implements a four-step fallback mechanism:
