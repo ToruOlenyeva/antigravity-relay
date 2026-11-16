@@ -591,46 +591,47 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
       ? "https://cloudcode-pa.googleapis.com"
       : "https://daily-cloudcode-pa.googleapis.com";
     const targetUrl = desiredProxyMode === "local_proxy" ? localProxyUrl : directUpstreamUrl;
-    const lastProxySyncAgo = Date.now() - Number(instMeta.cloudCodeProxySyncedAt || 0);
+    const syncedAtMs = Math.max(
+      Number(instMeta.cloudCodeProxySyncedAt || 0),
+      (!ctx.isIsolatedInstance &&
+        cfg.__meta__.cloudCodeProxyPid === ls.pid &&
+        cfg.__meta__.cloudCodeProxyMode === desiredProxyMode &&
+        cfg.__meta__.cloudCodeProxyUrl === targetUrl)
+        ? Number(cfg.__meta__.cloudCodeProxySyncedAt || 0)
+        : 0
+    );
+    const lastProxySyncAgo = Date.now() - syncedAtMs;
+    const syncKey = `${ctx.instanceId}:${ls.pid}:${desiredProxyMode}:${targetUrl}`;
     const needsProxySync =
       instMeta.cloudCodeProxyPid !== ls.pid ||
       instMeta.cloudCodeProxyMode !== desiredProxyMode ||
       instMeta.cloudCodeProxyUrl !== targetUrl ||
       lastProxySyncAgo < 0 ||
-      lastProxySyncAgo > 20000;
-    if (desiredProxyMode === "local_proxy") {
-      if (needsProxySync) {
-        await callLsRpc(ls, "SetCloudCodeURL", { url: targetUrl })
-          .then(() => {
-            instMeta.cloudCodeProxyPid = ls.pid;
-            instMeta.cloudCodeProxyMode = "local_proxy";
-            instMeta.cloudCodeProxyUrl = targetUrl;
-            instMeta.cloudCodeProxySyncedAt = Date.now();
-            if (!ctx.isIsolatedInstance) {
-              cfg.__meta__.cloudCodeProxyPid = ls.pid;
-              cfg.__meta__.cloudCodeProxyMode = "local_proxy";
-              cfg.__meta__.cloudCodeProxyUrl = targetUrl;
-              cfg.__meta__.cloudCodeProxySyncedAt = instMeta.cloudCodeProxySyncedAt;
-            }
-          })
-          .catch(() => {});
+      lastProxySyncAgo > 300000;
+    if (needsProxySync) {
+      if (!globalThis.__agyInflightProxySyncMap) globalThis.__agyInflightProxySyncMap = new Map();
+      let syncPromise = globalThis.__agyInflightProxySyncMap.get(syncKey);
+      if (!syncPromise) {
+        const nowSyncAt = Date.now();
+        instMeta.cloudCodeProxyPid = ls.pid;
+        instMeta.cloudCodeProxyMode = desiredProxyMode;
+        instMeta.cloudCodeProxyUrl = targetUrl;
+        instMeta.cloudCodeProxySyncedAt = nowSyncAt;
+        if (!ctx.isIsolatedInstance) {
+          cfg.__meta__.cloudCodeProxyPid = ls.pid;
+          cfg.__meta__.cloudCodeProxyMode = desiredProxyMode;
+          cfg.__meta__.cloudCodeProxyUrl = targetUrl;
+          cfg.__meta__.cloudCodeProxySyncedAt = nowSyncAt;
+        }
+        syncPromise = callLsRpc(ls, "SetCloudCodeURL", { url: targetUrl })
+          .catch(() => {})
+          .finally(() => {
+            globalThis.__agyInflightProxySyncMap.delete(syncKey);
+          });
+        globalThis.__agyInflightProxySyncMap.set(syncKey, syncPromise);
       }
-    } else if (needsProxySync) {
-      await callLsRpc(ls, "SetCloudCodeURL", { url: targetUrl })
-        .then(() => {
-          instMeta.cloudCodeProxyPid = ls.pid;
-          instMeta.cloudCodeProxyMode = "direct";
-          instMeta.cloudCodeProxyUrl = targetUrl;
-          instMeta.cloudCodeProxySyncedAt = Date.now();
-          if (!ctx.isIsolatedInstance) {
-            cfg.__meta__.cloudCodeProxyPid = ls.pid;
-            cfg.__meta__.cloudCodeProxyMode = "direct";
-            cfg.__meta__.cloudCodeProxyUrl = targetUrl;
-            cfg.__meta__.cloudCodeProxySyncedAt = instMeta.cloudCodeProxySyncedAt;
-          }
-        })
-        .catch(() => {});
-    } else {
+      await syncPromise;
+    } else if (desiredProxyMode === "direct") {
       instMeta.cloudCodeProxyPid = ls.pid;
       instMeta.cloudCodeProxyMode = "direct";
       instMeta.cloudCodeProxyUrl = targetUrl;

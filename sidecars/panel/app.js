@@ -450,13 +450,23 @@ function extractModelDualQuotaUi(accOrQuota, matched, m) {
   };
 }
 
+function isChannelTemporarilyBlockedUi(acc) {
+  if (!acc || acc.authExpired) return true;
+  const nowMs = Date.now();
+  const blockedUntil = Number(acc.routeBlockedUntil || 0);
+  if (blockedUntil > nowMs) return true;
+  const errAt = Number(acc.lastProbeError?.at || 0);
+  const errMsg = String(acc.lastProbeError?.message || "");
+  return errAt > 0 && (nowMs - errAt) < 600000 && /#3501|valid license|\b401\b|\b403\b/i.test(errMsg);
+}
+
 function selectAutoPollChannel(accounts, m, activeChannelId, thresholdPct = 5) {
   const preferredPool = "daily";
   const poolOrder = ["daily"];
   const candidates = [];
   for (const acc of accounts) {
     const isGcp = acc.channelType === "gcp" || Boolean(acc.gcpProjectId);
-    if (isGcp) continue;
+    if (isGcp || isChannelTemporarilyBlockedUi(acc)) continue;
     for (const pool of poolOrder) {
       const poolSnap = acc.cachedQuotaByPool?.[pool] || (pool === preferredPool ? acc.cachedQuota : null);
       if (!poolSnap) continue;
@@ -537,6 +547,7 @@ function formatModelQuotaSubText(m, selectedRoute) {
         ? `${t.autoPollSubPrefix}${shortName} · ${t.remainingLabel} ${dual ? dual.weeklyPct : bestModel.remainingPct}% · ${t.resetsInPrefix}${wkCountdown}${t.resetsInSuffix}`
         : `${t.autoPollSubPrefix}${shortName} · ${t.remainingLabel} ${dual ? dual.weeklyPct : bestModel.remainingPct}%`;
     }
+    return `${t.autoPollSubPrefix}${currentLang === "zh" ? "当前无可用额度账号" : "No quota available"}`;
   }
 
   const formatPersonalAccountModelSub = (targetAcc, explicitPool = "") => {

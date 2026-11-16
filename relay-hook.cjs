@@ -201,6 +201,15 @@ async function callValidateProjectRpc(lsTarget, projectId) {
   }, payload);
 }
 
+function isTemporarilyBlockedForHook(acc, nowMs = Date.now()) {
+  if (!acc || acc.authExpired) return true;
+  const blockedUntil = Number(acc.routeBlockedUntil || 0);
+  if (blockedUntil > nowMs) return true;
+  const errAt = Number(acc.lastProbeError?.at || 0);
+  const errMsg = String(acc.lastProbeError?.message || "");
+  return errAt > 0 && (nowMs - errAt) < 600000 && /#3501|valid license|\b401\b|\b403\b/i.test(errMsg);
+}
+
 function resolveBestAvailableChannelSpec(baseModelName, relayCfg) {
   const accounts = Object.values(relayCfg?.accounts || {});
   if (accounts.length === 0) return null;
@@ -210,12 +219,13 @@ function resolveBestAvailableChannelSpec(baseModelName, relayCfg) {
   const poolOrder = ["daily"];
   const thresholdPct = Number(relayCfg?.routing?.lowQuotaThresholdPct ?? 5);
   const targetLower = (baseModelName || "").toLowerCase();
+  const nowMs = Date.now();
 
   const candidates = [];
 
   for (const acc of accounts) {
     const isGcp = acc.channelType === "gcp" || Boolean(acc.gcpProjectId);
-    if (isGcp || acc.authExpired) continue;
+    if (isGcp || isTemporarilyBlockedForHook(acc, nowMs)) continue;
     for (const pool of poolOrder) {
       const poolQuota = acc?.cachedQuotaByPool?.[pool] || (pool === preferredPool ? acc?.cachedQuota : null);
       if (!poolQuota || typeof poolQuota !== "object") continue;
@@ -296,7 +306,17 @@ async function ensureLocalCloudCodeProxyMounted(lsTarget, relayCfg, instMeta = n
   if (!lsTarget || !lsTarget.port || !lsTarget.csrf) return false;
   const savedProxyUrl = String(instMeta?.cloudCodeProxyUrl || relayCfg?.__meta__?.cloudCodeProxyUrl || "").trim();
   const proxyUrl = /^http:\/\/127\.0\.0\.1:809\d$/i.test(savedProxyUrl) ? savedProxyUrl : "http://127.0.0.1:8091";
-  const syncedAgoMs = Date.now() - Number(instMeta?.cloudCodeProxySyncedAt || 0);
+  const isIsoInst = Boolean(process.env.AGY_RELAY_INSTANCE_ID);
+  const syncedAtMs = Math.max(
+    Number(instMeta?.cloudCodeProxySyncedAt || 0),
+    (!isIsoInst &&
+      relayCfg?.__meta__?.cloudCodeProxyMode === "local_proxy" &&
+      Number(relayCfg?.__meta__?.cloudCodeProxyPid || 0) === Number(lsTarget.pid || 0) &&
+      relayCfg?.__meta__?.cloudCodeProxyUrl === proxyUrl)
+      ? Number(relayCfg?.__meta__?.cloudCodeProxySyncedAt || 0)
+      : 0
+  );
+  const syncedAgoMs = Date.now() - syncedAtMs;
   if (
     instMeta &&
     instMeta.cloudCodeProxyMode === "local_proxy" &&
@@ -304,7 +324,7 @@ async function ensureLocalCloudCodeProxyMounted(lsTarget, relayCfg, instMeta = n
     Number(instMeta.cloudCodeProxyPid) === Number(lsTarget.pid || 0) &&
     instMeta.cloudCodeProxyUrl === proxyUrl &&
     syncedAgoMs >= 0 &&
-    syncedAgoMs < 15000
+    syncedAgoMs < 300000
   ) {
     return true;
   }
@@ -327,10 +347,17 @@ async function ensureLocalCloudCodeProxyMounted(lsTarget, relayCfg, instMeta = n
     );
   }
   if (ok && instMeta) {
+    const nowSyncAt = Date.now();
     instMeta.cloudCodeProxyMode = "local_proxy";
     instMeta.cloudCodeProxyUrl = proxyUrl;
-    instMeta.cloudCodeProxySyncedAt = Date.now();
+    instMeta.cloudCodeProxySyncedAt = nowSyncAt;
     if (lsTarget.pid) instMeta.cloudCodeProxyPid = lsTarget.pid;
+    if (!isIsoInst && relayCfg?.__meta__) {
+      relayCfg.__meta__.cloudCodeProxyMode = "local_proxy";
+      relayCfg.__meta__.cloudCodeProxyUrl = proxyUrl;
+      relayCfg.__meta__.cloudCodeProxySyncedAt = nowSyncAt;
+      if (lsTarget.pid) relayCfg.__meta__.cloudCodeProxyPid = lsTarget.pid;
+    }
   }
   return ok;
 }

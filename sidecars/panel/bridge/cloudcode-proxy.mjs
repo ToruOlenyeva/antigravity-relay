@@ -702,8 +702,10 @@ function persistAndSyncProxyUrl(proxyUrl) {
     const desiredUrl = isLocalProxy ? effectiveUrl : directUpstreamUrl;
     const desiredMode = isLocalProxy ? "local_proxy" : "direct";
     const prevMode = instMeta.cloudCodeProxyMode;
+    const prevPid = Number(instMeta.cloudCodeProxyPid || 0);
+    const prevUrl = instMeta.cloudCodeProxyUrl || "";
     let changed = false;
-    if (instMeta.cloudCodeProxyUrl !== desiredUrl || instMeta.cloudCodeProxyMode !== desiredMode) {
+    if (prevUrl !== desiredUrl || prevMode !== desiredMode) {
       instMeta.cloudCodeProxyUrl = desiredUrl;
       instMeta.cloudCodeProxyMode = desiredMode;
       changed = true;
@@ -713,12 +715,26 @@ function persistAndSyncProxyUrl(proxyUrl) {
       cfg.__meta__.cloudCodeProxyMode = desiredMode;
       changed = true;
     }
+    const ls = discoverLanguageServer(false);
+    const syncedAgo = Date.now() - Number(instMeta.cloudCodeProxySyncedAt || 0);
+    const shouldCallRpc = Boolean(
+      ls &&
+      (isLocalProxy || (prevMode === "local_proxy" && prevPid === ls.pid)) &&
+      (changed || prevPid !== ls.pid || prevUrl !== desiredUrl || syncedAgo < 0 || syncedAgo > 300000)
+    );
+    if (shouldCallRpc) {
+      const nowSyncAt = Date.now();
+      instMeta.cloudCodeProxyPid = ls.pid;
+      instMeta.cloudCodeProxySyncedAt = nowSyncAt;
+      if (!ctx.isIsolatedInstance) {
+        cfg.__meta__.cloudCodeProxyPid = ls.pid;
+        cfg.__meta__.cloudCodeProxySyncedAt = nowSyncAt;
+      }
+      changed = true;
+      callLsRpc(ls, "SetCloudCodeURL", { url: desiredUrl }).catch(() => {});
+    }
     if (changed) {
       writeRelayConfig(cfg);
-    }
-    const ls = discoverLanguageServer(false);
-    if (ls && (isLocalProxy || (prevMode === "local_proxy" && instMeta.cloudCodeProxyPid === ls.pid))) {
-      callLsRpc(ls, "SetCloudCodeURL", { url: desiredUrl }).catch(() => {});
     }
   } catch {}
 }

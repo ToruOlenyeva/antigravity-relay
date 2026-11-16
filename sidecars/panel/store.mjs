@@ -603,6 +603,20 @@ export function writeRelayConfig(cfg) {
                   ...(memInst || {}),
                   ...diskInst
                 };
+              } else if (memInst && instKey === curInstId) {
+                const diskSyncAt = Number(diskInst.cloudCodeProxySyncedAt || 0);
+                const memSyncAt = Number(memInst.cloudCodeProxySyncedAt || 0);
+                if (
+                  diskSyncAt > memSyncAt &&
+                  diskInst.cloudCodeProxyPid === memInst.cloudCodeProxyPid &&
+                  diskInst.cloudCodeProxyUrl === memInst.cloudCodeProxyUrl &&
+                  diskInst.cloudCodeProxyMode === memInst.cloudCodeProxyMode
+                ) {
+                  memInst.cloudCodeProxySyncedAt = diskSyncAt;
+                }
+                if (Number(diskInst.lsRpcTarget?.updatedAt || 0) > Number(memInst.lsRpcTarget?.updatedAt || 0)) {
+                  memInst.lsRpcTarget = diskInst.lsRpcTarget;
+                }
               }
             }
 
