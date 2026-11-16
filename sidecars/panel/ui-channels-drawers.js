@@ -594,6 +594,37 @@ function renderAddGcpDrawer() {
   drawer.appendChild(pidRow);
 }
 
+function getCompactProbeErrorBadgeText(acc, t) {
+  if (acc.authExpired || acc.lastProbeError?.category === "auth_expired") {
+    return t.authExpiredBadge || "凭据过期";
+  }
+  const err = acc.lastProbeError || {};
+  const msg = String(err.message || "");
+  const cat = String(err.category || "");
+  if (cat === "license_3501" || /#3501|valid license/i.test(msg)) {
+    return t.licenseErrorBadge || "403 授权受限 (#3501)";
+  }
+  if (cat === "validation_required" || /verify your account|VALIDATION_REQUIRED/i.test(`${err.reason || ""} ${msg}`)) {
+    return t.badgeVerifyRequired || "403 需验证";
+  }
+  if (cat === "api_disabled" || /SERVICE_DISABLED/i.test(`${err.reason || ""} ${msg}`)) {
+    return t.badgeApiDisabled || "API 未启用";
+  }
+  if (cat === "quota_exhausted" || err.status === 429) {
+    return t.badgeQuotaExhausted || "429 限流";
+  }
+  if (cat === "region_or_eligibility" || err.status === 403) {
+    return t.badgeRegionRestricted || "403 权限/地区受限";
+  }
+  if (cat === "network_error" || Number(err.status || 0) < 0) {
+    return t.badgeNetworkError || "网络超时";
+  }
+  if (Number(err.status || 0) > 0) {
+    return `${t.badgeHttpErrorPrefix || "HTTP "}${err.status}`;
+  }
+  return t.probeErrorBadge || "探测异常";
+}
+
 function buildAccountCardElement(acc, activeEmail, activeGcp) {
   const t = I18N[currentLang];
   const isGcpChannel = acc.channelType === "gcp" || Boolean(acc.gcpProjectId);
@@ -639,44 +670,39 @@ function buildAccountCardElement(acc, activeEmail, activeGcp) {
   emailEl.textContent = acc.email || acc.id;
   titleWrap.appendChild(emailEl);
 
-  if (acc.authExpired) {
-    const expBadge = document.createElement("span");
-    expBadge.className = "sig-status-badge mismatch";
-    expBadge.style.marginLeft = "4px";
-    expBadge.textContent = t.authExpiredBadge || "凭据已过期";
-    titleWrap.appendChild(expBadge);
-  } else if (acc.lastProbeError?.message) {
-    const errBadge = document.createElement("span");
-    errBadge.className = "sig-status-badge mismatch";
-    errBadge.style.marginLeft = "4px";
-    errBadge.title = acc.lastProbeError.message;
-    const isLicense3501 = /#3501|valid license/i.test(acc.lastProbeError.message);
-    errBadge.textContent = isLicense3501
-      ? (t.licenseErrorBadge || "403 授权受限 (#3501)")
-      : (t.probeErrorBadge || "探测异常");
-    titleWrap.appendChild(errBadge);
+  const hasAccountError = Boolean(acc.authExpired || acc.lastProbeError?.message);
+  const isErrorExpanded = Boolean(hasAccountError && expandedAccountErrorIds.has(acc.id));
+
+  if (hasAccountError) {
+    const errBtn = document.createElement("button");
+    errBtn.type = "button";
+    errBtn.className = "probe-error-badge-btn" + (isErrorExpanded ? " expanded" : "");
+    errBtn.title = acc.lastProbeError?.message || t.authExpiredBadge;
+
+    const errText = document.createElement("span");
+    errText.textContent = getCompactProbeErrorBadgeText(acc, t);
+    const caret = document.createElement("span");
+    caret.className = "badge-caret";
+    caret.textContent = isErrorExpanded ? "▴" : "▾";
+
+    errBtn.appendChild(errText);
+    errBtn.appendChild(caret);
+    errBtn.onclick = (ev) => {
+      ev.stopPropagation();
+      if (expandedAccountErrorIds.has(acc.id)) {
+        expandedAccountErrorIds.delete(acc.id);
+      } else {
+        expandedAccountErrorIds.add(acc.id);
+      }
+      renderAccountList();
+    };
+    titleWrap.appendChild(errBtn);
   }
 
   top.appendChild(titleWrap);
 
   const rightBadges = document.createElement("div");
   rightBadges.className = "btn-group";
-
-  if (acc.authExpired) {
-    const reloginBtn = document.createElement("button");
-    reloginBtn.className = "small";
-    reloginBtn.textContent = t.btnReloginAccount || "重新登录";
-    reloginBtn.onclick = () => {
-      startIsolatedBrowserLogin({
-        channelType: isGcpChannel ? "gcp" : "personal",
-        gcpProjectId: accPid,
-        gcpBillingMode: acc.gcpBillingMode || "agent_platform",
-        gcpLocation: acc.gcpLocation || "global",
-        loginHint: acc.email
-      });
-    };
-    rightBadges.appendChild(reloginBtn);
-  }
 
   if (isGcpChannel) {
     const editBtn = document.createElement("button");
@@ -763,6 +789,118 @@ function buildAccountCardElement(acc, activeEmail, activeGcp) {
 
   top.appendChild(rightBadges);
   card.appendChild(top);
+
+  if (isErrorExpanded) {
+    const err = acc.lastProbeError || {};
+    const drawer = document.createElement("div");
+    drawer.className = "channel-error-drawer";
+
+    const errHeader = document.createElement("div");
+    errHeader.className = "channel-error-header";
+
+    const metaParts = [];
+    if (Number(err.status || 0) > 0) metaParts.push(`HTTP ${err.status}`);
+    else if (acc.authExpired) metaParts.push("OAuth 401");
+    if (err.reason) metaParts.push(err.reason);
+    else if (err.apiStatus) metaParts.push(err.apiStatus);
+    if (err.endpoint) metaParts.push(err.endpoint);
+
+    const metaEl = document.createElement("span");
+    metaEl.className = "channel-error-meta";
+    metaEl.textContent = metaParts.join(" · ") || getCompactProbeErrorBadgeText(acc, t);
+
+    const closeErrBtn = document.createElement("button");
+    closeErrBtn.type = "button";
+    closeErrBtn.className = "secondary small";
+    closeErrBtn.textContent = t.probeErrorDetailClose || "收起";
+    closeErrBtn.onclick = (ev) => {
+      ev.stopPropagation();
+      expandedAccountErrorIds.delete(acc.id);
+      renderAccountList();
+    };
+
+    errHeader.appendChild(metaEl);
+    errHeader.appendChild(closeErrBtn);
+    drawer.appendChild(errHeader);
+
+    const msgText = err.message || (acc.authExpired ? (t.probeAuthExpiredHint || "") : "");
+    if (msgText) {
+      const msgEl = document.createElement("div");
+      msgEl.className = "channel-error-msg";
+      msgEl.textContent = msgText;
+      drawer.appendChild(msgEl);
+    }
+
+    let subText = err.detailMessage || "";
+    if (!subText && (err.category === "validation_required" || /verify your account|VALIDATION_REQUIRED/i.test(msgText)) && !err.validationUrl) {
+      subText = t.probeValidationNoUrlHint || "";
+    } else if (!subText && acc.authExpired && err.message) {
+      subText = t.probeAuthExpiredHint || "";
+    }
+    if (subText) {
+      const subEl = document.createElement("div");
+      subEl.className = "channel-error-sub";
+      subEl.textContent = subText;
+      drawer.appendChild(subEl);
+    }
+
+    const actionsRow = document.createElement("div");
+    actionsRow.className = "channel-error-actions";
+
+    const isValidationNeed = err.category === "validation_required" || /verify your account|VALIDATION_REQUIRED/i.test(`${err.reason || ""} ${msgText}`);
+    if (err.validationUrl) {
+      const verifyBtn = document.createElement("button");
+      verifyBtn.type = "button";
+      verifyBtn.className = "small";
+      verifyBtn.textContent = t.btnOpenValidationUrl || "前往验证";
+      verifyBtn.onclick = () => openExternalVerificationUrl(err.validationUrl);
+      actionsRow.appendChild(verifyBtn);
+    } else if (isValidationNeed) {
+      const secBtn = document.createElement("button");
+      secBtn.type = "button";
+      secBtn.className = "secondary small";
+      secBtn.textContent = t.btnOpenAccountSecurity || "账号安全页";
+      secBtn.onclick = () => openExternalVerificationUrl("https://myaccount.google.com/security");
+      actionsRow.appendChild(secBtn);
+    }
+
+    const needsRelogin = Boolean(
+      acc.authExpired ||
+      err.category === "auth_expired" ||
+      isValidationNeed ||
+      err.category === "license_3501" ||
+      Number(err.status) === 401 ||
+      Number(err.status) === 403
+    );
+    if (needsRelogin) {
+      const reloginBtn = document.createElement("button");
+      reloginBtn.type = "button";
+      reloginBtn.className = "secondary small";
+      reloginBtn.textContent = t.btnReloginAccount || "重新登录";
+      reloginBtn.onclick = () => {
+        startIsolatedBrowserLogin({
+          channelType: isGcpChannel ? "gcp" : "personal",
+          gcpProjectId: accPid,
+          gcpBillingMode: acc.gcpBillingMode || "agent_platform",
+          gcpLocation: acc.gcpLocation || "global",
+          loginHint: acc.email
+        });
+      };
+      actionsRow.appendChild(reloginBtn);
+    }
+
+    const isProbingThis = probingChannelIds.has(acc.id);
+    const retryBtn = document.createElement("button");
+    retryBtn.type = "button";
+    retryBtn.className = "secondary small";
+    retryBtn.disabled = isProbingThis;
+    retryBtn.textContent = isProbingThis ? (t.btnRetryProbing || "探测中...") : (t.btnRetryProbe || "重新探测");
+    retryBtn.onclick = () => retryProbeSingleChannel(acc.id);
+    actionsRow.appendChild(retryBtn);
+
+    drawer.appendChild(actionsRow);
+    card.appendChild(drawer);
+  }
 
   if (isGcpChannel) {
     const bottom = document.createElement("div");

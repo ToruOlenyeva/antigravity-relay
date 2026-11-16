@@ -1,6 +1,3 @@
-import https from "node:https";
-import fs from "node:fs";
-import path from "node:path";
 import {
   readRelayConfig,
   writeRelayConfig,
@@ -38,8 +35,16 @@ import {
   isInternalConsumerPoolProject,
   isDowngradedConsumerPoolProject,
   resolvePersonalCompanionProjectId,
-  normalizePersonalQuotaPool
+  normalizePersonalQuotaPool,
+  parseCloudCodeApiError
 } from "./channel-catalog.mjs";
+import {
+  getActivePersonalQuotaPool,
+  getCloudCodeHostnameForPool,
+  callCloudCodeApi,
+  discoverGcpProjectsForAccount,
+  parseCloudCodeModelsAndQuota
+} from "./cloudcode-discovery.mjs";
 
 export {
   AGENT_PLATFORM_DEFAULT_MODELS,
@@ -62,468 +67,21 @@ export {
   isDowngradedConsumerPoolProject,
   resolvePersonalCompanionProjectId,
   normalizePersonalQuotaPool,
+  parseCloudCodeApiError,
   getDetectedClientVersion,
   getCloudCodeUserAgent,
-  buildLoadCodeAssistMetadata
+  buildLoadCodeAssistMetadata,
+  getActivePersonalQuotaPool,
+  getCloudCodeHostnameForPool,
+  callCloudCodeApi,
+  discoverGcpProjectsForAccount,
+  parseCloudCodeModelsAndQuota
 };
-
-export function getActivePersonalQuotaPool(cfg = null) {
-  const c = cfg || readRelayConfig();
-  if (c?.routing && c.routing.personalQuotaPool !== "daily") {
-    c.routing.personalQuotaPool = "daily";
-  }
-  return "daily";
-}
-
-export function getCloudCodeHostnameForPool(_pool = "daily", isGcp = false) {
-  if (isGcp) return "cloudcode-pa.googleapis.com";
-  return "daily-cloudcode-pa.googleapis.com";
-}
-
-function fetchCloudResourceProjects(accessToken, quotaProjectId = "") {
-  return new Promise((resolve) => {
-    if (!accessToken) return resolve({ projects: [], status: 0, reason: "" });
-    const headers = {
-      Authorization: `Bearer ${accessToken}`,
-      Accept: "application/json"
-    };
-    if (quotaProjectId) {
-      headers["X-Goog-User-Project"] = quotaProjectId;
-    }
-    const req = https.request(
-      {
-        hostname: "cloudresourcemanager.googleapis.com",
-        port: 443,
-        path: "/v1/projects?pageSize=100",
-        method: "GET",
-        headers,
-        timeout: 4500
-      },
-      (res) => {
-        const chunks = [];
-        res.on("data", (c) => chunks.push(c));
-        res.on("end", () => {
-          const rawText = Buffer.concat(chunks).toString("utf8");
-          if (res.statusCode !== 200) {
-            let reason = "";
-            if (res.statusCode === 403) {
-              reason = /ACCESS_TOKEN_SCOPE_INSUFFICIENT/i.test(rawText) ? "scope_insufficient" : "api_disabled";
-            }
-            return resolve({ projects: [], status: res.statusCode || 0, reason });
-          }
-          try {
-            const parsed = JSON.parse(rawText);
-            const list = (parsed.projects || [])
-              .filter((p) => p && p.projectId && (!p.lifecycleState || p.lifecycleState === "ACTIVE") && !isInternalConsumerPoolProject(p.projectId))
-              .map((p) => ({
-                projectId: String(p.projectId).trim(),
-                name: String(p.name || p.projectId).trim()
-              }));
-            resolve({ projects: list, status: 200, reason: "" });
-          } catch {
-            resolve({ projects: [], status: 200, reason: "" });
-          }
-        });
-      }
-    );
-    req.on("error", () => resolve({ projects: [], status: -1, reason: "" }));
-    req.on("timeout", () => {
-      req.destroy();
-      resolve({ projects: [], status: -2, reason: "" });
-    });
-    req.end();
-  });
-}
-
-function fetchCloudResourceV3Projects(accessToken) {
-  return new Promise((resolve) => {
-    if (!accessToken) return resolve([]);
-    const req = https.request(
-      {
-        hostname: "cloudresourcemanager.googleapis.com",
-        port: 443,
-        path: "/v3/projects:search?pageSize=100",
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          Accept: "application/json"
-        },
-        timeout: 4500
-      },
-      (res) => {
-        const chunks = [];
-        res.on("data", (c) => chunks.push(c));
-        res.on("end", () => {
-          if (res.statusCode !== 200) return resolve([]);
-          try {
-            const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-            const list = (parsed.projects || [])
-              .filter((p) => p && p.projectId && (!p.state || p.state === "ACTIVE") && !isInternalConsumerPoolProject(p.projectId))
-              .map((p) => ({
-                projectId: String(p.projectId).trim(),
-                name: String(p.displayName || p.projectId).trim()
-              }));
-            resolve(list);
-          } catch {
-            resolve([]);
-          }
-        });
-      }
-    );
-    req.on("error", () => resolve([]));
-    req.on("timeout", () => {
-      req.destroy();
-      resolve([]);
-    });
-    req.end();
-  });
-}
-
-function readLocalGcloudProjectsForEmail(email) {
-  const found = [];
-  if (!email) return found;
-  const candidates = [
-    path.join(process.env.APPDATA || "", "gcloud", "configurations"),
-    path.join(process.env.USERPROFILE || "", ".config", "gcloud", "configurations")
-  ];
-  for (const dir of candidates) {
-    try {
-      if (!dir || !fs.existsSync(dir)) continue;
-      for (const f of fs.readdirSync(dir)) {
-        const fp = path.join(dir, f);
-        if (!fs.statSync(fp).isFile()) continue;
-        const txt = fs.readFileSync(fp, "utf8");
-        const accMatch = /^\s*account\s*=\s*([^\r\n]+)/im.exec(txt);
-        const projMatch = /^\s*project\s*=\s*([^\r\n]+)/im.exec(txt);
-        const cfgEmail = (accMatch?.[1] || "").trim().toLowerCase();
-        const cfgProj = (projMatch?.[1] || "").trim();
-        if (cfgEmail === email.toLowerCase() && cfgProj && !isInternalConsumerPoolProject(cfgProj)) {
-          found.push({ projectId: cfgProj, name: cfgProj });
-        }
-      }
-    } catch {}
-  }
-  return found;
-}
-
-export function callCloudCodeApi(endpointPath, accessToken, payloadObj = {}, extraHeaders = {}, targetHostname = "") {
-  return new Promise((resolve) => {
-    if (!accessToken) return resolve({ status: 0, data: null });
-    const hostname = String(targetHostname || "").trim() || "cloudcode-pa.googleapis.com";
-    const body = Buffer.from(JSON.stringify(payloadObj || {}), "utf8");
-    let settled = false;
-    const finish = (val) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(hardTimer);
-      resolve(val);
-    };
-    const req = https.request(
-      {
-        hostname,
-        port: 443,
-        path: endpointPath,
-        method: "POST",
-        family: 4,
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          "Content-Type": "application/json",
-          "User-Agent": getCloudCodeUserAgent(),
-          "Content-Length": body.length,
-          ...extraHeaders
-        },
-        timeout: 6000
-      },
-      (res) => {
-        const chunks = [];
-        res.on("data", (c) => chunks.push(c));
-        res.on("end", () => {
-          const raw = Buffer.concat(chunks).toString("utf8");
-          try {
-            finish({ status: res.statusCode || 0, data: JSON.parse(raw) });
-          } catch {
-            finish({ status: res.statusCode || 0, data: null, raw: raw.slice(0, 300) });
-          }
-        });
-      }
-    );
-    const hardTimer = setTimeout(() => {
-      req.destroy();
-      finish({ status: -2, data: null, error: "timeout" });
-    }, 6000);
-    req.on("error", (err) => finish({ status: -1, data: null, error: err.message }));
-    req.on("timeout", () => {
-      req.destroy();
-      finish({ status: -2, data: null, error: "timeout" });
-    });
-    req.write(body);
-    req.end();
-  });
-}
-
-function fetchCloudCodeCompanionProject(accessToken) {
-  return callCloudCodeApi("/v1internal:loadCodeAssist", accessToken, {
-    metadata: buildLoadCodeAssistMetadata()
-  }).then((res) => {
-    if (res.status !== 200 || !res.data) return [];
-    const pid = String(
-      res.data.cloudaicompanionProject?.id ||
-      res.data.cloudaicompanionProject ||
-      ""
-    ).trim();
-    if (!pid || isInternalConsumerPoolProject(pid)) return [];
-    return [{ projectId: pid, name: pid }];
-  });
-}
-
-export async function discoverGcpProjectsForAccount(targetEmail = "") {
-  const cfg = readRelayConfig();
-  normalizeAccountChannels(cfg);
-  const cred = readWinCredToken(false);
-  const email = (targetEmail || cred?.id_token_email || cfg.__meta__?.activeEmail || "").trim();
-  if (!email) return { email: "", discovered: [], reason: "" };
-
-  const storedToken = findStoredTokenForEmail(cfg, email, true) || findStoredTokenForEmail(cfg, email) || cred;
-  if (!storedToken || !storedToken.token) return { email, discovered: [], reason: "" };
-
-  let accessToken = storedToken.token.access_token || "";
-  const refreshToken = storedToken.token.refresh_token || "";
-
-  if (refreshToken) {
-    try {
-      const refreshed = await refreshOAuthAccessToken(refreshToken);
-      if (refreshed && refreshed.access_token) {
-        accessToken = refreshed.access_token;
-        storedToken.token.access_token = accessToken;
-        writeRelayConfig(cfg);
-      }
-    } catch {}
-  }
-
-  const mergeDiscovered = (...lists) => {
-    const map = new Map();
-    for (const list of lists) {
-      for (const item of (list || [])) {
-        if (item && item.projectId && !isInternalConsumerPoolProject(item.projectId) && !map.has(item.projectId)) {
-          map.set(item.projectId, item);
-        }
-      }
-    }
-    return Array.from(map.values());
-  };
-
-  let [crmV1Res, crmV3List, ccProjects] = await Promise.all([
-    fetchCloudResourceProjects(accessToken),
-    fetchCloudResourceV3Projects(accessToken),
-    fetchCloudCodeCompanionProject(accessToken)
-  ]);
-
-  if (crmV1Res.projects.length === 0 && crmV1Res.reason === "api_disabled") {
-    const quotaProjCandidates = [
-      findFirstGcpProjectForEmail(cfg, email),
-      ...(Array.isArray(cfg.gcpProjects) ? cfg.gcpProjects : [])
-    ].filter((pid) => pid && !isInternalConsumerPoolProject(pid));
-    if (quotaProjCandidates.length > 0) {
-      const retryRes = await fetchCloudResourceProjects(accessToken, quotaProjCandidates[0]);
-      if (retryRes.projects.length > 0) {
-        crmV1Res = retryRes;
-      }
-    }
-  }
-  const gcloudProjects = readLocalGcloudProjectsForEmail(email);
-  const projects = mergeDiscovered(crmV1Res.projects, crmV3List, ccProjects, gcloudProjects);
-
-  for (const existingAcc of Object.values(cfg.accounts || {})) {
-    if (existingAcc.email === email && existingAcc.gcpProjectId && !isInternalConsumerPoolProject(existingAcc.gcpProjectId)) {
-      if (!projects.some((p) => p.projectId === existingAcc.gcpProjectId)) {
-        projects.push({
-          projectId: existingAcc.gcpProjectId,
-          name: existingAcc.projectName || existingAcc.gcpProjectId
-        });
-      }
-    }
-  }
-
-  return {
-    email,
-    discovered: projects,
-    reason: projects.length === 0 ? (crmV1Res.reason || "") : ""
-  };
-}
-
-export function parseCloudCodeModelsAndQuota(
-  rawModelsResp,
-  rawQuotaSummaryResp = null,
-  isGcpChannel = false,
-  userTier = "",
-  prevCachedQuota = null,
-  liveTierTemplate = []
-) {
-  const modelsObj = rawModelsResp?.models;
-  if (!modelsObj || typeof modelsObj !== "object") {
-    return null;
-  }
-
-  const allowedModelIds = new Set();
-  const sorts = Array.isArray(rawModelsResp?.agentModelSorts) ? rawModelsResp.agentModelSorts : [];
-  for (const s of sorts) {
-    for (const grp of (s?.groups || [])) {
-      for (const mid of (grp?.modelIds || [])) {
-        if (mid) allowedModelIds.add(String(mid));
-      }
-    }
-  }
-
-  const orderedEntries = [];
-  if (allowedModelIds.size > 0) {
-    for (const mid of allowedModelIds) {
-      if (modelsObj[mid]) {
-        orderedEntries.push([mid, modelsObj[mid]]);
-      }
-    }
-  } else {
-    for (const [mid, m] of Object.entries(modelsObj)) {
-      orderedEntries.push([mid, m]);
-    }
-  }
-
-  const tierInfo = isGcpChannel
-    ? { tierCode: "GCP", tierName: "Agent Platform", hasArgonAccess: true, isPaidProOrUltra: false }
-    : detectPersonalAccountTier(
-        modelsObj,
-        userTier,
-        userTier,
-        prevCachedQuota?.hasArgonAccess,
-        prevCachedQuota?.tierCode || ""
-      );
-  const hasArgonAccess = tierInfo.hasArgonAccess;
-  const isPaidProOrUltra = tierInfo.isPaidProOrUltra;
-  const groupedModelMap = new Map();
-
-  for (const [modelId, m] of orderedEntries) {
-    if (!m || typeof m !== "object") continue;
-    if (/disabled$/i.test(modelId)) continue;
-    if (isModelEntryRestrictedOrSunset(m)) continue;
-    if (!isGcpChannel && !m.quotaInfo && !allowedModelIds.has(modelId)) continue;
-    const rawLabel = String(m.displayName || m.label || "").trim();
-    if (!rawLabel) continue;
-    const baseLabel = stripModelVariantSuffix(rawLabel);
-    if (isLegacyDeprecatedModel(baseLabel) || isLegacyDeprecatedModel(rawLabel) || isLegacyDeprecatedModel(modelId)) {
-      continue;
-    }
-    if (!isGcpChannel) {
-      if (!hasArgonAccess && /argon/i.test(baseLabel)) {
-        continue;
-      }
-    }
-    const remainingPct = isGcpChannel
-      ? 100
-      : (m.quotaInfo?.remainingFraction !== undefined
-          ? Math.round(Number(m.quotaInfo.remainingFraction) * 100)
-          : (m.quotaInfo?.resetTime ? 0 : 100));
-    const resetTime = isGcpChannel ? "" : (m.quotaInfo?.resetTime || "");
-
-    if (!groupedModelMap.has(baseLabel)) {
-      groupedModelMap.set(baseLabel, {
-        label: baseLabel,
-        modelId: baseLabel,
-        variantIds: [baseLabel, rawLabel, modelId],
-        remainingPct,
-        resetTime,
-        unlimited: isGcpChannel
-      });
-    } else {
-      const entry = groupedModelMap.get(baseLabel);
-      if (!entry.variantIds.includes(rawLabel)) entry.variantIds.push(rawLabel);
-      if (!entry.variantIds.includes(modelId)) entry.variantIds.push(modelId);
-    }
-  }
-
-  const quotaGroups = [];
-  if (!isGcpChannel) {
-    const rawGroups = rawQuotaSummaryResp?.groups || rawQuotaSummaryResp?.response?.groups || [];
-    if (Array.isArray(rawGroups) && rawGroups.length > 0) {
-      for (const g of rawGroups) {
-        const gId = g.groupId || g.displayName || "";
-        if (!hasArgonAccess && /argon/i.test(gId)) continue;
-        const candidateGroup = {
-          id: gId,
-          displayName: g.displayName || "",
-          description: g.description || "",
-          buckets: (g.buckets || []).map((b) => ({
-            bucketId: b.bucketId || "",
-            window: b.window || "",
-            remainingPct: b.remainingFraction !== undefined
-              ? Math.round(Number(b.remainingFraction) * 100)
-              : (b.resetTime ? 0 : 100),
-            resetTime: b.resetTime || ""
-          }))
-        };
-        if (isValidOfficialQuotaGroup(candidateGroup)) {
-          quotaGroups.push(candidateGroup);
-        }
-      }
-    }
-  }
-
-  if (!isGcpChannel && quotaGroups.length > 0 && tierInfo.tierCode !== "Free") {
-    const dynamicApiModels = Array.from(groupedModelMap.values()).filter(
-      (m) => !isLegacyDeprecatedModel(m.label) && !isLegacyDeprecatedModel(m.modelId)
-    );
-    const proModels = buildProModelsFromQuotaGroups(
-      quotaGroups,
-      prevCachedQuota?.availableModels || [],
-      dynamicApiModels,
-      liveTierTemplate,
-      hasArgonAccess
-    );
-    return {
-      tierCode: tierInfo.tierCode,
-      tierName: tierInfo.tierName,
-      hasArgonAccess,
-      isPaidProOrUltra,
-      isGcpUnlimited: false,
-      quotaGroups,
-      availableModels: proModels,
-      probedVia: "cloudcode_http",
-      updatedAt: Date.now()
-    };
-  }
-
-  const availableModels = Array.from(groupedModelMap.values()).filter(
-    (m) => !isLegacyDeprecatedModel(m.label) && !isLegacyDeprecatedModel(m.modelId)
-  );
-
-  return {
-    tierCode: tierInfo.tierCode,
-    tierName: tierInfo.tierName,
-    hasArgonAccess,
-    isPaidProOrUltra,
-    isGcpUnlimited: isGcpChannel,
-    quotaGroups,
-    availableModels,
-    probedVia: "cloudcode_http",
-    updatedAt: Date.now()
-  };
-}
 
 const probeDiagnosticByChannel = new Map();
 
 export function getLastProbeDiagnostic(channelId) {
   return probeDiagnosticByChannel.get(String(channelId || "").trim()) || null;
-}
-
-function extractApiErrorSummary(resp) {
-  if (!resp) return "";
-  const errObj = resp.data?.error;
-  if (errObj && typeof errObj === "object") {
-    const code = errObj.code ? `HTTP ${errObj.code}` : (resp.status ? `HTTP ${resp.status}` : "");
-    const msg = String(errObj.message || errObj.status || "").trim();
-    return [code, msg].filter(Boolean).join(": ").slice(0, 320);
-  }
-  if (resp.error) return String(resp.error).slice(0, 320);
-  if (resp.raw) return `HTTP ${resp.status}: ${String(resp.raw).slice(0, 260)}`;
-  return resp.status ? `HTTP ${resp.status}` : "";
 }
 
 function persistRefreshedPersonalTokens(cfg, acc, baseToken, isGcp) {
@@ -732,9 +290,17 @@ export async function probeChannelQuotaSnapshot(channelId) {
     if (isGcp && gcpPid) {
       loadPayload.cloudaicompanionProject = gcpPid;
     }
-    const targetHost = PROD_HOSTNAME;
-    const loadResp = await callCloudCodeApi("/v1internal:loadCodeAssist", tok, loadPayload, {}, targetHost);
+    let loadResp = await callCloudCodeApi("/v1internal:loadCodeAssist", tok, loadPayload, {}, PROD_HOSTNAME);
+    let loadAltResp = null;
+    if (!isGcp && (!loadResp || loadResp.status !== 200 || !loadResp.data)) {
+      loadAltResp = await callCloudCodeApi("/v1internal:loadCodeAssist", tok, loadPayload, {}, DAILY_HOSTNAME);
+      if (loadAltResp && loadAltResp.status === 200 && loadAltResp.data) {
+        loadResp = loadAltResp;
+      }
+    }
     let userTier = "";
+    let tierSourceConfirmed = false;
+    let loadIneligibleInfo = null;
     if (loadResp && loadResp.status === 200 && loadResp.data) {
       if (!isGcp) {
         const loadedPid = String(
@@ -746,12 +312,28 @@ export async function probeChannelQuotaSnapshot(channelId) {
           companionPid = resolvePersonalCompanionProjectId(cfg, acc.email, loadedPid);
         }
       }
-      const pTier = loadResp.data.paidTier || loadResp.data.currentTier || {};
-      userTier = String(
-        isGcp
-          ? (loadResp.data.currentTier?.id || "standard-tier")
-          : `${pTier.id || ""} ${pTier.name || ""}`
-      ).trim();
+      const hasPaidTier = Boolean(
+        loadResp.data.paidTier &&
+        (loadResp.data.paidTier.id || loadResp.data.paidTier.name)
+      );
+      const curTier = loadResp.data.currentTier || {};
+      const pTier = hasPaidTier ? loadResp.data.paidTier : curTier;
+      if (isGcp) {
+        userTier = String(curTier.id || "standard-tier").trim();
+      } else {
+        const rawCombined = `${pTier.id || ""} ${pTier.name || ""}`.trim();
+        if (rawCombined) {
+          userTier = /\b(ultra|pro|plus|free)\b|g1-|standard-tier|free-tier/i.test(rawCombined)
+            ? rawCombined
+            : (!hasPaidTier ? `free-tier ${rawCombined}`.trim() : rawCombined);
+        } else {
+          userTier = "free-tier";
+        }
+        if (Array.isArray(loadResp.data.ineligibleTiers) && loadResp.data.ineligibleTiers.length > 0) {
+          loadIneligibleInfo = parseCloudCodeApiError({ status: 403, data: loadResp.data }, "loadCodeAssist");
+        }
+      }
+      tierSourceConfirmed = true;
     }
 
     if (isGcp) {
@@ -765,10 +347,13 @@ export async function probeChannelQuotaSnapshot(channelId) {
       );
       return {
         loadResp,
+        loadAltResp,
+        loadIneligibleInfo,
         modelsResp,
         quotaSummaryResp: { status: 0, data: null },
         companionPid,
         userTier,
+        tierSourceConfirmed,
         byPool: null
       };
     }
@@ -776,10 +361,13 @@ export async function probeChannelQuotaSnapshot(channelId) {
     const dailyProbe = await tryProbeSinglePersonalPool(tok, companionPid, DAILY_HOSTNAME);
     return {
       loadResp,
+      loadAltResp,
+      loadIneligibleInfo,
       modelsResp: dailyProbe.modelsResp,
       quotaSummaryResp: dailyProbe.quotaSummaryResp,
       companionPid,
       userTier,
+      tierSourceConfirmed,
       byPool: {
         daily: dailyProbe
       }
@@ -874,14 +462,45 @@ export async function probeChannelQuotaSnapshot(channelId) {
 
     const dailyModels = probeRes.byPool?.daily?.modelsResp || probeRes.modelsResp;
     const dailyQuota = probeRes.byPool?.daily?.quotaSummaryResp || probeRes.quotaSummaryResp;
+    const loadErrObj = probeRes.loadResp?.status !== 200 ? parseCloudCodeApiError(probeRes.loadResp, "loadCodeAssist") : null;
+    const loadAltErrObj = probeRes.loadAltResp && probeRes.loadAltResp.status !== 200
+      ? parseCloudCodeApiError(probeRes.loadAltResp, "loadCodeAssist")
+      : null;
+    const modelsErrObj = dailyModels?.status !== 200 ? parseCloudCodeApiError(dailyModels, "fetchAvailableModels") : null;
+    const quotaErrObj = dailyQuota?.status !== 200 ? parseCloudCodeApiError(dailyQuota, "retrieveUserQuotaSummary") : null;
+
     attemptDiag.loadTier = probeRes.userTier || "";
+    attemptDiag.tierSourceConfirmed = Boolean(probeRes.tierSourceConfirmed);
     attemptDiag.companionPid = probeRes.companionPid || "";
     attemptDiag.loadStatus = probeRes.loadResp?.status || 0;
-    attemptDiag.loadError = attemptDiag.loadStatus !== 200 ? extractApiErrorSummary(probeRes.loadResp) : "";
+    attemptDiag.loadError = loadErrObj?.message || "";
+    attemptDiag.loadErrorObj = loadErrObj;
+    attemptDiag.loadAltErrorObj = loadAltErrObj;
+    attemptDiag.loadIneligibleInfo = probeRes.loadIneligibleInfo || null;
     attemptDiag.modelsStatus = dailyModels?.status || 0;
-    attemptDiag.modelsError = attemptDiag.modelsStatus !== 200 ? extractApiErrorSummary(dailyModels) : "";
+    attemptDiag.modelsError = modelsErrObj?.message || "";
+    attemptDiag.modelsErrorObj = modelsErrObj;
     attemptDiag.quotaStatus = dailyQuota?.status || 0;
-    attemptDiag.quotaError = attemptDiag.quotaStatus !== 200 ? extractApiErrorSummary(dailyQuota) : "";
+    attemptDiag.quotaError = quotaErrObj?.message || "";
+    attemptDiag.quotaErrorObj = quotaErrObj;
+
+    if (!isGcp && probeRes.tierSourceConfirmed && probeRes.userTier) {
+      const confirmedInfo = detectPersonalAccountTier(dailyModels?.data?.models || {}, probeRes.userTier, probeRes.userTier, acc.cachedQuota?.hasArgonAccess, "");
+      if (confirmedInfo.tierCode && confirmedInfo.tierCode !== "Unknown") {
+        acc.tierCode = confirmedInfo.tierCode;
+        acc.tierName = confirmedInfo.tierName;
+        acc.tierConfirmed = true;
+        acc.tierRaw = probeRes.userTier;
+        for (const quotaTarget of [acc.cachedQuota, acc.cachedQuotaByPool?.daily]) {
+          if (quotaTarget && typeof quotaTarget === "object") {
+            quotaTarget.tierCode = confirmedInfo.tierCode;
+            quotaTarget.tierName = confirmedInfo.tierName;
+            quotaTarget.isPaidProOrUltra = confirmedInfo.isPaidProOrUltra;
+            quotaTarget.hasArgonAccess = confirmedInfo.hasArgonAccess;
+          }
+        }
+      }
+    }
 
     if (!isGcp && probeRes.byPool?.daily?.modelsResp?.data) {
       learnModelsFromCloudCodeResponse(cfg, probeRes.byPool.daily.modelsResp.data);
@@ -889,12 +508,13 @@ export async function probeChannelQuotaSnapshot(channelId) {
       const finalCompPid = resolvePersonalCompanionProjectId(cfg, acc.email, probeRes.companionPid || acc.companionProjectId);
       const poolData = probeRes.byPool.daily;
       const prevPoolQuota = acc.cachedQuotaByPool?.daily || acc.cachedQuota || null;
+      const hasPrevConfirmed = Boolean(acc.tierConfirmed || prevPoolQuota?.probedVia || prevPoolQuota?.quotaGroups?.length);
       const parsedPool = parseCloudCodeModelsAndQuota(
         poolData.modelsResp.data,
         poolData.quotaSummaryResp?.data || null,
         false,
         probeRes.userTier,
-        prevPoolQuota,
+        hasPrevConfirmed ? prevPoolQuota : null,
         liveTierTemplate
       );
       if (parsedPool && Array.isArray(parsedPool.quotaGroups) && parsedPool.quotaGroups.length > 0) {
@@ -912,9 +532,14 @@ export async function probeChannelQuotaSnapshot(channelId) {
         delete acc.lastProbeError;
         delete acc.routeBlockedUntil;
         delete acc.routeBlockedReason;
-        if (chosenPrimary.tierCode) {
+        if (chosenPrimary.tierCode && chosenPrimary.tierCode !== "Unknown") {
           acc.tierCode = chosenPrimary.tierCode;
           acc.tierName = chosenPrimary.tierName || acc.tierName;
+          acc.tierConfirmed = Boolean(probeRes.tierSourceConfirmed || acc.tierConfirmed || chosenPrimary.probedVia);
+          if (probeRes.userTier) acc.tierRaw = probeRes.userTier;
+        } else if (!acc.tierConfirmed) {
+          acc.tierCode = "Unknown";
+          acc.tierName = "Unknown";
         }
         persistRefreshedPersonalTokens(cfg, acc, baseToken, false);
         diag.ok = true;
@@ -946,25 +571,67 @@ export async function probeChannelQuotaSnapshot(channelId) {
   }
 
   const lastAttempt = diag.attempts[diag.attempts.length - 1] || {};
-  const errSummary = lastAttempt.modelsError || lastAttempt.quotaError || lastAttempt.refreshError || lastAttempt.loadError || "";
-  const errStatus = Number(
-    (lastAttempt.modelsError && lastAttempt.modelsStatus) ||
-    (lastAttempt.quotaError && lastAttempt.quotaStatus) ||
-    (lastAttempt.loadError && lastAttempt.loadStatus) ||
-    0
-  );
-  if (errSummary) {
-    acc.lastProbeError = { at: Date.now(), status: errStatus, message: errSummary };
-    if (errStatus === 403 && /#3501|valid license/i.test(errSummary)) {
+  const refreshErrObj = lastAttempt.refreshError
+    ? parseCloudCodeApiError({ status: sawAuthExpired ? 401 : 0, error: lastAttempt.refreshError }, "oauth_refresh")
+    : null;
+  const errCandidates = [
+    lastAttempt.modelsErrorObj,
+    lastAttempt.quotaErrorObj,
+    refreshErrObj,
+    lastAttempt.loadErrorObj,
+    lastAttempt.loadAltErrorObj,
+    lastAttempt.loadIneligibleInfo
+  ].filter(Boolean);
+  const primaryErr = errCandidates[0] || null;
+  if (primaryErr?.message) {
+    let mergedReason = primaryErr.reason || "";
+    let mergedValidationUrl = primaryErr.validationUrl || "";
+    let mergedDetail = primaryErr.detailMessage || "";
+    const mergedLinks = [...(primaryErr.helpLinks || [])];
+    for (const cand of errCandidates.slice(1)) {
+      if (!mergedReason && cand.reason) mergedReason = cand.reason;
+      if (!mergedValidationUrl && cand.validationUrl) mergedValidationUrl = cand.validationUrl;
+      if (!mergedDetail && cand.detailMessage) mergedDetail = cand.detailMessage;
+      for (const lnk of (cand.helpLinks || [])) {
+        if (lnk?.url && !mergedLinks.some((x) => x.url === lnk.url)) mergedLinks.push(lnk);
+      }
+    }
+    const mergedCategory = mergedValidationUrl && primaryErr.category === "upstream_error"
+      ? "validation_required"
+      : (primaryErr.category || "upstream_error");
+    acc.lastProbeError = {
+      at: Date.now(),
+      status: Number(primaryErr.status || 0),
+      apiStatus: primaryErr.apiStatus || "",
+      reason: mergedReason,
+      category: mergedCategory,
+      endpoint: primaryErr.endpoint || "",
+      message: primaryErr.message,
+      detailMessage: mergedDetail,
+      validationUrl: mergedValidationUrl,
+      helpLinks: mergedLinks.slice(0, 4)
+    };
+    if (mergedCategory === "license_3501") {
       acc.routeBlockedUntil = Date.now() + 600000;
       acc.routeBlockedReason = "HTTP 403 (#3501)";
+    } else if (mergedCategory === "validation_required") {
+      acc.routeBlockedUntil = Date.now() + 600000;
+      acc.routeBlockedReason = "HTTP 403 (VALIDATION_REQUIRED)";
     }
     if (sawAuthExpired && !sawValidToken) {
       acc.authExpired = true;
     }
+    if (!isGcp && !acc.tierConfirmed && !acc.cachedQuota?.probedVia && !lastAttempt.tierSourceConfirmed) {
+      acc.tierCode = "Unknown";
+      acc.tierName = "Unknown";
+    }
     writeRelayConfig(cfg);
   } else if (sawAuthExpired && !sawValidToken) {
     acc.authExpired = true;
+    if (!isGcp && !acc.tierConfirmed && !acc.cachedQuota?.probedVia) {
+      acc.tierCode = "Unknown";
+      acc.tierName = "Unknown";
+    }
     writeRelayConfig(cfg);
   }
   probeDiagnosticByChannel.set(acc.id, diag);

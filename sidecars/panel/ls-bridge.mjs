@@ -401,7 +401,7 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
     : "";
   const activeTierName = isLiveGcp
     ? (activeGcpBillingMode === "gemini_enterprise" ? "Gemini Enterprise" : "Agent Platform")
-    : (rawTierName || "Google AI Pro");
+    : (rawTierName || "");
 
   const resolvedChannelId = activeEmail
     ? (activeGcpProject ? `${activeEmail}#gcp:${activeGcpProject}` : `${activeEmail}#personal`)
@@ -459,7 +459,8 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
         alias: existingCredPersonal?.alias || credEmail,
         email: credEmail,
         channelType: "personal",
-        tierName: existingCredPersonal?.tierName || "Google AI Pro",
+        tierName: existingCredPersonal?.tierName || "Unknown",
+        tierCode: existingCredPersonal?.tierCode || "Unknown",
         gcpProjectId: "",
         gcpBillingMode: "",
         gcpLocation: "",
@@ -507,7 +508,8 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
           alias: existingPersonal?.alias || activeEmail,
           email: activeEmail,
           channelType: "personal",
-          tierName: existingPersonal?.tierName || "Google AI Pro",
+          tierName: existingPersonal?.tierName || activeTierName || "Unknown",
+          tierCode: existingPersonal?.tierCode || "Unknown",
           gcpProjectId: "",
           gcpBillingMode: "",
           gcpLocation: "",
@@ -718,8 +720,15 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
   const hasLiveArgonAccess = liveTierInfo.hasArgonAccess;
   const isLivePaidProOrUltra = liveTierInfo.isPaidProOrUltra;
   if (!activeGcpProject && liveChannelKey && cfg.accounts[liveChannelKey]) {
-    cfg.accounts[liveChannelKey].tierCode = liveTierInfo.tierCode;
-    cfg.accounts[liveChannelKey].tierName = liveTierInfo.tierName;
+    if (lsModeMatches && (rawTierName || activeTierId)) {
+      cfg.accounts[liveChannelKey].tierCode = liveTierInfo.tierCode;
+      cfg.accounts[liveChannelKey].tierName = liveTierInfo.tierName;
+      cfg.accounts[liveChannelKey].tierConfirmed = true;
+      cfg.accounts[liveChannelKey].tierRaw = `${activeTierId} ${rawTierName}`.trim();
+    } else if (!cfg.accounts[liveChannelKey].tierConfirmed && !cfg.accounts[liveChannelKey].cachedQuota?.probedVia) {
+      cfg.accounts[liveChannelKey].tierCode = "Unknown";
+      cfg.accounts[liveChannelKey].tierName = "Unknown";
+    }
   }
 
   const groupedModelMap = new Map();
@@ -942,6 +951,15 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
         }
         if (freshActive.cachedQuotaByPool) {
           cfg.accounts[activeChannelId].cachedQuotaByPool = freshActive.cachedQuotaByPool;
+        }
+        if (freshActive.tierCode) cfg.accounts[activeChannelId].tierCode = freshActive.tierCode;
+        if (freshActive.tierName) cfg.accounts[activeChannelId].tierName = freshActive.tierName;
+        if (freshActive.tierConfirmed) cfg.accounts[activeChannelId].tierConfirmed = true;
+        if (freshActive.tierRaw) cfg.accounts[activeChannelId].tierRaw = freshActive.tierRaw;
+        if (freshActive.lastProbeError) {
+          cfg.accounts[activeChannelId].lastProbeError = freshActive.lastProbeError;
+        } else {
+          delete cfg.accounts[activeChannelId].lastProbeError;
         }
         const activeProbed = (!activeIsGcp && freshActive.cachedQuotaByPool?.[activePool]) || freshActive.cachedQuota;
         if (activeProbed) {

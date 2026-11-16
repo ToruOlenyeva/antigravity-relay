@@ -54,6 +54,7 @@ const watchedBackendFiles = [
   path.join(__dirname, "store.mjs"),
   path.join(__dirname, "bridge", "wincred-ls.mjs"),
   path.join(__dirname, "bridge", "channel-catalog.mjs"),
+  path.join(__dirname, "bridge", "cloudcode-discovery.mjs"),
   path.join(__dirname, "bridge", "quota-probe.mjs"),
   path.join(__dirname, "bridge", "route-selector.mjs"),
   path.join(__dirname, "bridge", "cloudcode-proxy.mjs"),
@@ -530,6 +531,32 @@ async function requestHandler(req, res) {
       const snap = await lsBridge.fetchLiveSystemSnapshot(false);
       broadcastSnapshot(snap);
       return sendJson(res, 200, { success: true, snapshot: snap });
+    } catch (err) {
+      return sendJson(res, 500, { success: false, error: err.message });
+    }
+  }
+
+  // 6b. 安全拉起外部 Google 账号验证或帮助链接（仅允许安全 HTTPS Google 域名）
+  if (req.method === "POST" && pathname === "/api/open-external-url") {
+    try {
+      const { url: targetUrl } = await readJsonBody(req).catch(() => ({}));
+      const cleanUrl = String(targetUrl || "").trim();
+      let parsed = null;
+      try { parsed = new URL(cleanUrl); } catch {}
+      const hostAllowed = Boolean(
+        parsed &&
+        parsed.protocol === "https:" &&
+        /(^|\.)(google\.com|googleapis\.com|googleusercontent\.com)$/i.test(parsed.hostname)
+      );
+      if (!hostAllowed) {
+        return sendJson(res, 400, { success: false, error: "Unsupported or non-HTTPS verification URL" });
+      }
+      spawn("rundll32.exe", ["url.dll,FileProtocolHandler", parsed.toString()], {
+        detached: true,
+        stdio: "ignore",
+        windowsHide: true
+      }).unref();
+      return sendJson(res, 200, { success: true, url: parsed.toString() });
     } catch (err) {
       return sendJson(res, 500, { success: false, error: err.message });
     }

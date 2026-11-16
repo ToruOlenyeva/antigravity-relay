@@ -19,7 +19,8 @@ import {
   normalizePersonalQuotaPool,
   getActivePersonalQuotaPool,
   getCloudCodeHostnameForPool,
-  learnModelsFromCloudCodeResponse
+  learnModelsFromCloudCodeResponse,
+  parseCloudCodeApiError
 } from "./quota-probe.mjs";
 import {
   isGcpThoughtSignature,
@@ -55,29 +56,31 @@ function decodeCompressedBody(respBuf, contentEncoding) {
   return respBuf;
 }
 
-function extractHttpErrorText(statusCode, rawBuf, contentEncoding = "") {
+function parseHttpErrorDetails(statusCode, rawBuf, contentEncoding = "", endpoint = "") {
   let text = "";
   try {
     text = decodeCompressedBody(rawBuf, contentEncoding).toString("utf8");
   } catch {
     text = rawBuf ? rawBuf.toString("utf8") : "";
   }
+  let parsedData = null;
   try {
     const parsed = JSON.parse(text);
-    const errObj = Array.isArray(parsed) ? parsed[0]?.error : parsed?.error;
-    const msg = String(errObj?.message || parsed?.error_description || parsed?.message || "").trim();
-    if (msg) return `HTTP ${statusCode}: ${msg}`.slice(0, 320);
+    parsedData = Array.isArray(parsed) ? parsed[0] : parsed;
   } catch {}
-  const cleaned = text.replace(/\s+/g, " ").trim();
-  return cleaned ? `HTTP ${statusCode}: ${cleaned}`.slice(0, 320) : `HTTP ${statusCode}`;
+  return parseCloudCodeApiError(
+    { status: statusCode, data: parsedData, raw: parsedData ? "" : text },
+    endpoint
+  );
 }
 
 function recordProxyFailure(cfg, info) {
   if (!cfg.__meta__ || typeof cfg.__meta__ !== "object") cfg.__meta__ = {};
+  const errObj = info.errorObj && typeof info.errorObj === "object" ? info.errorObj : null;
   const entry = {
     at: new Date().toISOString(),
-    statusCode: Number(info.statusCode || 0),
-    endpoint: info.endpoint || "",
+    statusCode: Number(info.statusCode || errObj?.status || 0),
+    endpoint: info.endpoint || errObj?.endpoint || "",
     rawModel: info.rawModel || "",
     mappedModel: info.mappedModel || "",
     baseFamily: info.baseFamily || "",
@@ -85,7 +88,10 @@ function recordProxyFailure(cfg, info) {
     targetChannelId: info.targetChannelId || "",
     targetEmail: info.targetEmail || "",
     targetPool: info.targetPool || "",
-    message: String(info.message || "").slice(0, 320)
+    reason: errObj?.reason || "",
+    category: errObj?.category || "",
+    validationUrl: errObj?.validationUrl || "",
+    message: String(errObj?.message || info.message || "").slice(0, 600)
   };
   cfg.__meta__.lastProxyError = entry;
   const list = Array.isArray(cfg.__meta__.recentProxyErrors) ? cfg.__meta__.recentProxyErrors : [];
@@ -93,10 +99,24 @@ function recordProxyFailure(cfg, info) {
   cfg.__meta__.recentProxyErrors = list.slice(0, 15);
   const acc = entry.targetChannelId ? cfg.accounts?.[entry.targetChannelId] : null;
   if (acc && (entry.statusCode === 401 || entry.statusCode === 403)) {
-    acc.lastProbeError = { at: Date.now(), status: entry.statusCode, message: entry.message };
+    acc.lastProbeError = {
+      at: Date.now(),
+      status: entry.statusCode,
+      apiStatus: errObj?.apiStatus || "",
+      reason: errObj?.reason || "",
+      category: errObj?.category || "",
+      endpoint: entry.endpoint,
+      message: entry.message,
+      detailMessage: errObj?.detailMessage || "",
+      validationUrl: errObj?.validationUrl || "",
+      helpLinks: Array.isArray(errObj?.helpLinks) ? errObj.helpLinks : []
+    };
     if (entry.statusCode === 403 && /#3501|valid license/i.test(entry.message)) {
       acc.routeBlockedUntil = Date.now() + 600000;
       acc.routeBlockedReason = "HTTP 403 (#3501)";
+    } else if (entry.statusCode === 403 && (errObj?.category === "validation_required" || /VALIDATION_REQUIRED|verify your account/i.test(entry.message))) {
+      acc.routeBlockedUntil = Date.now() + 600000;
+      acc.routeBlockedReason = "HTTP 403 (VALIDATION_REQUIRED)";
     }
   }
   writeRelayConfig(cfg);
@@ -358,7 +378,7 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
               });
               upRes.on("end", () => {
                 const errBuf = Buffer.concat(errChunks);
-                const errSummary = extractHttpErrorText(upRes.statusCode, errBuf, upRes.headers["content-encoding"]);
+                const errObj = parseHttpErrorDetails(upRes.statusCode, errBuf, upRes.headers["content-encoding"], reqUrl);
                 recordProxyFailure(cfg, {
                   statusCode: upRes.statusCode,
                   endpoint: reqUrl,
@@ -369,7 +389,8 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
                   targetChannelId: routedTargetAcc.id,
                   targetEmail: routedTargetAcc.email,
                   targetPool,
-                  message: errSummary
+                  errorObj: errObj,
+                  message: errObj?.message || `HTTP ${upRes.statusCode}`
                 });
                 excludedIds.add(routedTargetAcc.id);
                 excludedIds.add(`${routedTargetAcc.id}@${targetPool}`);
@@ -535,6 +556,7 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
           });
           upRes.on("end", () => {
             if (isErrorStatus) {
+              const errObj = parseHttpErrorDetails(upRes.statusCode, Buffer.concat(errSampleChunks), upRes.headers["content-encoding"], reqUrl);
               recordProxyFailure(cfg, {
                 statusCode: upRes.statusCode,
                 endpoint: reqUrl,
@@ -545,7 +567,8 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
                 targetChannelId: routedTargetAcc?.id || "",
                 targetEmail: routedTargetAcc?.email || "",
                 targetPool,
-                message: extractHttpErrorText(upRes.statusCode, Buffer.concat(errSampleChunks), upRes.headers["content-encoding"])
+                errorObj: errObj,
+                message: errObj?.message || `HTTP ${upRes.statusCode}`
               });
             } else if (isStreamOrGenerate && routedTargetAcc?.id && (routedTargetAcc.lastProbeError || routedTargetAcc.routeBlockedUntil || routedTargetAcc.lastTokenRefreshError)) {
               delete routedTargetAcc.lastProbeError;

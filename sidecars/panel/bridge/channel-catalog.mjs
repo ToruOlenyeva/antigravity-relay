@@ -144,7 +144,121 @@ export function isModelEntryRestrictedOrSunset(m) {
   return false;
 }
 
-function detectArgonAccessFromModels(rawModelsListOrMap, tierCode = "Pro", prevHasArgon = undefined) {
+/**
+ * 解析上游 CloudCode / OAuth HTTP 错误与 loadCodeAssist 受限响应，完整保留 status、reason、validationUrl 等诊断信息
+ */
+export function parseCloudCodeApiError(resp, endpoint = "") {
+  if (!resp) return null;
+  const errObj = Array.isArray(resp.data)
+    ? resp.data[0]?.error
+    : (resp.data?.error && typeof resp.data.error === "object" ? resp.data.error : null);
+  const status = Number(errObj?.code || resp.status || 0);
+  const apiStatus = String(errObj?.status || "").trim();
+  const rawDetails = Array.isArray(errObj?.details) ? errObj.details : [];
+  const ineligibleTiers = Array.isArray(resp.data?.ineligibleTiers) ? resp.data.ineligibleTiers : [];
+
+  let reason = "";
+  let validationUrl = "";
+  let detailMessage = "";
+  const helpLinks = [];
+
+  for (const d of rawDetails) {
+    if (!d || typeof d !== "object") continue;
+    if (!reason && d.reason) {
+      reason = String(d.reason).trim();
+    }
+    const meta = d.metadata && typeof d.metadata === "object" ? d.metadata : null;
+    if (meta) {
+      if (!validationUrl) {
+        const candUrl = String(meta.validation_url || meta.validationUrl || meta.appeal_url || meta.url || "").trim();
+        if (/^https?:\/\//i.test(candUrl)) validationUrl = candUrl;
+      }
+      if (!detailMessage) {
+        const metaMsg = String(meta.validation_error_message || meta.message || "").trim();
+        if (metaMsg) detailMessage = metaMsg;
+      }
+    }
+    if (Array.isArray(d.links)) {
+      for (const lnk of d.links) {
+        const lUrl = String(lnk?.url || "").trim();
+        const lDesc = String(lnk?.description || "").trim();
+        if (/^https?:\/\//i.test(lUrl)) {
+          helpLinks.push({ description: lDesc, url: lUrl });
+          if (!validationUrl && /accounts\.google\.com|myaccount\.google\.com|support\.google\.com|one\.google\.com/i.test(lUrl)) {
+            validationUrl = lUrl;
+          }
+        }
+      }
+    }
+  }
+
+  for (const tierItem of ineligibleTiers) {
+    if (!tierItem || typeof tierItem !== "object") continue;
+    if (!reason && tierItem.reasonCode) reason = String(tierItem.reasonCode).trim();
+    if (!detailMessage && tierItem.reasonMessage) detailMessage = String(tierItem.reasonMessage).trim();
+    const vUrl = String(tierItem.validationUrl || "").trim();
+    if (!validationUrl && /^https?:\/\//i.test(vUrl)) validationUrl = vUrl;
+  }
+
+  const rawBodyMsg = String(
+    errObj?.message ||
+    resp.data?.error_description ||
+    resp.data?.message ||
+    resp.error ||
+    (resp.raw ? String(resp.raw).replace(/\s+/g, " ").trim() : "") ||
+    apiStatus ||
+    ""
+  ).trim();
+
+  if (!validationUrl) {
+    const urlMatch = /https:\/\/[^\s"'<>]+/i.exec(`${detailMessage} ${rawBodyMsg}`);
+    if (urlMatch) validationUrl = urlMatch[0].replace(/[.,;)]+$/, "");
+  }
+
+  if (!reason && /#3501|valid license/i.test(rawBodyMsg)) {
+    reason = "#3501";
+  }
+
+  const combined = `${reason} ${apiStatus} ${rawBodyMsg} ${detailMessage}`.trim();
+  let category = "upstream_error";
+  if (status === 401 || /invalid_grant|UNAUTHENTICATED|invalid authentication/i.test(combined)) {
+    category = "auth_expired";
+  } else if (/#3501|valid license/i.test(combined)) {
+    category = "license_3501";
+  } else if (/VALIDATION_REQUIRED|verify your account|validation_url/i.test(combined) || Boolean(validationUrl)) {
+    category = "validation_required";
+    if (!reason) reason = "VALIDATION_REQUIRED";
+  } else if (/SERVICE_DISABLED/i.test(combined)) {
+    category = "api_disabled";
+  } else if (status === 429 || /RESOURCE_EXHAUSTED|rate limit|quota/i.test(combined)) {
+    category = "quota_exhausted";
+  } else if (status === 403 || /PERMISSION_DENIED|not eligible|country|region|unsupported/i.test(combined)) {
+    category = "region_or_eligibility";
+  } else if (status < 0 || /timeout|ECONN|ETIMEDOUT|ENOTFOUND|socket|network/i.test(combined)) {
+    category = "network_error";
+  }
+
+  const message = rawBodyMsg
+    ? (status > 0 && !new RegExp(`^HTTP\\s+${status}\\b`, "i").test(rawBodyMsg)
+        ? `HTTP ${status}: ${rawBodyMsg}`
+        : rawBodyMsg).slice(0, 600)
+    : (status > 0 ? `HTTP ${status}` : "");
+
+  if (!message && !detailMessage && !validationUrl && status === 0) return null;
+  return {
+    status,
+    apiStatus,
+    reason,
+    category,
+    endpoint: String(endpoint || "").trim(),
+    message,
+    detailMessage: detailMessage && detailMessage !== rawBodyMsg ? detailMessage.slice(0, 400) : "",
+    validationUrl,
+    helpLinks: helpLinks.slice(0, 4)
+  };
+}
+
+function detectArgonAccessFromModels(rawModelsListOrMap, tierCode = "Unknown", prevHasArgon = undefined) {
   if (tierCode === "Free" || tierCode === "Plus") return false;
   if (!Array.isArray(rawModelsListOrMap) && rawModelsListOrMap && typeof rawModelsListOrMap === "object") {
     if (Object.prototype.hasOwnProperty.call(rawModelsListOrMap, "gemini-4-argon-disabled")) {
@@ -155,7 +269,8 @@ function detectArgonAccessFromModels(rawModelsListOrMap, tierCode = "Pro", prevH
     ? rawModelsListOrMap
     : Object.values(rawModelsListOrMap || {});
   if (entries.length === 0) {
-    return prevHasArgon !== undefined ? Boolean(prevHasArgon) : (tierCode === "Ultra" || tierCode === "Pro");
+    if (prevHasArgon !== undefined) return Boolean(prevHasArgon);
+    return tierCode === "Ultra" || tierCode === "Pro";
   }
   let sawArgonEnabled = false;
   let sawArgonRestricted = false;
@@ -197,7 +312,7 @@ export function detectPersonalAccountTier(
   } else if (/\bplus\b|g1-plus/i.test(combinedTier)) {
     tierCode = "Plus";
     tierName = "Google AI Plus";
-  } else if (/\bfree\b|standard-tier|free-tier/i.test(combinedTier)) {
+  } else if (/\bfree\b|standard-tier|free-tier|legacy-tier|basic-tier|individual-tier|starter[-_ ]?quota|starter[-_ ]?tier|\bstarter\b|no[-_ ]?tier|unsubscribed/i.test(combinedTier)) {
     tierCode = "Free";
     tierName = "Google AI Free";
   } else if (prevTierCode && /^(Ultra|Pro|Plus|Free)$/i.test(prevTierCode)) {
@@ -205,8 +320,8 @@ export function detectPersonalAccountTier(
     tierCode = norm;
     tierName = `Google AI ${norm}`;
   } else {
-    tierCode = "Pro";
-    tierName = "Google AI Pro";
+    tierCode = "Unknown";
+    tierName = "Unknown";
   }
 
   const hasArgonAccess = detectArgonAccessFromModels(rawModelsListOrMap, tierCode, prevHasArgon);
@@ -353,17 +468,25 @@ export function isValidOfficialQuotaGroup(g) {
   return true;
 }
 
-export function sanitizeCachedQuotaModels(cachedQuota, isGcp, liveTierTemplate = [], hintTierName = "", hintTierId = "") {
+export function sanitizeCachedQuotaModels(
+  cachedQuota,
+  isGcp,
+  liveTierTemplate = [],
+  hintTierName = "",
+  hintTierId = "",
+  preferHint = false
+) {
   if (!cachedQuota || typeof cachedQuota !== "object") return cachedQuota;
   const rawList = Array.isArray(cachedQuota.availableModels) ? cachedQuota.availableModels : [];
+  const hasHint = Boolean(preferHint && (hintTierName || hintTierId));
   const tierInfo = isGcp
     ? { tierCode: "GCP", tierName: hintTierName || "Agent Platform", hasArgonAccess: true, isPaidProOrUltra: false }
     : detectPersonalAccountTier(
         rawList,
-        cachedQuota.tierName || hintTierName || "",
-        hintTierId || cachedQuota.tierCode || "",
-        cachedQuota.hasArgonAccess,
-        cachedQuota.tierCode || hintTierId || ""
+        hasHint ? (hintTierName || "") : (cachedQuota.tierName || hintTierName || ""),
+        hasHint ? (hintTierId || "") : (hintTierId || cachedQuota.tierCode || ""),
+        hasHint ? undefined : cachedQuota.hasArgonAccess,
+        hasHint ? (hintTierId || "") : (cachedQuota.tierCode || hintTierId || "")
       );
   const hasArgonAccess = tierInfo.hasArgonAccess;
   const isPaidProOrUltra = tierInfo.isPaidProOrUltra;
@@ -610,8 +733,8 @@ export function normalizeAccountChannels(cfg) {
         ? (["global", "us", "eu"].includes(item.gcpLocation) ? item.gcpLocation : "global")
         : "";
       const cleanPersonalTier = /agent\s*platform|enterprise|gcp/i.test(item.tierName || "")
-        ? "Google AI Pro"
-        : (item.tierName || "Google AI Pro");
+        ? ""
+        : (item.tierName || "");
       const cleanGcpTier = gcpBillingMode === "gemini_enterprise" ? "Gemini Enterprise" : "Agent Platform";
 
       const liveTierKey = isGcp && pid ? "gcp" : "personal";
@@ -619,12 +742,28 @@ export function normalizeAccountChannels(cfg) {
       const cleanCompanionPid = !isGcp
         ? resolvePersonalCompanionProjectId(cfg, email, item.companionProjectId || item.cachedQuota?.companionProjectId || "")
         : "";
+      const confirmedFromRaw = (!isGcp && item.tierConfirmed && item.tierRaw)
+        ? detectPersonalAccountTier([], item.tierRaw, item.tierRaw, undefined, "")
+        : null;
+      const hasAuthoritativeRawTier = Boolean(confirmedFromRaw && confirmedFromRaw.tierCode !== "Unknown");
+      const hasConfirmedHistoricalQuota = Boolean(
+        item.tierConfirmed ||
+        item.cachedQuota?.probedVia ||
+        (Array.isArray(item.cachedQuota?.quotaGroups) && item.cachedQuota.quotaGroups.length > 0)
+      );
+      const effectiveHintName = hasAuthoritativeRawTier
+        ? confirmedFromRaw.tierName
+        : (hasConfirmedHistoricalQuota ? cleanPersonalTier : "");
+      const effectiveHintCode = hasAuthoritativeRawTier
+        ? confirmedFromRaw.tierCode
+        : (hasConfirmedHistoricalQuota ? (item.tierCode || "") : "");
       let cachedQuota = sanitizeCachedQuotaModels(
         item.cachedQuota || null,
         Boolean(isGcp && pid),
         liveTierTemplate,
-        isGcp && pid ? cleanGcpTier : cleanPersonalTier,
-        item.tierCode || ""
+        isGcp && pid ? cleanGcpTier : effectiveHintName,
+        effectiveHintCode,
+        hasAuthoritativeRawTier
       );
       let cachedQuotaByPool = undefined;
       if (!isGcp && !pid) {
@@ -634,12 +773,14 @@ export function normalizeAccountChannels(cfg) {
           : {};
         for (const pKey of ["daily"]) {
           if (rawByPool[pKey] && typeof rawByPool[pKey] === "object") {
+            const poolConfirmed = Boolean(hasConfirmedHistoricalQuota || rawByPool[pKey].probedVia || rawByPool[pKey].quotaGroups?.length);
             const sanitizedPool = sanitizeCachedQuotaModels(
               rawByPool[pKey],
               false,
               liveTierTemplate,
-              cleanPersonalTier,
-              item.tierCode || ""
+              hasAuthoritativeRawTier ? confirmedFromRaw.tierName : (poolConfirmed ? cleanPersonalTier : ""),
+              hasAuthoritativeRawTier ? confirmedFromRaw.tierCode : (poolConfirmed ? (item.tierCode || "") : ""),
+              hasAuthoritativeRawTier
             );
             if (sanitizedPool) {
               sanitizedPool.pool = "daily";
@@ -666,10 +807,36 @@ export function normalizeAccountChannels(cfg) {
       if (cachedQuota && cleanCompanionPid && !isGcp) {
         cachedQuota.companionProjectId = cleanCompanionPid;
       }
-      const resolvedTierCode = isGcp && pid
-        ? "GCP"
-        : (cachedQuota?.tierCode || item.tierCode || (/ultra/i.test(cleanPersonalTier) ? "Ultra" : (/plus/i.test(cleanPersonalTier) ? "Plus" : (/free/i.test(cleanPersonalTier) ? "Free" : "Pro"))));
-      const resolvedPersonalTierName = cachedQuota?.tierName || cleanPersonalTier;
+      const isPersonalTierConfirmed = Boolean(
+        !isGcp &&
+        (item.tierConfirmed ||
+         cachedQuota?.probedVia ||
+         (Array.isArray(cachedQuota?.quotaGroups) && cachedQuota.quotaGroups.length > 0))
+      );
+      let resolvedTierCode = "Unknown";
+      let resolvedPersonalTierName = "Unknown";
+      if (isGcp && pid) {
+        resolvedTierCode = "GCP";
+      } else if (isPersonalTierConfirmed) {
+        const rawTierCand = hasAuthoritativeRawTier
+          ? confirmedFromRaw.tierCode
+          : (cachedQuota?.tierCode || item.tierCode || cleanPersonalTier);
+        if (/ultra/i.test(rawTierCand)) resolvedTierCode = "Ultra";
+        else if (/\bpro\b|g1-pro/i.test(rawTierCand)) resolvedTierCode = "Pro";
+        else if (/\bplus\b|g1-plus/i.test(rawTierCand)) resolvedTierCode = "Plus";
+        else if (/\bfree\b|free-tier|starter/i.test(rawTierCand)) resolvedTierCode = "Free";
+        else resolvedTierCode = "Unknown";
+        const expectedTierName = resolvedTierCode !== "Unknown" ? `Google AI ${resolvedTierCode}` : "Unknown";
+        if (hasAuthoritativeRawTier) {
+          resolvedPersonalTierName = expectedTierName;
+        } else {
+          const cachedName = String(cachedQuota?.tierName || "").trim();
+          const nameMatchesCode = cachedName && new RegExp(`\\b${resolvedTierCode}\\b`, "i").test(cachedName);
+          resolvedPersonalTierName = resolvedTierCode !== "Unknown"
+            ? (nameMatchesCode ? cachedName : expectedTierName)
+            : "Unknown";
+        }
+      }
       if (isGcp && pid && gcpBillingMode === "agent_platform") {
         const curModels = cachedQuota?.availableModels || [];
         const hasValidGcpModels =
@@ -731,6 +898,7 @@ export function normalizeAccountChannels(cfg) {
         email,
         channelType: isGcp && pid ? "gcp" : "personal",
         tierCode: resolvedTierCode,
+        tierConfirmed: isGcp ? Boolean(pid) : isPersonalTierConfirmed,
         gcpProjectId: isGcp && pid ? pid : "",
         gcpBillingMode,
         gcpLocation,
@@ -776,7 +944,8 @@ export function normalizeAccountChannels(cfg) {
           alias: item.alias || email,
           email,
           channelType: "personal",
-          tierName: "Google AI Pro",
+          tierCode: "Unknown",
+          tierName: "Unknown",
           gcpProjectId: "",
           gcpBillingMode: "",
           gcpLocation: "",
@@ -828,15 +997,21 @@ export function addOrUpdatePersonalChannelCard(email) {
     cfg.__meta__.deletedChannelIds = cfg.__meta__.deletedChannelIds.filter((id) => id !== personalKey);
   }
   const existing = cfg.accounts[personalKey];
+  const keepExistingTier = Boolean(
+    existing?.tierConfirmed ||
+    existing?.cachedQuota?.probedVia ||
+    existing?.cachedQuota?.quotaGroups?.length
+  );
   cfg.accounts[personalKey] = {
     ...existing,
     id: personalKey,
     alias: existing?.alias || cleanEmail,
     email: cleanEmail,
     channelType: "personal",
-    tierName: existing?.tierName && !/agent\s*platform|enterprise|gcp/i.test(existing.tierName)
+    tierCode: keepExistingTier ? (existing?.tierCode || "Unknown") : "Unknown",
+    tierName: keepExistingTier && existing?.tierName && !/agent\s*platform|enterprise|gcp/i.test(existing.tierName)
       ? existing.tierName
-      : "Google AI Pro",
+      : "Unknown",
     gcpProjectId: "",
     gcpBillingMode: "",
     gcpLocation: "",

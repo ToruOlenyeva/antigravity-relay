@@ -1139,3 +1139,95 @@ button.secondary.small.active-toggle {
   padding-top: 7px;
   border-top: 1px dashed var(--border-subtle);
 }
+
+.channel-type-badge.unknown {
+  background: rgba(148, 163, 184, 0.1);
+  color: var(--text-muted);
+  border: 1px dashed rgba(148, 163, 184, 0.42);
+}
+
+.quota-error-hint {
+  color: var(--danger);
+}
+
+.probe-error-badge-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: auto;
+  padding: 1px 6px;
+  margin-left: 2px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.35;
+  background: rgba(239, 68, 68, 0.12);
+  color: var(--danger);
+  border: 1px solid rgba(239, 68, 68, 0.34);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.probe-error-badge-btn:hover,
+.probe-error-badge-btn.expanded {
+  background: rgba(239, 68, 68, 0.2);
+  border-color: var(--danger);
+}
+
+.probe-error-badge-btn .badge-caret {
+  font-size: 9px;
+  opacity: 0.85;
+}
+
+.channel-error-drawer {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 2px;
+  padding: 7px 9px;
+  border-radius: 6px;
+  background: rgba(239, 68, 68, 0.06);
+  border: 1px solid rgba(239, 68, 68, 0.28);
+}
+
+.channel-error-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.channel-error-meta {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--danger);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.channel-error-msg {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-main);
+  word-break: break-word;
+  user-select: text;
+}
+
+.channel-error-sub {
+  font-size: 10.5px;
+  line-height: 1.35;
+  color: var(--text-muted);
+  word-break: break-word;
+  user-select: text;
+}
+
+.channel-error-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+  flex-wrap: wrap;
+}

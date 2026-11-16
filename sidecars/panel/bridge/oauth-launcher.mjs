@@ -1620,7 +1620,8 @@ export function startIsolatedOAuthFlow(optionsOrCallback = {}, maybeCallback = n
           ...(cfg.accounts[personalKey] || {}),
           id: personalKey, alias: email, email, channelType: "personal",
           authExpired: false,
-          tierName: cfg.accounts[personalKey]?.tierName || "Google AI Pro",
+          tierCode: cfg.accounts[personalKey]?.tierConfirmed ? (cfg.accounts[personalKey]?.tierCode || "Unknown") : "Unknown",
+          tierName: cfg.accounts[personalKey]?.tierConfirmed ? (cfg.accounts[personalKey]?.tierName || "Unknown") : "Unknown",
           gcpProjectId: "", savedAt: new Date().toISOString(), storedToken
         };
         writeRelayConfig(cfg);

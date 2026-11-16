@@ -7,7 +7,7 @@ let currentLang = (savedLang === "en" || savedLang === "zh") ? savedLang : defau
 
 let state = {
   lsOnline: false,
-  activeAccount: { email: "", tierName: "Google AI Pro", gcpProjectId: "", channelId: "" },
+  activeAccount: { email: "", tierName: "", gcpProjectId: "", channelId: "" },
   availableModels: [],
   quotaGroups: [],
   accounts: [],
@@ -32,8 +32,10 @@ let switchingAccountId = "";
 let isScrubSigsDrawerOpen = false;
 let isMultiInstanceDrawerOpen = false;
 let selectedMultiInstanceTargetId = "";
-// 当前展开编辑设置的 GCP 通道卡片 ID 集合与顶部添加 GCP 抽屉开关状态
+// 当前展开编辑设置的 GCP 通道卡片 ID 集合、展开查看异常详情的账号 ID 集合与重探中的账号 ID 集合
 let expandedGcpConfigIds = new Set();
+let expandedAccountErrorIds = new Set();
+let probingChannelIds = new Set();
 let isAddGcpDrawerOpen = false;
 let addGcpDraft = {
   sourceMode: "new_oauth",
@@ -842,6 +844,61 @@ async function startIsolatedBrowserLogin(opts = {}) {
     }
     showToast(I18N[currentLang].toastOAuthStarted);
   } catch (e) {}
+}
+
+async function openExternalVerificationUrl(url) {
+  try {
+    const cleanUrl = String(url || "").trim();
+    if (!cleanUrl) return;
+    const t = I18N[currentLang];
+    const res = await fetch("/api/open-external-url", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: cleanUrl })
+    });
+    const data = await res.json();
+    if (data?.success) {
+      showToast(t.toastOpeningExternalUrl || "已在浏览器打开 Google 页面");
+    } else {
+      showToast(`${t.toastOpenExternalFailed || "无法打开链接："}${data?.error || "error"}`);
+    }
+  } catch (e) {
+    const t = I18N[currentLang];
+    showToast(`${t.toastOpenExternalFailed || "无法打开链接："}${e.message}`);
+  }
+}
+
+async function retryProbeSingleChannel(channelId) {
+  if (!channelId || probingChannelIds.has(channelId)) return;
+  const t = I18N[currentLang];
+  probingChannelIds.add(channelId);
+  renderAccountList();
+  try {
+    const res = await fetch("/api/probe-channel-quota", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ channelId })
+    });
+    const data = await res.json();
+    probingChannelIds.delete(channelId);
+    if (data?.snapshot) {
+      state = data.snapshot;
+    }
+    const updatedAcc = (state.accounts || []).find((a) => a.id === channelId);
+    const hasStillError = Boolean(updatedAcc?.authExpired || updatedAcc?.lastProbeError?.message);
+    if (!hasStillError && data?.cachedQuota) {
+      expandedAccountErrorIds.delete(channelId);
+      showToast(t.toastRetriedProbeOk || "探测成功，已刷新账号等级与配额");
+    } else {
+      const errMsg = updatedAcc?.lastProbeError?.message || data?.error || "";
+      if (errMsg) showToast(`${t.toastRetriedProbeFail || "探测仍异常："}${errMsg}`);
+    }
+    renderAll();
+  } catch (e) {
+    probingChannelIds.delete(channelId);
+    renderAccountList();
+    showToast(`${t.toastRetriedProbeFail || "探测仍异常："}${e.message}`);
+  }
 }
 
 async function cancelBrowserLogin() {

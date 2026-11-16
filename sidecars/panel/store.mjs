@@ -688,12 +688,18 @@ export function writeRelayConfig(cfg) {
                 if (!memAcc || !diskAcc) continue;
                 const diskUpdated = Number(diskAcc.cachedQuota?.updatedAt || 0);
                 const memUpdated = Number(memAcc.cachedQuota?.updatedAt || 0);
+                const diskErrAt = Number(diskAcc.lastProbeError?.at || 0);
+                const memErrAt = Number(memAcc.lastProbeError?.at || 0);
                 const diskHasGroups = Array.isArray(diskAcc.cachedQuota?.quotaGroups) && diskAcc.cachedQuota.quotaGroups.length > 0;
                 const memHasGroups = Array.isArray(memAcc.cachedQuota?.quotaGroups) && memAcc.cachedQuota.quotaGroups.length > 0;
                 if ((diskUpdated > memUpdated && (diskHasGroups || !memHasGroups)) || (diskHasGroups && !memHasGroups)) {
                   memAcc.cachedQuota = diskAcc.cachedQuota;
-                  if (diskAcc.tierCode) memAcc.tierCode = diskAcc.tierCode;
-                  if (diskAcc.tierName) memAcc.tierName = diskAcc.tierName;
+                  if (!memAcc.tierConfirmed || !memAcc.tierRaw || diskUpdated > Math.max(memUpdated, memErrAt)) {
+                    if (diskAcc.tierCode) memAcc.tierCode = diskAcc.tierCode;
+                    if (diskAcc.tierName) memAcc.tierName = diskAcc.tierName;
+                    if (diskAcc.tierConfirmed) memAcc.tierConfirmed = true;
+                    if (diskAcc.tierRaw) memAcc.tierRaw = diskAcc.tierRaw;
+                  }
                 }
                 if (diskAcc.companionProjectId && !memAcc.companionProjectId) {
                   memAcc.companionProjectId = diskAcc.companionProjectId;
@@ -707,8 +713,6 @@ export function writeRelayConfig(cfg) {
                   memAcc.storedToken = diskAcc.storedToken;
                   if (diskAcc.authExpired === false) memAcc.authExpired = false;
                 }
-                const diskErrAt = Number(diskAcc.lastProbeError?.at || 0);
-                const memErrAt = Number(memAcc.lastProbeError?.at || 0);
                 if (diskErrAt > memErrAt && diskErrAt >= memUpdated) {
                   memAcc.lastProbeError = diskAcc.lastProbeError;
                   if (diskAcc.routeBlockedUntil) memAcc.routeBlockedUntil = diskAcc.routeBlockedUntil;

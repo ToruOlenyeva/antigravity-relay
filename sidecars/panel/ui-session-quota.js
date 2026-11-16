@@ -24,7 +24,7 @@ function translateQuotaGroupName(rawName) {
 
 function getChannelBadgeInfo(ch) {
   const t = I18N[currentLang];
-  if (!ch) return { badgeType: "personal", badgeText: t.channelPersonalBadge };
+  if (!ch) return { badgeType: "unknown", badgeText: t.channelUnknownBadge || "未知" };
   const isGcp = ch.channelType === "gcp" || Boolean(ch.gcpProjectId);
   if (isGcp) {
     return { badgeType: "gcp", badgeText: t.channelGcpBadge };
@@ -40,10 +40,10 @@ function getChannelBadgeInfo(ch) {
   if (/^plus$/i.test(code) || /plus/i.test(tName)) {
     return { badgeType: "plus", badgeText: "Plus" };
   }
-  if (/^free$/i.test(code) || /free|standard/i.test(tName)) {
+  if (/^free$/i.test(code) || /\bfree\b|standard/i.test(tName)) {
     return { badgeType: "free", badgeText: "Free" };
   }
-  return { badgeType: "personal", badgeText: t.channelPersonalBadge };
+  return { badgeType: "unknown", badgeText: t.channelUnknownBadge || "未知" };
 }
 
 function formatCompactTokenCount(num) {
@@ -447,6 +447,8 @@ function renderSessionSelector() {
     channelOptions.push(existingActive || {
       id: activeChannelId,
       email: active.email,
+      tierCode: active.tierCode || "",
+      tierName: active.tierName || "",
       channelType: active.gcpProjectId ? "gcp" : "personal",
       gcpProjectId: active.gcpProjectId || ""
     });
@@ -733,12 +735,22 @@ function renderQuotaGroups() {
   }
 
   if (groups.length === 0 && !isGcpChannel) {
+    const hasAuthExp = Boolean(viewedAcc?.authExpired);
+    const hasProbeErr = Boolean(viewedAcc?.lastProbeError?.message);
     const hint = document.createElement("div");
-    hint.className = "section-hint";
+    hint.className = "section-hint" + ((hasAuthExp || hasProbeErr) ? " quota-error-hint" : "");
     hint.style.padding = "6px 2px";
-    hint.textContent = t.quotaNoCacheHint;
+    if (hasAuthExp) {
+      hint.textContent = t.quotaAuthExpiredHint || "登录凭据已过期，请点击下方账号卡片徽章重新登录";
+    } else if (hasProbeErr) {
+      hint.textContent = t.quotaProbeFailedHint || "配额获取失败，请点击下方账号卡片异常徽章查看详情";
+    } else {
+      hint.textContent = t.quotaNoCacheHint;
+    }
     container.appendChild(hint);
     if (
+      !hasAuthExp &&
+      !hasProbeErr &&
       targetChannelId &&
       (lastAutoProbedChannelId !== targetChannelId || Date.now() - lastAutoProbedAt > 8000)
     ) {
