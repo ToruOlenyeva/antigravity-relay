@@ -910,6 +910,8 @@ export async function probeChannelQuotaSnapshot(channelId) {
         acc.cachedQuotaByPool = nextByPool;
         acc.cachedQuota = chosenPrimary;
         delete acc.lastProbeError;
+        delete acc.routeBlockedUntil;
+        delete acc.routeBlockedReason;
         if (chosenPrimary.tierCode) {
           acc.tierCode = chosenPrimary.tierCode;
           acc.tierName = chosenPrimary.tierName || acc.tierName;
@@ -933,6 +935,8 @@ export async function probeChannelQuotaSnapshot(channelId) {
         acc.authExpired = false;
         acc.cachedQuota = parsed;
         delete acc.lastProbeError;
+        delete acc.routeBlockedUntil;
+        delete acc.routeBlockedReason;
         writeRelayConfig(cfg);
         diag.ok = true;
         probeDiagnosticByChannel.set(acc.id, diag);
@@ -943,8 +947,18 @@ export async function probeChannelQuotaSnapshot(channelId) {
 
   const lastAttempt = diag.attempts[diag.attempts.length - 1] || {};
   const errSummary = lastAttempt.modelsError || lastAttempt.quotaError || lastAttempt.refreshError || lastAttempt.loadError || "";
+  const errStatus = Number(
+    (lastAttempt.modelsError && lastAttempt.modelsStatus) ||
+    (lastAttempt.quotaError && lastAttempt.quotaStatus) ||
+    (lastAttempt.loadError && lastAttempt.loadStatus) ||
+    0
+  );
   if (errSummary) {
-    acc.lastProbeError = { at: Date.now(), message: errSummary };
+    acc.lastProbeError = { at: Date.now(), status: errStatus, message: errSummary };
+    if (errStatus === 403 && /#3501|valid license/i.test(errSummary)) {
+      acc.routeBlockedUntil = Date.now() + 600000;
+      acc.routeBlockedReason = "HTTP 403 (#3501)";
+    }
     if (sawAuthExpired && !sawValidToken) {
       acc.authExpired = true;
     }

@@ -645,6 +645,16 @@ function buildAccountCardElement(acc, activeEmail, activeGcp) {
     expBadge.style.marginLeft = "4px";
     expBadge.textContent = t.authExpiredBadge || "凭据已过期";
     titleWrap.appendChild(expBadge);
+  } else if (acc.lastProbeError?.message) {
+    const errBadge = document.createElement("span");
+    errBadge.className = "sig-status-badge mismatch";
+    errBadge.style.marginLeft = "4px";
+    errBadge.title = acc.lastProbeError.message;
+    const isLicense3501 = /#3501|valid license/i.test(acc.lastProbeError.message);
+    errBadge.textContent = isLicense3501
+      ? (t.licenseErrorBadge || "403 授权受限 (#3501)")
+      : (t.probeErrorBadge || "探测异常");
+    titleWrap.appendChild(errBadge);
   }
 
   top.appendChild(titleWrap);

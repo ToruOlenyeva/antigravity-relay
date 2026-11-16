@@ -329,6 +329,7 @@ async function ensureLocalCloudCodeProxyMounted(lsTarget, relayCfg, instMeta = n
   if (ok && instMeta) {
     instMeta.cloudCodeProxyMode = "local_proxy";
     instMeta.cloudCodeProxyUrl = proxyUrl;
+    instMeta.cloudCodeProxySyncedAt = Date.now();
     if (lsTarget.pid) instMeta.cloudCodeProxyPid = lsTarget.pid;
   }
   return ok;
@@ -348,7 +349,7 @@ function normalizeBaseModelFamily(rawModelStr) {
   if (/sonnet[._-\s]*4[._-]6/i.test(lower)) return "Claude Sonnet 4.6 (Thinking)";
   if (/opus[._-\s]*4[._-]6/i.test(lower)) return "Claude Opus 4.6 (Thinking)";
   if (/gpt[._-\s]*oss/i.test(lower)) return "GPT-OSS 120B";
-  return s.replace(/\s*\((Low|Medium|High|Max)\)\s*$/i, "").replace(/-(low|medium|high|max)$/i, "").trim();
+  return s.replace(/\s*\((Low|Medium|High|XHigh|Max|Extra)\)\s*$/i, "").replace(/-(low|medium|high|xhigh|max|extra)$/i, "").trim();
 }
 
 async function applyGcpTargetRoute(targetSpec, relayCfg, baseModelName = "", rawModelName = "", instMeta = null) {
@@ -396,14 +397,16 @@ async function applyTargetRoute(targetSpec, relayCfg, baseModelName = "", rawMod
   if (!relayCfg.__meta__) relayCfg.__meta__ = {};
   relayCfg.__meta__.lastRoutedModel = rawModelName || baseModelName || "";
 
+  const ensurePersonalProxyMounted = async () => {
+    const lsTarget = activeMeta?.lsRpcTarget || relayCfg?.__meta__?.lsRpcTarget;
+    if (lsTarget) {
+      await ensureLocalCloudCodeProxyMounted(lsTarget, relayCfg, activeMeta);
+    }
+  };
+
   if (!targetSpec || targetSpec === "follow_current") {
     const preferredPool = String(relayCfg?.routing?.personalQuotaPool || "prod").toLowerCase() === "daily" ? "daily" : "prod";
-    if (preferredPool === "prod") {
-      const lsTarget = activeMeta?.lsRpcTarget || relayCfg?.__meta__?.lsRpcTarget;
-      if (lsTarget) {
-        await ensureLocalCloudCodeProxyMounted(lsTarget, relayCfg, activeMeta);
-      }
-    }
+    await ensurePersonalProxyMounted();
     relayCfg.__meta__.lastRoutedChannelId = activeMeta?.activeChannelId || "";
     relayCfg.__meta__.lastRoutedPool = preferredPool;
     writeJsonSafe(relayConfigPath, relayCfg);
@@ -414,6 +417,7 @@ async function applyTargetRoute(targetSpec, relayCfg, baseModelName = "", rawMod
   if (resolvedSpec === "auto_poll") {
     resolvedSpec = resolveBestAvailableChannelSpec(baseModelName, relayCfg) || "follow_current";
     if (resolvedSpec === "follow_current") {
+      await ensurePersonalProxyMounted();
       relayCfg.__meta__.lastRoutedChannelId = activeMeta?.activeChannelId || "";
       writeJsonSafe(relayConfigPath, relayCfg);
       return false;

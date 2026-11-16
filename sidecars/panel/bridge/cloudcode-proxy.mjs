@@ -47,6 +47,61 @@ export {
   getValidPersonalAccessToken
 };
 
+function decodeCompressedBody(respBuf, contentEncoding) {
+  const enc = String(contentEncoding || "").toLowerCase();
+  if (enc.includes("gzip")) return zlib.gunzipSync(respBuf);
+  if (enc.includes("deflate")) return zlib.inflateSync(respBuf);
+  if (enc.includes("br")) return zlib.brotliDecompressSync(respBuf);
+  return respBuf;
+}
+
+function extractHttpErrorText(statusCode, rawBuf, contentEncoding = "") {
+  let text = "";
+  try {
+    text = decodeCompressedBody(rawBuf, contentEncoding).toString("utf8");
+  } catch {
+    text = rawBuf ? rawBuf.toString("utf8") : "";
+  }
+  try {
+    const parsed = JSON.parse(text);
+    const errObj = Array.isArray(parsed) ? parsed[0]?.error : parsed?.error;
+    const msg = String(errObj?.message || parsed?.error_description || parsed?.message || "").trim();
+    if (msg) return `HTTP ${statusCode}: ${msg}`.slice(0, 320);
+  } catch {}
+  const cleaned = text.replace(/\s+/g, " ").trim();
+  return cleaned ? `HTTP ${statusCode}: ${cleaned}`.slice(0, 320) : `HTTP ${statusCode}`;
+}
+
+function recordProxyFailure(cfg, info) {
+  if (!cfg.__meta__ || typeof cfg.__meta__ !== "object") cfg.__meta__ = {};
+  const entry = {
+    at: new Date().toISOString(),
+    statusCode: Number(info.statusCode || 0),
+    endpoint: info.endpoint || "",
+    rawModel: info.rawModel || "",
+    mappedModel: info.mappedModel || "",
+    baseFamily: info.baseFamily || "",
+    routeSpec: info.routeSpec || "",
+    targetChannelId: info.targetChannelId || "",
+    targetEmail: info.targetEmail || "",
+    targetPool: info.targetPool || "",
+    message: String(info.message || "").slice(0, 320)
+  };
+  cfg.__meta__.lastProxyError = entry;
+  const list = Array.isArray(cfg.__meta__.recentProxyErrors) ? cfg.__meta__.recentProxyErrors : [];
+  list.unshift(entry);
+  cfg.__meta__.recentProxyErrors = list.slice(0, 15);
+  const acc = entry.targetChannelId ? cfg.accounts?.[entry.targetChannelId] : null;
+  if (acc && (entry.statusCode === 401 || entry.statusCode === 403)) {
+    acc.lastProbeError = { at: Date.now(), status: entry.statusCode, message: entry.message };
+    if (entry.statusCode === 403 && /#3501|valid license/i.test(entry.message)) {
+      acc.routeBlockedUntil = Date.now() + 600000;
+      acc.routeBlockedReason = "HTTP 403 (#3501)";
+    }
+  }
+  writeRelayConfig(cfg);
+}
+
 export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
   const reqUrl = req.url || "";
   if (reqUrl === "/__agy_proxy_ping" || reqUrl.startsWith("/__agy_proxy_ping?")) {
@@ -123,19 +178,44 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
     let targetPool = defaultPool;
     let targetHostname = defaultUpstreamHostname;
     let strippedSigCount = 0;
+    let resolvedToken = "";
+    let tokenErrorAcc = null;
 
     if (isGenerateEndpoint && parsedBodyJson) {
       const bodyClone = JSON.parse(JSON.stringify(parsedBodyJson));
       if (routeSpec === "auto_poll") {
-        const bestCand = selectBestPersonalRouteCandidate(baseFamily, cfg, excludedIds);
-        if (bestCand) {
-          routedTargetAcc = bestCand.acc;
-          targetPool = bestCand.pool;
-          targetHostname = getCloudCodeHostnameForPool(targetPool);
-        } else if (activePersonalAcc && !excludedIds.has(`${activePersonalAcc.id}@${defaultPool}`)) {
-          routedTargetAcc = activePersonalAcc;
-          targetPool = defaultPool;
-          targetHostname = getCloudCodeHostnameForPool(targetPool);
+        let lastTokenFailedAcc = null;
+        for (let tokTry = 0; tokTry < 6; tokTry++) {
+          const bestCand = selectBestPersonalRouteCandidate(baseFamily, cfg, excludedIds);
+          let candAcc = null;
+          let candPool = defaultPool;
+          if (bestCand) {
+            candAcc = bestCand.acc;
+            candPool = bestCand.pool;
+          } else if (
+            activePersonalAcc &&
+            !excludedIds.has(activePersonalAcc.id) &&
+            !excludedIds.has(`${activePersonalAcc.id}@${defaultPool}`)
+          ) {
+            candAcc = activePersonalAcc;
+            candPool = defaultPool;
+          } else {
+            break;
+          }
+          const tok = await getValidPersonalAccessToken(cfg, candAcc);
+          if (tok) {
+            routedTargetAcc = candAcc;
+            targetPool = candPool;
+            targetHostname = getCloudCodeHostnameForPool(targetPool);
+            resolvedToken = tok;
+            break;
+          }
+          excludedIds.add(candAcc.id);
+          excludedIds.add(`${candAcc.id}@${candPool}`);
+          lastTokenFailedAcc = candAcc;
+        }
+        if (!routedTargetAcc && lastTokenFailedAcc) {
+          tokenErrorAcc = lastTokenFailedAcc;
         }
       } else if (typeof routeSpec === "string" && routeSpec.startsWith("account:")) {
         const rawRef = routeSpec.slice(8).trim();
@@ -166,6 +246,10 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
             routedTargetAcc = candidateAcc;
             targetPool = chosenPool;
             targetHostname = getCloudCodeHostnameForPool(targetPool);
+            resolvedToken = await getValidPersonalAccessToken(cfg, routedTargetAcc);
+            if (!resolvedToken && routedTargetAcc.id !== activePersonalAcc?.id) {
+              tokenErrorAcc = routedTargetAcc;
+            }
           }
         }
       } else if (activePersonalAcc) {
@@ -179,39 +263,37 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
         routedTargetAcc = activePersonalAcc;
         targetPool = chosenPool;
         targetHostname = getCloudCodeHostnameForPool(targetPool);
+        resolvedToken = await getValidPersonalAccessToken(cfg, routedTargetAcc);
       }
 
       outHeaders["Host"] = targetHostname;
       // 个人号之间共享同一套消费级 Tink 签名密钥，无感剥离跨通道遗留的 GCP 签名（含带 6 字节 Protobuf 长度头的长签名），防未手动点清除签名时触发 400
       strippedSigCount = stripThoughtSignaturesFromJson(bodyClone, { onlyGcpSignatures: true });
 
-      if (routedTargetAcc) {
-        const targetToken = await getValidPersonalAccessToken(cfg, routedTargetAcc);
-        if (targetToken) {
-          outHeaders["authorization"] = `Bearer ${targetToken}`;
-          delete outHeaders["Authorization"];
-          delete outHeaders["x-goog-user-project"];
-          delete outHeaders["X-Goog-User-Project"];
-          const targetCompanionPid = await ensurePersonalCompanionProjectId(cfg, routedTargetAcc, targetToken, targetHostname);
-          bodyClone.project = targetCompanionPid || (targetPool === "daily" ? "aicode-consumers" : "");
-          cfg.__meta__.lastRoutedChannelId = routedTargetAcc.id;
-          cfg.__meta__.lastRoutedPool = targetPool;
-          cfg.__meta__.lastProxyHit = {
-            at: new Date().toISOString(),
-            endpoint: reqUrl,
-            rawModel,
-            mappedModel: bodyClone.model || rawModel,
-            baseFamily,
-            routeSpec,
-            targetChannelId: routedTargetAcc.id,
-            targetEmail: routedTargetAcc.email,
-            targetPool,
-            targetHostname,
-            targetCompanionProject: bodyClone.project || "",
-            strippedSignatures: strippedSigCount
-          };
-          writeRelayConfig(cfg);
-        }
+      if (routedTargetAcc && resolvedToken) {
+        outHeaders["authorization"] = `Bearer ${resolvedToken}`;
+        delete outHeaders["Authorization"];
+        delete outHeaders["x-goog-user-project"];
+        delete outHeaders["X-Goog-User-Project"];
+        const targetCompanionPid = await ensurePersonalCompanionProjectId(cfg, routedTargetAcc, resolvedToken, targetHostname);
+        bodyClone.project = targetCompanionPid || (targetPool === "daily" ? "aicode-consumers" : "");
+        cfg.__meta__.lastRoutedChannelId = routedTargetAcc.id;
+        cfg.__meta__.lastRoutedPool = targetPool;
+        cfg.__meta__.lastProxyHit = {
+          at: new Date().toISOString(),
+          endpoint: reqUrl,
+          rawModel,
+          mappedModel: bodyClone.model || rawModel,
+          baseFamily,
+          routeSpec,
+          targetChannelId: routedTargetAcc.id,
+          targetEmail: routedTargetAcc.email,
+          targetPool,
+          targetHostname,
+          targetCompanionProject: bodyClone.project || "",
+          strippedSignatures: strippedSigCount
+        };
+        writeRelayConfig(cfg);
       }
       outBodyBuf = Buffer.from(JSON.stringify(bodyClone), "utf8");
     } else {
@@ -219,14 +301,32 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
     }
 
     outHeaders["Content-Length"] = outBodyBuf.length;
-    return { outHeaders, outBodyBuf, routedTargetAcc, targetPool, targetHostname };
+    return { outHeaders, outBodyBuf, routedTargetAcc, targetPool, targetHostname, tokenErrorAcc };
   };
 
   const reqStartAt = Date.now();
   const isStreamOrGenerate = /^\/v1internal:(streamGenerateContent|generateContent)\b/i.test(reqUrl);
 
   const executeUpstreamAttempt = async (attemptIdx) => {
-    const { outHeaders, outBodyBuf, routedTargetAcc, targetPool, targetHostname } = await prepareAttemptPayload();
+    const { outHeaders, outBodyBuf, routedTargetAcc, targetPool, targetHostname, tokenErrorAcc } = await prepareAttemptPayload();
+    if (tokenErrorAcc) {
+      const errMsg = tokenErrorAcc.lastTokenRefreshError?.message || "Target channel OAuth token unavailable or expired";
+      recordProxyFailure(cfg, {
+        statusCode: 401,
+        endpoint: reqUrl,
+        rawModel,
+        mappedModel: parsedBodyJson?.model || rawModel,
+        baseFamily,
+        routeSpec,
+        targetChannelId: tokenErrorAcc.id,
+        targetEmail: tokenErrorAcc.email,
+        targetPool,
+        message: `HTTP 401: ${errMsg}`
+      });
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: { code: 401, message: errMsg, status: "UNAUTHENTICATED" } }));
+      return;
+    }
 
     return new Promise((resolve) => {
       const upReq = https.request(
@@ -240,12 +340,58 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
           timeout: 120000
         },
         (upRes) => {
+          const isRetryableStatus = upRes.statusCode === 429 || upRes.statusCode === 401 || upRes.statusCode === 403;
           if (
             isGenerateEndpoint &&
-            upRes.statusCode === 429 &&
+            isRetryableStatus &&
             routedTargetAcc?.id &&
             attemptIdx < 5
           ) {
+            if (upRes.statusCode === 401 || upRes.statusCode === 403) {
+              const errChunks = [];
+              let errLen = 0;
+              upRes.on("data", (c) => {
+                if (errLen < 65536) {
+                  errChunks.push(c);
+                  errLen += c.length;
+                }
+              });
+              upRes.on("end", () => {
+                const errBuf = Buffer.concat(errChunks);
+                const errSummary = extractHttpErrorText(upRes.statusCode, errBuf, upRes.headers["content-encoding"]);
+                recordProxyFailure(cfg, {
+                  statusCode: upRes.statusCode,
+                  endpoint: reqUrl,
+                  rawModel,
+                  mappedModel: parsedBodyJson?.model || rawModel,
+                  baseFamily,
+                  routeSpec,
+                  targetChannelId: routedTargetAcc.id,
+                  targetEmail: routedTargetAcc.email,
+                  targetPool,
+                  message: errSummary
+                });
+                excludedIds.add(routedTargetAcc.id);
+                excludedIds.add(`${routedTargetAcc.id}@${targetPool}`);
+                const hasFallback = routeSpec === "auto_poll" && Boolean(selectBestPersonalRouteCandidate(baseFamily, cfg, excludedIds));
+                if (hasFallback) {
+                  executeUpstreamAttempt(attemptIdx + 1).then(resolve);
+                  return;
+                }
+                const respHeaders = {
+                  ...upRes.headers,
+                  "content-length": String(errBuf.length),
+                  "x-agy-routed-channel": routedTargetAcc?.id || "",
+                  "x-agy-routed-pool": targetPool || ""
+                };
+                delete respHeaders["transfer-encoding"];
+                delete respHeaders["Transfer-Encoding"];
+                res.writeHead(upRes.statusCode || 403, respHeaders);
+                res.end(errBuf);
+                resolve();
+              });
+              return;
+            }
             excludedIds.add(`${routedTargetAcc.id}@${targetPool}`);
             const altPool = targetPool === "prod" ? "daily" : "prod";
             const hasExplicitPoolLock = typeof routeSpec === "string" &&
@@ -271,8 +417,7 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
             upRes.on("end", () => {
               const respBuf = Buffer.concat(chunks);
               try {
-                const enc = String(upRes.headers["content-encoding"] || "").toLowerCase();
-                const decodedBuf = enc === "gzip" ? zlib.gunzipSync(respBuf) : respBuf;
+                const decodedBuf = decodeCompressedBody(respBuf, upRes.headers["content-encoding"]);
                 const respJson = JSON.parse(decodedBuf.toString("utf8"));
                 const cPid = String(
                   respJson?.cloudaicompanionProject?.id ||
@@ -297,18 +442,19 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
             return;
           }
 
-          if (isFetchModelsEndpoint && upRes.statusCode === 200 && !upRes.headers["content-encoding"]) {
+          if (isFetchModelsEndpoint && upRes.statusCode === 200) {
             const chunks = [];
             upRes.on("data", (c) => chunks.push(c));
             upRes.on("end", () => {
               let respBuf = Buffer.concat(chunks);
+              let modified = false;
               try {
-                const respJson = JSON.parse(respBuf.toString("utf8"));
+                const decodedBuf = decodeCompressedBody(respBuf, upRes.headers["content-encoding"]);
+                const respJson = JSON.parse(decodedBuf.toString("utf8"));
                 if (respJson?.models && typeof respJson.models === "object") {
                   learnModelsFromCloudCodeResponse(cfg, respJson);
                   const routeMap = cfg.routing?.models || {};
                   const curPool = getActivePersonalQuotaPool(cfg);
-                  let modified = false;
                   for (const [mKey, mObj] of Object.entries(respJson.models)) {
                     if (!mObj || typeof mObj !== "object" || /disabled$/i.test(mKey)) continue;
                     const mFamily = resolveBaseModelFamilyFromId(mKey, cfg);
@@ -351,6 +497,10 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
                 }
               } catch {}
               const respHeaders = { ...upRes.headers, "content-length": String(respBuf.length) };
+              if (modified) {
+                delete respHeaders["content-encoding"];
+                delete respHeaders["Content-Encoding"];
+              }
               delete respHeaders["transfer-encoding"];
               delete respHeaders["Transfer-Encoding"];
               res.writeHead(upRes.statusCode || 200, respHeaders);
@@ -368,8 +518,15 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
           let firstChunkAt = 0;
           const streamSampleChunks = [];
           let streamSampleLen = 0;
+          const isErrorStatus = Number(upRes.statusCode || 200) >= 400;
+          const errSampleChunks = [];
+          let errSampleLen = 0;
           upRes.on("data", (chunk) => {
             if (!firstChunkAt) firstChunkAt = Date.now();
+            if (isErrorStatus && errSampleLen < 16384) {
+              errSampleChunks.push(chunk);
+              errSampleLen += chunk.length;
+            }
             if (isStreamOrGenerate && !upRes.headers["content-encoding"] && streamSampleLen < 524288) {
               streamSampleChunks.push(chunk);
               streamSampleLen += chunk.length;
@@ -377,6 +534,26 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
             try { res.write(chunk); } catch {}
           });
           upRes.on("end", () => {
+            if (isErrorStatus) {
+              recordProxyFailure(cfg, {
+                statusCode: upRes.statusCode,
+                endpoint: reqUrl,
+                rawModel,
+                mappedModel: parsedBodyJson?.model || rawModel,
+                baseFamily,
+                routeSpec,
+                targetChannelId: routedTargetAcc?.id || "",
+                targetEmail: routedTargetAcc?.email || "",
+                targetPool,
+                message: extractHttpErrorText(upRes.statusCode, Buffer.concat(errSampleChunks), upRes.headers["content-encoding"])
+              });
+            } else if (isStreamOrGenerate && routedTargetAcc?.id && (routedTargetAcc.lastProbeError || routedTargetAcc.routeBlockedUntil || routedTargetAcc.lastTokenRefreshError)) {
+              delete routedTargetAcc.lastProbeError;
+              delete routedTargetAcc.routeBlockedUntil;
+              delete routedTargetAcc.routeBlockedReason;
+              delete routedTargetAcc.lastTokenRefreshError;
+              writeRelayConfig(cfg);
+            }
             if (isStreamOrGenerate && streamSampleChunks.length > 0) {
               try {
                 const endAt = Date.now();

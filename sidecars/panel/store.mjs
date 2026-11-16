@@ -684,6 +684,26 @@ export function writeRelayConfig(cfg) {
                 if (diskAcc.companionProjectId && !memAcc.companionProjectId) {
                   memAcc.companionProjectId = diskAcc.companionProjectId;
                 }
+                const diskTokExp = new Date(diskAcc.storedToken?.token?.expiry || 0).getTime() || 0;
+                const memTokExp = new Date(memAcc.storedToken?.token?.expiry || 0).getTime() || 0;
+                if (
+                  diskAcc.storedToken?.token?.access_token &&
+                  (!memAcc.storedToken?.token?.access_token || diskTokExp > memTokExp)
+                ) {
+                  memAcc.storedToken = diskAcc.storedToken;
+                  if (diskAcc.authExpired === false) memAcc.authExpired = false;
+                }
+                const diskErrAt = Number(diskAcc.lastProbeError?.at || 0);
+                const memErrAt = Number(memAcc.lastProbeError?.at || 0);
+                if (diskErrAt > memErrAt && diskErrAt >= memUpdated) {
+                  memAcc.lastProbeError = diskAcc.lastProbeError;
+                  if (diskAcc.routeBlockedUntil) memAcc.routeBlockedUntil = diskAcc.routeBlockedUntil;
+                  if (diskAcc.routeBlockedReason) memAcc.routeBlockedReason = diskAcc.routeBlockedReason;
+                } else if (diskUpdated > memUpdated && !diskAcc.lastProbeError && memAcc.lastProbeError && diskUpdated > memErrAt) {
+                  delete memAcc.lastProbeError;
+                  delete memAcc.routeBlockedUntil;
+                  delete memAcc.routeBlockedReason;
+                }
                 if (diskAcc.cachedQuotaByPool && typeof diskAcc.cachedQuotaByPool === "object") {
                   if (!memAcc.cachedQuotaByPool || typeof memAcc.cachedQuotaByPool !== "object") {
                     memAcc.cachedQuotaByPool = {};

@@ -379,7 +379,9 @@ export async function getValidPersonalAccessToken(cfg, targetAcc) {
   const refreshToken = baseToken.token.refresh_token || "";
   const expiryStr = baseToken.token.expiry || "";
   const expiryMs = expiryStr ? new Date(expiryStr).getTime() : 0;
-  const isExpiringSoon = !accessToken || baseToken.token.refreshedForRt !== refreshToken || (expiryMs > 0 && expiryMs - Date.now() < 300000);
+  const nowMs = Date.now();
+  const isAlreadyExpired = !accessToken || (expiryMs > 0 && expiryMs <= nowMs + 15000);
+  const isExpiringSoon = !accessToken || baseToken.token.refreshedForRt !== refreshToken || (expiryMs > 0 && expiryMs - nowMs < 300000);
 
   if (isExpiringSoon && refreshToken) {
     try {
@@ -390,10 +392,14 @@ export async function getValidPersonalAccessToken(cfg, targetAcc) {
         baseToken.token.access_token = accessToken;
         baseToken.token.refreshedForRt = refreshToken;
         baseToken.token.expiry = newExpiry;
-        if (targetAcc) targetAcc.authExpired = false;
+        if (targetAcc) {
+          targetAcc.authExpired = false;
+          delete targetAcc.lastTokenRefreshError;
+        }
         for (const item of Object.values(cfg.accounts || {})) {
           if (item.storedToken?.token?.refresh_token === refreshToken) {
             item.authExpired = false;
+            delete item.lastTokenRefreshError;
             item.storedToken.token.access_token = accessToken;
             item.storedToken.token.refreshedForRt = refreshToken;
             item.storedToken.token.expiry = newExpiry;
@@ -402,12 +408,22 @@ export async function getValidPersonalAccessToken(cfg, targetAcc) {
         writeRelayConfig(cfg);
       }
     } catch (err) {
+      if (targetAcc) {
+        targetAcc.lastTokenRefreshError = {
+          at: Date.now(),
+          message: String(err?.message || err || "refresh_failed").slice(0, 260)
+        };
+      }
       if (err && err.isAuthExpired) {
         if (targetAcc) targetAcc.authExpired = true;
         writeRelayConfig(cfg);
         return "";
       }
+      if (isAlreadyExpired) {
+        writeRelayConfig(cfg);
+        return "";
+      }
     }
   }
-  return accessToken;
+  return isAlreadyExpired && !accessToken ? "" : accessToken;
 }

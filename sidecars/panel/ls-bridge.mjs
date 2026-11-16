@@ -426,18 +426,33 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
 
   const deletedSet = new Set(Array.isArray(cfg.__meta__?.deletedChannelIds) ? cfg.__meta__.deletedChannelIds : []);
   const hasAnySavedAccounts = Object.keys(cfg.accounts || {}).length > 0;
+  const pickNewerOAuthToken = (incomingTok, existingTok) => {
+    if (!incomingTok?.token) return existingTok || null;
+    if (!existingTok?.token?.access_token) return incomingTok;
+    const inRt = String(incomingTok.token.refresh_token || "").trim();
+    const exRt = String(existingTok.token.refresh_token || "").trim();
+    if (inRt && exRt && inRt !== exRt) return incomingTok;
+    const inExp = new Date(incomingTok.token.expiry || 0).getTime() || 0;
+    const exExp = new Date(existingTok.token.expiry || 0).getTime() || 0;
+    return exExp > inExp ? existingTok : incomingTok;
+  };
 
   if (cred && credEmail && !isLiveGcp && cred.auth_method !== "gcp" && cred.auth_method !== "adc" && !credPid) {
     if (!cfg.__meta__.oauthTokensByEmail || typeof cfg.__meta__.oauthTokensByEmail !== "object") {
       cfg.__meta__.oauthTokensByEmail = {};
     }
+    const cleanedCredTok = buildCleanChannelToken(cred, "", "");
     if (cred.token?.refresh_token) {
-      cfg.__meta__.oauthTokensByEmail[credEmail] = buildCleanChannelToken(cred, "", "");
+      const mergedEmailTok = pickNewerOAuthToken(cleanedCredTok, cfg.__meta__.oauthTokensByEmail[credEmail]);
+      cfg.__meta__.oauthTokensByEmail[credEmail] = JSON.parse(JSON.stringify(mergedEmailTok));
     }
     const credPersonalKey = `${credEmail}#personal`;
     const existingCredPersonal = cfg.accounts[credPersonalKey];
     if (!deletedSet.has(credPersonalKey) && existingCredPersonal) {
-      const cleanedPersonalTok = buildCleanChannelToken(cred, "", "");
+      const mergedPersonalTok = JSON.parse(JSON.stringify(pickNewerOAuthToken(
+        cleanedCredTok,
+        existingCredPersonal?.storedToken || cfg.__meta__?.channelTokensById?.[credPersonalKey]
+      )));
       cfg.accounts[credPersonalKey] = {
         ...existingCredPersonal,
         id: credPersonalKey,
@@ -449,12 +464,12 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
         gcpBillingMode: "",
         gcpLocation: "",
         savedAt: existingCredPersonal?.savedAt || new Date().toISOString(),
-        storedToken: cleanedPersonalTok
+        storedToken: mergedPersonalTok
       };
       if (!cfg.__meta__.channelTokensById || typeof cfg.__meta__.channelTokensById !== "object") {
         cfg.__meta__.channelTokensById = {};
       }
-      cfg.__meta__.channelTokensById[credPersonalKey] = JSON.parse(JSON.stringify(cleanedPersonalTok));
+      cfg.__meta__.channelTokensById[credPersonalKey] = JSON.parse(JSON.stringify(mergedPersonalTok));
     }
   }
 
@@ -471,7 +486,13 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
       const rawPersBase = isLiveCredMatch
         ? cred
         : (existingPersonal?.storedToken?.token?.refresh_token ? existingPersonal.storedToken : matchingCred);
-      const cleanedPersTok = rawPersBase ? buildCleanChannelToken(rawPersBase, "", "") : null;
+      const baseCleanPersTok = rawPersBase ? buildCleanChannelToken(rawPersBase, "", "") : null;
+      const cleanedPersTok = baseCleanPersTok
+        ? JSON.parse(JSON.stringify(pickNewerOAuthToken(
+            baseCleanPersTok,
+            existingPersonal?.storedToken || cfg.__meta__?.oauthTokensByEmail?.[activeEmail] || cfg.__meta__?.channelTokensById?.[personalKey]
+          )))
+        : null;
       if (cleanedPersTok?.token?.refresh_token) {
         if (!cfg.__meta__.oauthTokensByEmail || typeof cfg.__meta__.oauthTokensByEmail !== "object") {
           cfg.__meta__.oauthTokensByEmail = {};
@@ -570,39 +591,42 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
       ? "https://cloudcode-pa.googleapis.com"
       : "https://daily-cloudcode-pa.googleapis.com";
     const targetUrl = desiredProxyMode === "local_proxy" ? localProxyUrl : directUpstreamUrl;
+    const lastProxySyncAgo = Date.now() - Number(instMeta.cloudCodeProxySyncedAt || 0);
+    const needsProxySync =
+      instMeta.cloudCodeProxyPid !== ls.pid ||
+      instMeta.cloudCodeProxyMode !== desiredProxyMode ||
+      instMeta.cloudCodeProxyUrl !== targetUrl ||
+      lastProxySyncAgo < 0 ||
+      lastProxySyncAgo > 20000;
     if (desiredProxyMode === "local_proxy") {
-      if (
-        instMeta.cloudCodeProxyPid !== ls.pid ||
-        instMeta.cloudCodeProxyMode !== "local_proxy" ||
-        instMeta.cloudCodeProxyUrl !== targetUrl
-      ) {
+      if (needsProxySync) {
         await callLsRpc(ls, "SetCloudCodeURL", { url: targetUrl })
           .then(() => {
             instMeta.cloudCodeProxyPid = ls.pid;
             instMeta.cloudCodeProxyMode = "local_proxy";
             instMeta.cloudCodeProxyUrl = targetUrl;
+            instMeta.cloudCodeProxySyncedAt = Date.now();
             if (!ctx.isIsolatedInstance) {
               cfg.__meta__.cloudCodeProxyPid = ls.pid;
               cfg.__meta__.cloudCodeProxyMode = "local_proxy";
               cfg.__meta__.cloudCodeProxyUrl = targetUrl;
+              cfg.__meta__.cloudCodeProxySyncedAt = instMeta.cloudCodeProxySyncedAt;
             }
           })
           .catch(() => {});
       }
-    } else if (
-      instMeta.cloudCodeProxyMode === "local_proxy" ||
-      instMeta.cloudCodeProxyPid !== ls.pid ||
-      instMeta.cloudCodeProxyUrl !== targetUrl
-    ) {
+    } else if (needsProxySync) {
       await callLsRpc(ls, "SetCloudCodeURL", { url: targetUrl })
         .then(() => {
           instMeta.cloudCodeProxyPid = ls.pid;
           instMeta.cloudCodeProxyMode = "direct";
           instMeta.cloudCodeProxyUrl = targetUrl;
+          instMeta.cloudCodeProxySyncedAt = Date.now();
           if (!ctx.isIsolatedInstance) {
             cfg.__meta__.cloudCodeProxyPid = ls.pid;
             cfg.__meta__.cloudCodeProxyMode = "direct";
             cfg.__meta__.cloudCodeProxyUrl = targetUrl;
+            cfg.__meta__.cloudCodeProxySyncedAt = instMeta.cloudCodeProxySyncedAt;
           }
         })
         .catch(() => {});
@@ -958,7 +982,10 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
   writeRelayConfig(cfg);
 
   const channelList = Object.values(cfg.accounts || {})
-    .map(({ storedToken, ...rest }) => rest)
+    .map(({ storedToken, ...rest }) => ({
+      ...rest,
+      tokenExpiry: storedToken?.token?.expiry || null
+    }))
     .sort((a, b) => {
       if (a.email !== b.email) return a.email.localeCompare(b.email);
       if (a.channelType !== b.channelType) return a.channelType === "personal" ? -1 : 1;
@@ -974,6 +1001,11 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
     lsPort: ls?.port || 0,
     clientVersion: getDetectedClientVersion(ctx.lsLogFile),
     personalQuotaPool: getActivePersonalQuotaPool(cfg),
+    cloudCodeProxyMode: instMeta?.cloudCodeProxyMode || cfg.__meta__?.cloudCodeProxyMode || "",
+    cloudCodeProxyUrl: instMeta?.cloudCodeProxyUrl || cfg.__meta__?.cloudCodeProxyUrl || "",
+    lastProxyHit: cfg.__meta__?.lastProxyHit || null,
+    lastProxyError: cfg.__meta__?.lastProxyError || null,
+    recentProxyErrors: Array.isArray(cfg.__meta__?.recentProxyErrors) ? cfg.__meta__.recentProxyErrors : [],
     instance: instanceStatus,
     activeAccount: displayAccount,
     availableModels: displayModels,
