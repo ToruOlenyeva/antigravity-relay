@@ -26,13 +26,14 @@ antigravity-relay/
 ├── sidecars/
 │   └── panel/                   # Native build-free decoupled Sidecar panel
 │       ├── bridge/              # Cohesive backend domain sub-modules
-│       │   ├── channel-catalog.mjs # Five-tier detection, model catalog & normalization
-│       │   ├── cloudcode-proxy.mjs # Local transparent proxy, rewrite & 429 failover
-│       │   ├── oauth-launcher.mjs  # Isolated OAuth, multi-instance launcher & telemetry
-│       │   ├── quota-probe.mjs     # Official dynamic model whitelist & quota probes
-│       │   ├── route-selector.mjs  # Model family resolver & two-layer personal router
-│       │   ├── signature-scrub.mjs # Offline SQLite Protobuf signature scrubber
-│       │   └── wincred-ls.mjs      # WinCred P/Invoke, multi-client OAuth & LS RPC
+│       │   ├── channel-catalog.mjs   # Tier detection, API error parsing, model catalog & normalization
+│       │   ├── cloudcode-discovery.mjs # CloudCode API transport, GCP project discovery & response parsing
+│       │   ├── cloudcode-proxy.mjs   # Local transparent proxy, rewrite & 429 failover
+│       │   ├── oauth-launcher.mjs    # Isolated OAuth, multi-instance launcher & telemetry
+│       │   ├── quota-probe.mjs       # Multi-channel probe orchestrator, error merge & 600s cooldown
+│       │   ├── route-selector.mjs    # Model family resolver & two-layer personal router
+│       │   ├── signature-scrub.mjs   # Offline SQLite Protobuf signature scrubber
+│       │   └── wincred-ls.mjs        # WinCred P/Invoke, multi-client OAuth & LS RPC
 │       ├── app.js               # Frontend interaction, custom dropdowns, and sync engine
 │       ├── i18n.js              # Strictly isolated English and Chinese dictionary
 │       ├── index.html           # Frontend HTML skeleton structure
@@ -42,8 +43,8 @@ antigravity-relay/
 │       ├── sidecar.json         # Antigravity Sidecar container manifest
 │       ├── store.mjs            # Atomic config persistence and stale model sanitizer
 │       ├── styles.css           # Frontend flat adaptive theme stylesheet
-│       ├── ui-channels-drawers.js # Channel cards, one-click re-login & action drawers view
-│       └── ui-session-quota.js  # Session telemetry, project total & dual-pool quota view
+│       ├── ui-channels-drawers.js # Channel cards, expandable error drawer, re-login & action views
+│       └── ui-session-quota.js  # Session telemetry, project total & quota ring view
 ├── agy-relay-config.example.json # Sanitized example configuration file
 ├── hooks.json                   # Antigravity Hook configuration
 ├── open-panel.bat               # Standalone window quick launcher script
@@ -78,17 +79,17 @@ antigravity-relay/
 +-----------------------------------------------------------------------+
 ```
 
-## 2. Full-Tier Detection Matrix and Three-Pool Quota Probes
+## 2. Full-Tier Detection Matrix, Quota Probes & Structured Error Diagnosis
 
-### 2.1 Dynamic Client Version Handshake, Dual Personal Quota Ledgers (Prod / Daily) and Three-Pool Retrieval
-`wincred-ls.mjs` and `quota-probe.mjs` dynamically extract the live client version from `language_server.log` (e.g., `Language server version: 2.29.0`, updating automatically across client upgrades with zero hardcoding) and pass the complete `{ ideType: "JETSKI", ideVersion: "<clientVersion>", pluginType: "GEMINI", platform: "WINDOWS_AMD64" }` metadata to `/v1internal:loadCodeAssist` to obtain each personal account's dedicated private companion project ID (such as `rising-fact-p41fc`, avoiding the `"aicode-consumers"` downgraded free-pool 429 trap). Because each personal account holds two independent official quota ledgers, the probe concurrently queries both `https://cloudcode-pa.googleapis.com` (`prod` pool) and `https://daily-cloudcode-pa.googleapis.com` (`daily` pool) for `/v1internal:fetchAvailableModels` and `/v1internal:retrieveUserQuotaSummary` (while GCP billing channels independently target `cloudcode-pa.googleapis.com`):
-- With the dynamic native headers and dedicated companion project ID, both `prod` and `daily` gateways return all three independent official quota groups for paid `Pro` and `Ultra` accounts—`Gemini Models` (5-hour + weekly limits), `Claude and GPT Models` (5-hour + weekly limits), and `Gemini 4 Argon` (`bucketId: "gemini-argon-wtu-weekly"` weekly limit)—along with per-pool available models, cached under `acc.cachedQuotaByPool = { prod, daily }` for instant switching in the top panel.
+### 2.1 Dynamic Client Version Handshake, LoadCodeAssist Fallback & Daily Quota Retrieval
+`wincred-ls.mjs` and `cloudcode-discovery.mjs` / `quota-probe.mjs` extract the live client version from `language_server.log` (e.g., `Language server version: 2.29.0`, adapting automatically to client upgrades with zero hardcoding) and pass `{ ideType: "JETSKI", ideVersion: "<clientVersion>", pluginType: "GEMINI", platform: "WINDOWS_AMD64" }` to `/v1internal:loadCodeAssist` (querying `https://cloudcode-pa.googleapis.com` first for personal accounts and automatically falling back to `https://daily-cloudcode-pa.googleapis.com` on non-200 or empty responses) to acquire a dedicated companion project ID (avoiding the `"aicode-consumers"` downgraded pool 429 trap). Personal quota retrieval then targets the Daily ledger (`https://daily-cloudcode-pa.googleapis.com`) via `/v1internal:fetchAvailableModels` and `/v1internal:retrieveUserQuotaSummary` (`GCP` channels query `cloudcode-pa.googleapis.com` directly):
+- With native client headers and a valid companion project ID, upstream delivers all three official quota groups for paid `Pro` and `Ultra` accounts—`Gemini Models` (5-hour + weekly limits), `Claude and GPT Models` (5-hour + weekly limits), and `Gemini 4 Argon` (`bucketId: "gemini-argon-wtu-weekly"` weekly limit)—cached under `acc.cachedQuota` and `acc.cachedQuotaByPool.daily`.
 - Handling Go `proto3` zero-value omission: when a bucket or model reports `remainingFraction === undefined` alongside a non-empty `resetTime`, the engine accurately evaluates remaining quota as `0%` (exhausted) rather than defaulting to `100%`.
 
-### 2.2 Five-Tier Channel Matrix (`Free` / `Plus` / `Pro` / `Ultra` / `GCP`) & Pure Dynamic Model Whitelist
-`detectPersonalAccountTier` and `parseCloudCodeModelsAndQuota` evaluate upstream metadata dynamically without static model templates:
-1. <b>`agentModelSorts` Whitelist & `Notice` Grace-Period Preservation</b>: Personal channel probes send `{}` to `/v1internal:fetchAvailableModels`, extracting `agentModelSorts[0].groups[].modelIds` and keeping models that carry `quotaInfo` and are not marked `disabled` or `Unavailable`. Models tagged `tagTitle: "Notice"` (such as `Claude Sonnet 4.6 (Thinking)`, `Claude Opus 4.6 (Thinking)`, and `GPT-OSS 120B (Medium)` on promotional partner Pro plans during their grace period) remain active until upstream flips their tag to `Unavailable`.
-2. <b>Multi-Client OAuth Refresh Pool, `refresh_token` Isolation & Expired Credential Guard</b>: `wincred-ls.mjs` rotates across official OAuth clients when refreshing tokens and propagates a refreshed `access_token` strictly to channels sharing the exact same `refresh_token` (eliminating cross-contamination between `#personal` and `#gcp` channels under the same email); when token refresh returns `HTTP 400/401 invalid_grant` (expired or revoked token), it flags `isAuthExpired` and `acc.authExpired = true`, excludes the channel from `auto_poll`, blocks broken credential writes on "Enable" by automatically launching a browser re-login flow pre-filled with `loginHint`, and renders an "Auth Expired" badge with a one-click "Re-login" button on the channel card.
+### 2.2 Tier Classification (Unknown Fallback), Structured Error Drawers & Multi-Instance Isolation
+`channel-catalog.mjs`, `cloudcode-discovery.mjs`, and `quota-probe.mjs` classify tiers, assemble live model whitelists, and normalize probe diagnostics from upstream metadata without static templates:
+1. <b>`agentModelSorts` Whitelist, `Notice` Preservation & `Unknown` Fallback</b>: Personal probes send `{}` to `/v1internal:fetchAvailableModels`, extracting `agentModelSorts[0].groups[].modelIds` where `quotaInfo` exists and the entry is neither `disabled` nor `Unavailable` (keeping `tagTitle: "Notice"` grace-period models); `Free` / `Plus` / `Pro` / `Ultra` tiers are confirmed only when `tierConfirmed` / `tierSourceConfirmed` or explicit quota markers hold, falling back to `Unknown` (`tierCode = "Unknown"`, `tierName = "Unknown"`) rather than defaulting to `Pro` when unconfirmed probe attempts fail.
+2. <b>Isolated OAuth Refresh, Merged `lastProbeError` & 600s Routing Cooldown</b>: `wincred-ls.mjs` propagates refreshed `access_token` values strictly by matching `refresh_token`; `parseCloudCodeApiError` and `quota-probe.mjs` merge `status`, `apiStatus`, `reason`, `category` (`license_3501`, `validation_required`), `detailMessage`, `validationUrl`, and `helpLinks` across primary HTTP failures, refresh errors, and `loadCodeAssist`'s `ineligibleTiers[].reasonMessage` into `acc.lastProbeError`, stamping a `600000ms` `routeBlockedUntil` cooldown on `#3501` and `VALIDATION_REQUIRED` errors; the UI keeps the top quota section concise while showing clickable error badges on channel cards that expand an action drawer with browser verification link launching (`/api/open-external-url`), re-login, and re-probe controls.
 3. <b>Cross-Talk-Free Multi-Instance Launcher (`+ Multi-Instance`)</b>: `oauth-launcher.mjs` passes `--user-data-dir=<path>` (with `=`) so Chromium switches its `userData` lock directory prior to `app.requestSingleInstanceLock()`, copies `app_storage.json` to bypass the onboarding wizard, and preserves the primary window's `writer_id` while temporarily staging the target channel's credential (preventing `cred_store.go`'s 1-second polling loop from switching the primary window), automatically restoring the primary credential once the new instance logs `Auth succeeded`.
 
 ## 3. Dual-Layer Channel Architecture: Primary Reload Switch vs Reload-Free Personal Routing
@@ -137,19 +138,24 @@ All endpoints are served identically from both the host-assigned internal Sideca
 - <b>Content-Type</b>: `text/event-stream; charset=utf-8`
 - <b>Description</b>: Broadcasts updated snapshots in `0ms` across all open panels whenever quotas refresh, OAuth completes, or channel states change.
 
-### 4.3 Channel and Account Management Endpoints
+### 4.3 Channel, Instance & Diagnostic Management Endpoints
 - <b>Save Currently Logged-In Account</b>: `POST /api/save-current-account`
-- <b>Start Isolated OAuth Login</b>: `POST /api/add-account-oauth`
-- <b>Cancel Pending OAuth Login</b>: `POST /api/cancel-oauth`
+- <b>Start Isolated OAuth Login</b>: `POST /api/start-oauth-login` (accepts optional target channel and login hint payload)
+- <b>Cancel Pending OAuth Login</b>: `POST /api/cancel-oauth-login`
+- <b>Switch Active GCP Billing Project</b>: `POST /api/switch-project` (Payload: `{ "projectId": "my-proj" }`)
 - <b>Discover Accessible GCP Projects</b>: `POST /api/discover-gcp-projects` (Payload: `{ "email": "user@gmail.com" }`)
-- <b>Add Independent Channel (Personal or GCP)</b>: `POST /api/add-gcp-channel` (Payload includes `email`, `channelType`, `gcpProjectId`, `gcpBillingMode`, `gcpLocation`)
-- <b>Enable Target Channel (Quad-Store Sync + Cross-Channel Instance Auto-Restart)</b>: `POST /api/switch-account` (Payload: `{ "channelId": "user@gmail.com#personal" }`)
-- <b>Launch Isolated Multi-Instance</b>: `POST /api/launch-instance` (Payload: `{ "channelId": "user@gmail.com#gcp:my-proj" }`)
-- <b>Dual-Mode Thought Signature Scrub</b>: `POST /api/scrub-signatures` (Payload: `{ "scope": "conversation" | "project_mismatch", "conversationId": "<uuid>" }`)
-- <b>Remove Target Channel</b>: `POST /api/remove-account` (Payload: `{ "channelId": "user@gmail.com#personal" }`)
-- <b>Probe Non-Active Channel Dual-Pool Quota</b>: `POST /api/probe-channel-quota` (Payload: `{ "channelId": "user@gmail.com#personal" }`)
-- <b>Switch Personal Channel Official Quota Ledger (Prod / Daily Pool)</b>: `POST /api/switch-quota-pool` (Payload: `{ "pool": "prod" | "daily" }`)
+- <b>Add Independent Personal Channel</b>: `POST /api/add-personal-channel` (Payload: `{ "email": "user@gmail.com" }`)
+- <b>Add Independent GCP Channel Card</b>: `POST /api/add-gcp-channel` (Payload includes `email`, `projectId`, `gcpBillingMode`, `gcpLocation`)
+- <b>Update Account Project Binding or Alias</b>: `POST /api/update-account` (Payload includes `accountId`, `gcpProjectId`, `gcpBillingMode`, `gcpLocation`, `alias`)
+- <b>Enable Target Channel (Quad-Store Sync + Cross-Channel Instance Auto-Restart)</b>: `POST /api/switch-account` (Payload: `{ "accountId": "user@gmail.com#personal", "scrubSignatures": true, "conversationId": "<uuid>" }`)
+- <b>Check Ephemeral Model Compute Route</b>: `POST /api/route-channel` (Payload: `{ "accountId": "user@gmail.com#personal" }`)
+- <b>Launch Isolated Multi-Instance</b>: `POST /api/launch-instance` (Payload: `{ "accountId": "user@gmail.com#gcp:my-proj" }`)
+- <b>Dual-Mode Thought Signature Scrub</b>: `POST /api/scrub-signatures` (Payload: `{ "mode": "current" | "mismatched", "conversationId": "<uuid>" }`)
+- <b>Probe Channel Quota and Diagnostic State</b>: `POST /api/probe-channel-quota` (Payload: `{ "channelId": "user@gmail.com#personal" }`)
+- <b>Open Google Verification or Help URL in System Browser</b>: `POST /api/open-external-url` (Payload: `{ "url": "https://accounts.google.com/..." }`; restricts to HTTPS under `google.com` / `googleapis.com` / `googleusercontent.com`)
+- <b>Switch Personal Quota Ledger Compatibility Endpoint</b>: `POST /api/switch-quota-pool` (Payload: `{ "pool": "daily" | "prod" }`)
+- <b>Delete Target Channel Snapshot</b>: `POST /api/delete-account` (Payload: `{ "accountId": "user@gmail.com#personal" }`)
 
 ### 4.4 Model Routing and Localization Endpoints
-- <b>Update Model Compute Route</b>: `POST /api/set-route` (Payload: `{ "targetType": "models", "key": "Gemini 3.8 Flash", "routeValue": "auto_poll" }`)
+- <b>Save Model and Subagent Compute Routing Rules</b>: `POST /api/save-routing` (Payload includes `modelId`, `variantIds`, `targetSpec`, `routeScope`, `subagentDefaultTarget`, `autoRelayOnLowQuota`)
 - <b>Switch UI Language and Persist Metadata</b>: `POST /api/set-language` (Payload: `{ "lang": "zh" }` or `{ "lang": "en" }`)

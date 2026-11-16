@@ -26,13 +26,13 @@
 
 ## ✨ 核心特性
 
-- <b>全等级精准识别与个人双服独立账本透视</b>：基于动态客户端版本握手与 CloudCode 原生探针，精准区分 <code>Free</code>（无会员）、<code>Plus</code>（含渠道赠送版）、<code>Pro</code>、<code>Ultra</code> 与 <code>GCP</code> 五大通道等级，支持个人账号 <code>正式服 (Prod)</code> 与 <code>Daily 服</code> 两套独立配额账本一键切换，1:1 还原 <code>Gemini 模型</code>、<code>Claude 和 GPT 模型</code> 及 <code>Gemini 4 Argon</code> 周限额/5 小时限额与重置倒计时。
+- <b>全等级精准识别、Daily 账本透视与 Unknown 保底</b>：基于动态客户端版本握手（优先正式网关并自动回落 Daily 网关）与 CloudCode 原生探针，精准区分 <code>Free</code>（无会员）、<code>Plus</code>（含渠道赠送版）、<code>Pro</code>、<code>Ultra</code> 与 <code>GCP</code> 通道等级（无法确认订阅归属时按 <code>Unknown</code> 保底而不误标为 <code>Pro</code>），直连个人 <code>Daily 服</code> 官方账本 1:1 还原 <code>Gemini 模型</code>、<code>Claude 和 GPT 模型</code> 及 <code>Gemini 4 Argon</code> 周限额/5 小时限额与重置倒计时。
 - <b>个人通道免重载无感路由</b>：内置本地透明反向代理（默认 <code>8091</code> 端口，支持 <code>8091..8095</code> 及随机端口自动递增防冲突回退），按模型家族与目标账本（<code>Prod / Daily</code>）实时替换目标个人账号 <code>Bearer Token</code> 与上游网关，对话全程 0 界面重载、0 中断。
 - <b>双层重置时间智能自动轮询</b>：每个模型支持设置「跟随当前通道」、「指定个人账号通道」或「自动轮询有余额通道」（跨全个人账号 <code>Prod / Daily</code> 双池执行「先周限额重置时间、再 5 小时限额重置时间」两层排序，同窗口优先锁定当前激活账号，并在主账号 <code>0%</code> 时自动解除前端模型灰显锁死）。
 - <b>双层思维签名识别、WAL 截断与无损剥离</b>：实时识别并展示当前会话及历史会话的签名归属徽章（<code>GCP</code> / <code>个人</code> / <code>无签名</code>），卡片右上角提供「仅清除当前会话签名」与「全项目扫描清除跨通道不匹配签名」双模式清理（内置 SQLite <code>readOk</code> 锁守卫与 <code>wal_checkpoint(TRUNCATE)</code> 防签名反弹），结合跨号代理自动剥离彻底根除 <code>Invalid thought signature (400)</code> 报错。
 - <b>会话统计与项目汇总一键切换</b>：直读官方 <code>transcript.jsonl</code> 原生 Token 账单，支持在卡片内一键按钮切换「当前会话统计」（支持下拉切换项目内任意历史会话）与「项目汇总」（统计当前项目全部会话累计用词、缓存命中率与按模型细分用量）。
 - <b>独立多开实例、四重登录态同步与双通道互锁</b>：支持 <code>+ 多开实例</code> 一键拉起独立用户目录的个人或 <code>GCP</code> 实例（当个人与 <code>GCP</code> 双通道实例同时在场时自动互锁防串扰）；跨通道切换内置 Antigravity 2.29+ 四重登录态同步（<code>WinCred</code> + <code>state.vscdb</code> Protobuf Sentinel + <code>app_storage.json</code> + <code>auth_method</code> 隔离）与单实例无感自重启。
-- <b>旁路零打断 OAuth 登录与凭据过期防切崩重登</b>：通过独立本地随机端口拉起官方 Google OAuth 2.0 + PKCE S256 授权流程；当存量账号 <code>refresh_token</code> 过期失效（<code>invalid_grant</code>）时，自动从轮询池隔离、在点击「启用」时拦截失效凭据写入并自动拉起预填该邮箱的浏览器重登，同时在卡片上提供「凭据过期」告警与一键「重新登录」按钮。
+- <b>旁路零打断 OAuth 登录、报错抽屉诊断与过期防切崩</b>：通过独立本地随机端口拉起官方 Google OAuth 2.0 + PKCE S256 授权流程；除自动识别凭据过期（<code>invalid_grant</code>）外，还能解析上游结构化错误与 <code>ineligibleTiers</code>（如 <code>VALIDATION_REQUIRED</code>、<code>403 (#3501)</code>）并对异常账号实施路由退避冷却；顶部配额区保持简洁错误提示，账号卡片仅展示紧凑可点击报错徽章，点击后展开详情抽屉并支持一键在系统浏览器打开 Google 验证/帮助链接或重新登录。
 
 ---
 
@@ -87,7 +87,7 @@ antigravity-relay/
 │   └── proto-scrub.cjs          # Protobuf 跨通道思考签名离线剥离引擎
 ├── sidecars/
 │   └── panel/                   # 原生免构建前后端分离 Sidecar 面板
-│       ├── bridge/              # 后端高内聚业务子模块目录
+│       ├── bridge/              # 后端高内聚业务子模块目录（含发现、探针、路由与反代）
 │       ├── app.js               # 前端核心交互、自定义下拉与状态同步引擎
 │       ├── i18n.js              # 前端中英双语严格隔离词典
 │       ├── index.html           # 前端响应式骨架页面
@@ -97,8 +97,8 @@ antigravity-relay/
 │       ├── sidecar.json         # Sidecar 容器清单契约
 │       ├── store.mjs            # 配置原子化落盘与历史脏数据清洗引擎
 │       ├── styles.css           # 纯扁平深浅色自适应主题样式表
-│       ├── ui-channels-drawers.js # 通道列表、一键重登与操作抽屉视图模块
-│       └── ui-session-quota.js  # 会话统计、项目汇总与双服配额环视图模块
+│       ├── ui-channels-drawers.js # 通道列表、可展开报错抽屉、一键重登与操作视图模块
+│       └── ui-session-quota.js  # 会话统计、项目汇总与配额环（含简洁错误提示）视图模块
 ├── agy-relay-config.example.json # 脱敏示例配置档案
 ├── hooks.json                   # Antigravity 生命周期 Hook 契约
 ├── open-panel.bat               # 独立小窗模式快速启动脚本
@@ -112,9 +112,10 @@ antigravity-relay/
 
 ## 📖 使用方法指南
 
-### 1. 实时配额监控、会话/项目统计切换与双模式清签名
+### 1. 实时配额监控、错误抽屉诊断与双模式清签名
 在 Antigravity 右侧辅助栏打开「账号与配额管理」面板：
-- 顶部「会话与使用量」下拉框默认跟随当前实例激活通道（带绿色圆点标记），也可随时点选任意已收录通道预览其最新配额与重置倒计时；系统自动标定 <code>Free</code>、<code>Plus</code>、<code>Pro</code>、<code>Ultra</code> 与 <code>GCP</code> 方形彩色徽章。
+- 顶部「会话与使用量」下拉框默认跟随当前实例激活通道（带绿色圆点标记），也可随时点选任意已收录通道预览其最新配额与重置倒计时；系统按官方订阅源标定 <code>Free</code>、<code>Plus</code>、<code>Pro</code>、<code>Ultra</code>、<code>GCP</code> 或未确认时的 <code>Unknown</code> 方形徽章。若账号受限导致配额拉取失败，顶部仅展示简洁报错提示，避免冗长异常占用视图空间。
+- <b>可点击报错徽章与引导抽屉</b>：当某账号触发 <code>403 (#3501)</code>、<code>VALIDATION_REQUIRED</code> 或凭据过期时，对应通道卡片亮起紧凑红色报错徽章；点击徽章原地展开详情抽屉查看完整错误原因与地区/权限说明，并可直接调用系统浏览器打开安全验证外链、重新登录或重新探测。
 - 「当前会话统计 / 项目汇总」卡片支持点击标题旁按钮一键切换「会话统计」（可下拉查看项目内任意会话并显示 <code>签名: GCP</code> / <code>签名: 个人</code> / <code>签名: 无签名</code> 徽章）与「项目汇总」，右上角「清除签名」按钮提供「仅清除当前会话签名」与「全项目扫描清除不匹配签名」双模式菜单。
 
 ### 2. 独立通道池、四重登录态同步与独立多开实例

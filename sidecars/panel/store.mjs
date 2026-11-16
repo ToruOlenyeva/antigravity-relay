@@ -681,7 +681,13 @@ export function writeRelayConfig(cfg) {
               }
             }
 
-            // 保护各通道刚探测出的非空配额缓存不被慢速并发快照回退为空数组
+            // 保护各通道刚探测出的有效配额缓存不被慢速并发快照覆盖，同时禁止跨等级旧 Pro 缓存反盖新 Free 实时快照
+            const isValidQuotaSnapshot = (q) => Boolean(
+              q &&
+              typeof q === "object" &&
+              ((Array.isArray(q.quotaGroups) && q.quotaGroups.length > 0) ||
+               (q.probedVia === "cloudcode_http" && Array.isArray(q.availableModels) && q.availableModels.length > 0))
+            );
             if (diskCfg.accounts && typeof diskCfg.accounts === "object" && cfg.accounts && typeof cfg.accounts === "object") {
               for (const [accId, diskAcc] of Object.entries(diskCfg.accounts)) {
                 const memAcc = cfg.accounts[accId];
@@ -690,9 +696,15 @@ export function writeRelayConfig(cfg) {
                 const memUpdated = Number(memAcc.cachedQuota?.updatedAt || 0);
                 const diskErrAt = Number(diskAcc.lastProbeError?.at || 0);
                 const memErrAt = Number(memAcc.lastProbeError?.at || 0);
-                const diskHasGroups = Array.isArray(diskAcc.cachedQuota?.quotaGroups) && diskAcc.cachedQuota.quotaGroups.length > 0;
-                const memHasGroups = Array.isArray(memAcc.cachedQuota?.quotaGroups) && memAcc.cachedQuota.quotaGroups.length > 0;
-                if ((diskUpdated > memUpdated && (diskHasGroups || !memHasGroups)) || (diskHasGroups && !memHasGroups)) {
+                const diskValid = isValidQuotaSnapshot(diskAcc.cachedQuota);
+                const memValid = isValidQuotaSnapshot(memAcc.cachedQuota);
+                const diskTier = String(diskAcc.cachedQuota?.tierCode || diskAcc.tierCode || "").trim();
+                const memTier = String(memAcc.tierCode || memAcc.cachedQuota?.tierCode || "").trim();
+                const tierCompatible = !diskTier || !memTier || diskTier === "Unknown" || memTier === "Unknown" || diskTier === memTier;
+                if (
+                  tierCompatible &&
+                  ((diskUpdated > memUpdated && (diskValid || !memValid)) || (!memValid && diskValid && memErrAt <= diskUpdated))
+                ) {
                   memAcc.cachedQuota = diskAcc.cachedQuota;
                   if (!memAcc.tierConfirmed || !memAcc.tierRaw || diskUpdated > Math.max(memUpdated, memErrAt)) {
                     if (diskAcc.tierCode) memAcc.tierCode = diskAcc.tierCode;
@@ -732,9 +744,15 @@ export function writeRelayConfig(cfg) {
                     if (dPool && typeof dPool === "object") {
                       const dUpd = Number(dPool.updatedAt || 0);
                       const mUpd = Number(mPool?.updatedAt || 0);
-                      const dGroups = Array.isArray(dPool.quotaGroups) && dPool.quotaGroups.length > 0;
-                      const mGroups = Array.isArray(mPool?.quotaGroups) && mPool.quotaGroups.length > 0;
-                      if (!mPool || (dUpd > mUpd && (dGroups || !mGroups)) || (dGroups && !mGroups)) {
+                      const dValid = isValidQuotaSnapshot(dPool);
+                      const mValid = isValidQuotaSnapshot(mPool);
+                      const dTier = String(dPool.tierCode || diskAcc.tierCode || "").trim();
+                      const mTier = String(memAcc.tierCode || mPool?.tierCode || "").trim();
+                      const poolTierCompatible = !dTier || !mTier || dTier === "Unknown" || mTier === "Unknown" || dTier === mTier;
+                      if (
+                        poolTierCompatible &&
+                        (!mPool || (dUpd > mUpd && (dValid || !mValid)) || (!mValid && dValid && memErrAt <= dUpd))
+                      ) {
                         memAcc.cachedQuotaByPool[poolKey] = dPool;
                       }
                     }

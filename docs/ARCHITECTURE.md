@@ -26,13 +26,14 @@ antigravity-relay/
 ├── sidecars/
 │   └── panel/                   # 原生免构建前后端物理分离 Sidecar 面板
 │       ├── bridge/              # 后端高内聚业务子模块目录
-│       │   ├── channel-catalog.mjs # 五大通道等级判定、动态模型目录与凭据归一化
-│       │   ├── cloudcode-proxy.mjs # 本地透明反向代理、请求改写与 429 故障转移
-│       │   ├── oauth-launcher.mjs  # 旁路 OAuth 登录、多开隔离实例与会话遥测
-│       │   ├── quota-probe.mjs     # 官方动态模型白名单与三配额池探针引擎
-│       │   ├── route-selector.mjs  # 模型家族映射与双层重置时间个人通道选路器
-│       │   ├── signature-scrub.mjs # SQLite Protobuf 思维签名离线无损剥离器
-│       │   └── wincred-ls.mjs      # WinCred 凭据读写、多客户端刷新与 LS RPC
+│       │   ├── channel-catalog.mjs   # 通道等级判定、API 错误解析、动态模型目录与凭据归一化
+│       │   ├── cloudcode-discovery.mjs # CloudCode API 传输、GCP 项目多源发现与模型/配额解析
+│       │   ├── cloudcode-proxy.mjs   # 本地透明反向代理、请求改写与 429 故障转移
+│       │   ├── oauth-launcher.mjs    # 旁路 OAuth 登录、多开隔离实例与会话遥测
+│       │   ├── quota-probe.mjs       # 多通道配额探测编排、错误合并与 600s 路由退避控制
+│       │   ├── route-selector.mjs    # 模型家族映射与双层重置时间个人通道选路器
+│       │   ├── signature-scrub.mjs   # SQLite Protobuf 思维签名离线无损剥离器
+│       │   └── wincred-ls.mjs        # WinCred 凭据读写、多客户端刷新与 LS RPC
 │       ├── app.js               # 前端核心交互、自定义下拉与状态同步引擎
 │       ├── i18n.js              # 前端中英双语严格隔离词典
 │       ├── index.html           # 前端纯骨架页面
@@ -42,8 +43,8 @@ antigravity-relay/
 │       ├── sidecar.json         # Antigravity Sidecar 容器元数据契约
 │       ├── store.mjs            # 配置原子化落盘与脏模型自动清洗
 │       ├── styles.css           # 前端纯扁平自适应主题样式表
-│       ├── ui-channels-drawers.js # 通道列表、一键重登与操作抽屉视图模块
-│       └── ui-session-quota.js  # 会话统计、项目汇总与双服配额环视图模块
+│       ├── ui-channels-drawers.js # 通道列表、可展开报错抽屉、一键重登与操作视图模块
+│       └── ui-session-quota.js  # 会话统计、项目汇总与配额环视图模块
 ├── agy-relay-config.example.json # 脱敏示例配置档案
 ├── hooks.json                   # Antigravity Hook 配置文件
 ├── open-panel.bat               # 独立小窗快速启动脚本
@@ -78,17 +79,17 @@ antigravity-relay/
 +-----------------------------------------------------------------------+
 ```
 
-## 2. 全等级识别矩阵与三大配额池探针机制
+## 2. 全等级识别矩阵、配额探针与结构化错误诊断
 
-### 2.1 动态客户端版本握手、个人双服独立账本（Prod / Daily）与三大配额池获取
-`wincred-ls.mjs` 与 `quota-probe.mjs` 实时从宿主 `language_server.log` 动态提取当前客户端版本号（如 `Language server version: 2.29.0`，随客户端升级自动同步，零硬编码），并在调用 `/v1internal:loadCodeAssist` 时携带完整 `{ ideType: "JETSKI", ideVersion: "<clientVersion>", pluginType: "GEMINI", platform: "WINDOWS_AMD64" }` 载荷获取个人账号专属私有伴生项目 ID（如 `rising-fact-p41fc`，彻底规避漏传版本导致的 `"aicode-consumers"` 免费降级池 429 陷阱）。在此基础上，每个个人账号天然拥有两套独立核算的官方配额账本，探针并发向 `https://cloudcode-pa.googleapis.com`（正式服 `prod`）与 `https://daily-cloudcode-pa.googleapis.com`（Daily 服 `daily`）发起 `/v1internal:fetchAvailableModels` 与 `/v1internal:retrieveUserQuotaSummary` 请求（GCP 计费通道则独立固定走 `cloudcode-pa.googleapis.com`）：
-- 仅在携带动态原生请求头与真实伴生项目 ID 下，正式服 `prod` 与 Daily 服 `daily` 均会对付费 `Pro` 与 `Ultra` 账户完整下发各自独立的三大配额组：`Gemini Models`（5 小时 + 周限额）、`Claude and GPT Models`（5 小时 + 周限额）以及 `Gemini 4 Argon`（`bucketId: "gemini-argon-wtu-weekly"` 周限额）与可用模型列表，缓存在 `acc.cachedQuotaByPool = { prod, daily }`，支持顶部面板一键切换查看。
+### 2.1 动态客户端版本握手、LoadCodeAssist 回落机制与 Daily 配额获取
+`wincred-ls.mjs` 与 `cloudcode-discovery.mjs` / `quota-probe.mjs` 实时从宿主 `language_server.log` 动态提取当前客户端版本号（如 `Language server version: 2.29.0`，随客户端升级自动同步，零硬编码），并在调用 `/v1internal:loadCodeAssist` 时携带完整 `{ ideType: "JETSKI", ideVersion: "<clientVersion>", pluginType: "GEMINI", platform: "WINDOWS_AMD64" }` 载荷（个人账号优先请求 `https://cloudcode-pa.googleapis.com`，失败或返回空体时自动回落至 `https://daily-cloudcode-pa.googleapis.com`）以获取私有伴生项目 ID（彻底规避漏传版本导致的 `"aicode-consumers"` 免费降级池 429 陷阱）。完成握手后，个人通道统一通过 Daily 官方服务池（`https://daily-cloudcode-pa.googleapis.com`）发起 `/v1internal:fetchAvailableModels` 与 `/v1internal:retrieveUserQuotaSummary`（GCP 计费通道则固定请求 `cloudcode-pa.googleapis.com`）：
+- 在携带动态原生请求头与有效伴生项目 ID 下，上游会对付费 `Pro` 与 `Ultra` 账户下发三大配额组：`Gemini Models`（5 小时 + 周限额）、`Claude and GPT Models`（5 小时 + 周限额）以及 `Gemini 4 Argon`（`bucketId: "gemini-argon-wtu-weekly"` 周限额）与可用模型列表，并缓存至 `acc.cachedQuota` 与 `acc.cachedQuotaByPool.daily`。
 - 针对 Go `proto3` 零值序列化省略机制：当某个配额桶或模型的 `remainingFraction === undefined` 但存在 `resetTime` 时，系统精确判定为 `0%`（已耗尽），杜绝误判为 `100%`。
 
-### 2.2 五大通道等级（`Free` / `Plus` / `Pro` / `Ultra` / `GCP`）与官方纯动态模型白名单
-系统通过 `detectPersonalAccountTier` 与 `parseCloudCodeModelsAndQuota` 严格按照 Google 官方下发的元数据实时判定通道等级与可用模型（零静态硬编码模板）：
-1. <b>`agentModelSorts` 推荐白名单与 `Notice` 过渡期模型保留</b>：个人通道向 `/v1internal:fetchAvailableModels` 传入 `{}` 空载荷，提取官方 `agentModelSorts[0].groups[].modelIds` 白名单并过滤存在 `quotaInfo` 且非 `disabled` / `Unavailable` 的模型；对带有 `tagTitle: "Notice"`（如 Jio 渠道合作版 Pro 在过渡期内仍开放的 `Claude Sonnet 4.6 (Thinking)`、`Claude Opus 4.6 (Thinking)`、`GPT-OSS 120B (Medium)`）的模型完整保留，直至官方切换为 `Unavailable` 时自动下线。
-2. <b>多 OAuth Client 轮询池、按 `refresh_token` 严格隔离与凭据过期防切崩重登</b>：`wincred-ls.mjs` 内置多组官方 OAuth Client 轮询刷新池，每次刷新获得的 `access_token` 仅同步至持有相同 `refresh_token` 的通道卡片（杜绝同邮箱 `#personal` 与 `#gcp` 令牌交叉覆盖）；当刷新返回 `HTTP 400/401 invalid_grant`（凭据过期或吊销）时自动标记 `isAuthExpired` 与 `acc.authExpired = true`，自动从 `auto_poll` 轮询池剔除，并在用户点击「启用」时拦截失效凭据写入、自动拉起预填该邮箱（`loginHint`）的浏览器重登流程，同时在卡片展示「凭据过期」告警与一键「重新登录」按钮。
+### 2.2 通道等级识别（含 Unknown 保底）、结构化错误抽屉与隔离多开
+`channel-catalog.mjs`、`cloudcode-discovery.mjs` 与 `quota-probe.mjs` 严格依据 Google 官方元数据判定通道等级、构建动态模型白名单并抽提结构化错误（零静态模板）：
+1. <b>`agentModelSorts` 推荐白名单、`Notice` 保留与 `Unknown` 保底</b>：个人通道向 `/v1internal:fetchAvailableModels` 传入 `{}`，提取 `agentModelSorts[0].groups[].modelIds` 并过滤存在 `quotaInfo` 且非 `disabled` / `Unavailable` 的模型（保留 `tagTitle: "Notice"` 过渡期模型）；仅在 `tierConfirmed` / `tierSourceConfirmed` 或官方模型特征明确时锁定 `Free` / `Plus` / `Pro` / `Ultra`，若尚未确认订阅源且探测失败，则保底标记为 `Unknown` 而非误标为 `Pro`。
+2. <b>多 OAuth Client 刷新隔离、结构化 `lastProbeError` 合并与 600s 路由冷却</b>：`wincred-ls.mjs` 按严格匹配的 `refresh_token` 分发刷新后的 `access_token`；`parseCloudCodeApiError` 与 `quota-probe.mjs` 从失败端点、刷新异常及 `loadCodeAssist` 返回的 `ineligibleTiers[].reasonMessage` 中联合提取 `status`、`apiStatus`、`reason`、`category`（识别 `license_3501`、`validation_required`）、`detailMessage`、`validationUrl` 与 `helpLinks` 并写入 `acc.lastProbeError`，命中 `#3501` 或 `VALIDATION_REQUIRED` 时自动写入 `600000ms` 的 `routeBlockedUntil` 路由退避冷却；前端顶部配额区保持简洁错误提示，账号卡片通过可点击紧凑徽章按需展开详情抽屉并支持经 `/api/open-external-url` 在系统浏览器打开 Google 验证/帮助外链或一键重登。
 3. <b>独立多开实例（`+ 多开实例`）免串扰架构</b>：`oauth-launcher.mjs` 通过等号拼接的 `--user-data-dir=<path>` 参数让 Chromium 在 `app.requestSingleInstanceLock()` 前切换独立用户目录锁，同步复制 `app_storage.json` 跳过首次向导直达 Hub，并在临时写入目标通道凭据时保留主窗口原本的 `writer_id`（防止主窗口 `cred_store.go` 1s 轮询被误触发切换），待新实例日志出现 `Auth succeeded` 后自动还原主实例凭据。
 
 ## 3. 双层通道架构：主通道重载切换 vs 个人通道免重载路由
@@ -137,19 +138,24 @@ antigravity-relay/
 - <b>响应类型</b>：`text/event-stream; charset=utf-8`
 - <b>说明</b>：当配额刷新、OAuth 授权完成或通道状态变更时，`0ms` 向所有打开的面板推送最新快照。
 
-### 4.3 通道与账号管理接口
+### 4.3 通道、多开与诊断管理接口
 - <b>收录当前已登录账号</b>：`POST /api/save-current-account`
-- <b>启动旁路零打断 OAuth 登录</b>：`POST /api/add-account-oauth`
-- <b>取消进行中的 OAuth 登录</b>：`POST /api/cancel-oauth`
+- <b>启动旁路零打断 OAuth 登录</b>：`POST /api/start-oauth-login`（支持可选透传目标通道与登录提示参数）
+- <b>取消进行中的 OAuth 登录</b>：`POST /api/cancel-oauth-login`
+- <b>切换当前 GCP 计费项目</b>：`POST /api/switch-project`（请求体：`{ "projectId": "my-proj" }`）
 - <b>扫描账号可用 GCP 项目列表</b>：`POST /api/discover-gcp-projects`（请求体：`{ "email": "user@gmail.com" }`）
-- <b>添加独立通道（个人或 GCP）</b>：`POST /api/add-gcp-channel`（请求体包含 `email`、`channelType`、`gcpProjectId`、`gcpBillingMode`、`gcpLocation`）
-- <b>启用指定通道（四重同步 + 跨通道自动重启当前实例）</b>：`POST /api/switch-account`（请求体：`{ "channelId": "user@gmail.com#personal" }`）
-- <b>拉起独立多开实例</b>：`POST /api/launch-instance`（请求体：`{ "channelId": "user@gmail.com#gcp:my-proj" }`）
-- <b>双模式清除思考签名</b>：`POST /api/scrub-signatures`（请求体：`{ "scope": "conversation" | "project_mismatch", "conversationId": "<uuid>" }`）
-- <b>删除指定通道</b>：`POST /api/remove-account`（请求体：`{ "channelId": "user@gmail.com#personal" }`）
-- <b>查询非当前通道双服缓存配额</b>：`POST /api/probe-channel-quota`（请求体：`{ "channelId": "user@gmail.com#personal" }`）
-- <b>切换个人通道官方配额账本（正式服 Prod / Daily 服）</b>：`POST /api/switch-quota-pool`（请求体：`{ "pool": "prod" | "daily" }`）
+- <b>添加独立个人通道</b>：`POST /api/add-personal-channel`（请求体：`{ "email": "user@gmail.com" }`）
+- <b>添加独立 GCP 通道卡片</b>：`POST /api/add-gcp-channel`（请求体包含 `email`、`projectId`、`gcpBillingMode`、`gcpLocation`）
+- <b>更新账号绑定项目或备注信息</b>：`POST /api/update-account`（请求体包含 `accountId`、`gcpProjectId`、`gcpBillingMode`、`gcpLocation`、`alias`）
+- <b>启用指定通道（四重同步 + 跨通道自动重启当前实例）</b>：`POST /api/switch-account`（请求体：`{ "accountId": "user@gmail.com#personal", "scrubSignatures": true, "conversationId": "<uuid>" }`）
+- <b>静默模型算力借道检查</b>：`POST /api/route-channel`（请求体：`{ "accountId": "user@gmail.com#personal" }`）
+- <b>拉起独立多开实例</b>：`POST /api/launch-instance`（请求体：`{ "accountId": "user@gmail.com#gcp:my-proj" }`）
+- <b>双模式清除思考签名</b>：`POST /api/scrub-signatures`（请求体：`{ "mode": "current" | "mismatched", "conversationId": "<uuid>" }`）
+- <b>主动探测指定通道配额与诊断状态</b>：`POST /api/probe-channel-quota`（请求体：`{ "channelId": "user@gmail.com#personal" }`）
+- <b>在系统浏览器打开 Google 验证或帮助外链</b>：`POST /api/open-external-url`（请求体：`{ "url": "https://accounts.google.com/..." }`，仅放行 HTTPS 下的 `google.com` / `googleapis.com` / `googleusercontent.com`）
+- <b>切换个人通道配额账本兼容入口</b>：`POST /api/switch-quota-pool`（请求体：`{ "pool": "daily" | "prod" }`）
+- <b>删除指定通道快照</b>：`POST /api/delete-account`（请求体：`{ "accountId": "user@gmail.com#personal" }`）
 
 ### 4.4 模型路由与国际化设置接口
-- <b>设置模型算力路由规则</b>：`POST /api/set-route`（请求体：`{ "targetType": "models", "key": "Gemini 3.8 Flash", "routeValue": "auto_poll" }`）
+- <b>保存模型与子智能体算力路由规则</b>：`POST /api/save-routing`（请求体包含 `modelId`、`variantIds`、`targetSpec`、`routeScope`、`subagentDefaultTarget`、`autoRelayOnLowQuota`）
 - <b>动态切换中英文界面并持久化</b>：`POST /api/set-language`（请求体：`{ "lang": "zh" }` 或 `{ "lang": "en" }`）

@@ -26,13 +26,13 @@
 
 ## ✨ Key Features
 
-- <b>Full-Tier Detection & Dual Personal Quota Ledgers</b>: Powered by dynamic client version handshakes and CloudCode probes to classify <code>Free</code>, <code>Plus</code> (including promotional partner plans), <code>Pro</code>, <code>Ultra</code>, and <code>GCP</code> channels, supporting one-click switching between independent <code>Prod</code> and <code>Daily</code> personal quota ledgers with live <code>Gemini Models</code>, <code>Claude and GPT Models</code>, and <code>Gemini 4 Argon</code> weekly/5-hour countdowns.
+- <b>Full-Tier Detection, Daily Quota Ledger & Unknown Fallback</b>: Powered by dynamic client version handshakes (trying the production endpoint first with automatic Daily fallback) and CloudCode probes to classify <code>Free</code>, <code>Plus</code> (including promotional partner plans), <code>Pro</code>, <code>Ultra</code>, and <code>GCP</code> channels (falling back to <code>Unknown</code> instead of defaulting to <code>Pro</code> when tier source is unconfirmed), querying the personal <code>Daily</code> ledger for live <code>Gemini Models</code>, <code>Claude and GPT Models</code>, and <code>Gemini 4 Argon</code> weekly/5-hour countdowns.
 - <b>Reload-Free Personal Channel Routing</b>: Built-in local transparent reverse proxy (defaulting to port <code>8091</code> with automatic fallback across <code>8091..8095</code> and OS ephemeral ports) dynamically swaps the target personal account's <code>Bearer Token</code> and upstream gateway (<code>Prod / Daily</code>) per model family without reloading the UI or interrupting active chats.
 - <b>Two-Layer Reset-First Auto-Polling</b>: Configure each model to "Follow Current Channel", pin a specific personal account, or "Auto-Poll Available Channels" (sorting all <code>Prod / Daily</code> personal buckets by weekly reset time first and 5-hour reset time second, prioritizing the active account within identical reset windows, and unlocking models when the primary account hits <code>0%</code>).
 - <b>Signature Badge Detection, WAL Truncation & Dual-Mode Scrubbing</b>: Detects and badges each conversation's thought signature origin (<code>GCP</code> / <code>Personal</code> / <code>No Sig</code>) in real time, providing a dual-mode "Clear Sig" menu backed by SQLite <code>readOk</code> lock guards and <code>wal_checkpoint(TRUNCATE)</code> to prevent signature bounce-back, alongside in-flight proxy stripping to eliminate <code>Invalid thought signature (400)</code> errors.
 - <b>One-Click Session Stats & Project Summary Toggle</b>: Reads official <code>transcript.jsonl</code> token telemetry directly, allowing instant toggle button switching between "Current Session Stats" (with per-conversation selector) and "Project Summary" (aggregating total tokens, prefix cache hits, and per-model breakdown across the entire project).
 - <b>Isolated Multi-Instance, Quad-Store Auth Sync & Dual-Channel Interlock</b>: Launch isolated Personal or <code>GCP</code> instances via <code>+ Multi-Instance</code> (automatically interlocking cross-channel switches when both channels are active); channel switching performs Antigravity 2.29+ quad-store auth sync (<code>WinCred</code> + <code>state.vscdb</code> Protobuf Sentinel + <code>app_storage.json</code> + <code>auth_method</code> isolation) and per-instance auto-restart.
-- <b>Zero-Interruption OAuth Login & Expired Credential Guard</b>: Launches official Google OAuth 2.0 + PKCE S256 on an isolated callback port; when a saved account's <code>refresh_token</code> expires or is revoked (<code>invalid_grant</code>), it automatically isolates the account from auto-polling, blocks broken switches by opening a pre-filled browser re-login flow, and surfaces an "Auth Expired" badge with a one-click "Re-login" button on the card.
+- <b>Zero-Interruption OAuth, Clickable Error Drawers & Credential Guard</b>: Launches official Google OAuth 2.0 + PKCE S256 on an isolated callback port; beyond expired tokens (<code>invalid_grant</code>), it extracts structured errors such as <code>VALIDATION_REQUIRED</code> and <code>403 (#3501)</code> from upstream responses and <code>ineligibleTiers</code> to apply routing cooldowns—keeping the quota card concise while rendering compact clickable error badges on channel cards that expand into a detail drawer with system-browser verification links and one-click re-login.
 
 ---
 
@@ -87,7 +87,7 @@ antigravity-relay/
 │   └── proto-scrub.cjs          # Offline Protobuf thoughtSignature scrubbing engine
 ├── sidecars/
 │   └── panel/                   # Native build-free decoupled Sidecar panel
-│       ├── bridge/              # Cohesive backend domain sub-modules
+│       ├── bridge/              # Cohesive backend sub-modules (discovery, probe, routing, proxy)
 │       ├── app.js               # Frontend interaction, custom dropdowns, and sync engine
 │       ├── i18n.js              # Strictly isolated English and Chinese dictionary
 │       ├── index.html           # Responsive frontend HTML skeleton
@@ -97,8 +97,8 @@ antigravity-relay/
 │       ├── sidecar.json         # Sidecar container manifest
 │       ├── store.mjs            # Atomic config persistence and legacy model sanitizer
 │       ├── styles.css           # Flat adaptive dark and light theme stylesheet
-│       ├── ui-channels-drawers.js # Channel cards, one-click re-login & action drawers view
-│       └── ui-session-quota.js  # Session telemetry, project total & dual-pool quota view
+│       ├── ui-channels-drawers.js # Channel cards, expandable error drawer, re-login & action views
+│       └── ui-session-quota.js  # Session telemetry, project total & quota ring (concise error) view
 ├── agy-relay-config.example.json # Sanitized example configuration file
 ├── hooks.json                   # Antigravity lifecycle Hook manifest
 ├── open-panel.bat               # Standalone window quick launcher script
@@ -112,9 +112,10 @@ antigravity-relay/
 
 ## 📖 Usage Guide
 
-### 1. Real-Time Quota Monitoring, Session/Project Toggle & Dual-Mode Signature Scrub
+### 1. Real-Time Quota Monitoring, Error Drawers & Dual-Mode Signature Scrub
 Open the "Account & Quota" tab in the right Auxiliary Pane:
-- The top "Session & Usage" selector tracks the current instance's active channel by default (marked with a green dot) and lets you inspect any saved channel's live quota rings and reset countdowns with <code>Free</code>, <code>Plus</code>, <code>Pro</code>, <code>Ultra</code>, and <code>GCP</code> badges.
+- The top "Session & Usage" selector tracks the current instance's active channel by default (marked with a green dot) and previews any saved channel's live quota rings and reset countdowns with <code>Free</code>, <code>Plus</code>, <code>Pro</code>, <code>Ultra</code>, <code>GCP</code>, or unconfirmed <code>Unknown</code> badges. When quota retrieval fails, the top section renders only a concise error notice to avoid clutter.
+- <b>Clickable Error Badge & Diagnostic Drawer</b>: When a channel triggers <code>403 (#3501)</code>, <code>VALIDATION_REQUIRED</code>, or expired credentials, its card shows a compact red error badge; clicking it expands an inline drawer displaying upstream details and region/license reasons, with direct actions to open verification URLs in your system browser, re-login, or re-probe.
 - Click the toggle button inside the telemetry card to switch between "Session Stats" (with per-conversation selector and live <code>Sig: GCP</code> / <code>Sig: Personal</code> / <code>Sig: None</code> badge) and "Project Summary", or click "Clear Sig" to scrub either the current conversation or all mismatched project signatures.
 
 ### 2. Independent Channel Pool, Quad-Store Auth Sync & Isolated Multi-Instance

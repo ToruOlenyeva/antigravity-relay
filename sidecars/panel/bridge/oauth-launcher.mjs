@@ -1616,14 +1616,20 @@ export function startIsolatedOAuthFlow(optionsOrCallback = {}, maybeCallback = n
         if (Array.isArray(cfg.__meta__.deletedChannelIds)) {
           cfg.__meta__.deletedChannelIds = cfg.__meta__.deletedChannelIds.filter((id) => id !== personalKey);
         }
-        cfg.accounts[personalKey] = {
-          ...(cfg.accounts[personalKey] || {}),
+        const existingAcc = cfg.accounts[personalKey] || {};
+        const nextAcc = {
+          ...existingAcc,
           id: personalKey, alias: email, email, channelType: "personal",
           authExpired: false,
-          tierCode: cfg.accounts[personalKey]?.tierConfirmed ? (cfg.accounts[personalKey]?.tierCode || "Unknown") : "Unknown",
-          tierName: cfg.accounts[personalKey]?.tierConfirmed ? (cfg.accounts[personalKey]?.tierName || "Unknown") : "Unknown",
+          tierCode: existingAcc.tierConfirmed ? (existingAcc.tierCode || "Unknown") : "Unknown",
+          tierName: existingAcc.tierConfirmed ? (existingAcc.tierName || "Unknown") : "Unknown",
           gcpProjectId: "", savedAt: new Date().toISOString(), storedToken
         };
+        delete nextAcc.lastProbeError;
+        delete nextAcc.routeBlockedUntil;
+        delete nextAcc.routeBlockedReason;
+        delete nextAcc.lastTokenRefreshError;
+        cfg.accounts[personalKey] = nextAcc;
         writeRelayConfig(cfg);
 
         try {

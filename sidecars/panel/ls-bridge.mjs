@@ -714,8 +714,8 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
         effectiveClientModels,
         lsModeMatches ? rawTierName : (cfg.accounts?.[liveChannelKey]?.tierName || ""),
         lsModeMatches ? activeTierId : "",
-        cachedHasArgon,
-        cachedTierCode
+        (lsModeMatches && effectiveClientModels.length > 0) ? undefined : cachedHasArgon,
+        (lsModeMatches && (rawTierName || activeTierId)) ? "" : cachedTierCode
       );
   const hasLiveArgonAccess = liveTierInfo.hasArgonAccess;
   const isLivePaidProOrUltra = liveTierInfo.isPaidProOrUltra;
@@ -772,25 +772,16 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
     }
   }
   let availableModels = Array.from(groupedModelMap.values());
-  if (availableModels.length > 0 && effectiveClientModels.length > 0) {
+  if (activeGcpProject && lsHasGcpModels && availableModels.length > 0) {
     if (!cfg.__meta__.liveTierModels || typeof cfg.__meta__.liveTierModels !== "object") {
       cfg.__meta__.liveTierModels = {};
     }
-    if (activeGcpProject && lsHasGcpModels) {
-      cfg.__meta__.liveTierModels.gcp = availableModels.map((m) => ({
-        label: m.label,
-        modelId: m.modelId,
-        variantIds: [...(m.variantIds || [m.label])]
-      }));
-      writeRelayConfig(cfg);
-    } else if (!activeGcpProject) {
-      cfg.__meta__.liveTierModels.personal = availableModels.map((m) => ({
-        label: m.label,
-        modelId: m.modelId,
-        variantIds: [...(m.variantIds || [m.label])]
-      }));
-      writeRelayConfig(cfg);
-    }
+    cfg.__meta__.liveTierModels.gcp = availableModels.map((m) => ({
+      label: m.label,
+      modelId: m.modelId,
+      variantIds: [...(m.variantIds || [m.label])]
+    }));
+    writeRelayConfig(cfg);
   }
   if (
     activeGcpProject &&
@@ -831,16 +822,22 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
     ? rawQuotaGroups.filter((g) => !/argon/i.test(g.id || g.displayName || ""))
     : rawQuotaGroups;
 
-  const personalNativeTemplate = cfg.__meta__?.liveTierModels?.personal || [];
-  if (!activeGcpProject && quotaGroups.length > 0 && liveTierInfo.tierCode !== "Free") {
+  if (!activeGcpProject && quotaGroups.length > 0 && liveTierInfo.tierCode !== "Free" && availableModels.length > 0) {
     availableModels = buildProModelsFromQuotaGroups(
       quotaGroups,
-      cfg.accounts?.[liveChannelKey]?.cachedQuota?.availableModels || [],
+      [],
       availableModels,
-      personalNativeTemplate,
+      [],
       hasLiveArgonAccess
     );
   }
+
+  const isValidPersonalSnapshot = (snap) => Boolean(
+    snap &&
+    typeof snap === "object" &&
+    ((Array.isArray(snap.quotaGroups) && snap.quotaGroups.length > 0) ||
+     (snap.probedVia === "cloudcode_http" && Array.isArray(snap.availableModels) && snap.availableModels.length > 0))
+  );
 
   const detectedChannelId = activeEmail
     ? (activeGcpProject ? `${activeEmail}#gcp:${activeGcpProject}` : `${activeEmail}#personal`)
@@ -869,7 +866,7 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
   if (!activeGcpProject && detectedChannelId && cfg.accounts[detectedChannelId]) {
     let detCached = cfg.accounts[detectedChannelId].cachedQuota;
     const poolMatchedSnapshot = cfg.accounts[detectedChannelId].cachedQuotaByPool?.[activePool];
-    if (poolMatchedSnapshot?.quotaGroups?.length) {
+    if (isValidPersonalSnapshot(poolMatchedSnapshot)) {
       detCached = poolMatchedSnapshot;
       cfg.accounts[detectedChannelId].cachedQuota = poolMatchedSnapshot;
     }
@@ -878,7 +875,7 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
     if (
       forceWinCred ||
       detCached?.probedVia !== "cloudcode_http" ||
-      !detCached?.quotaGroups?.length ||
+      !isValidPersonalSnapshot(detCached) ||
       (detCachedPool && detCachedPool !== activePool) ||
       !cfg.accounts[detectedChannelId].companionProjectId ||
       (Date.now() - detCachedAt > 45000)
@@ -894,35 +891,68 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
         if (freshAcc.cachedQuotaByPool) {
           cfg.accounts[detectedChannelId].cachedQuotaByPool = freshAcc.cachedQuotaByPool;
         }
-      }
-      if (probed) {
-        if (Array.isArray(probed.quotaGroups) && probed.quotaGroups.length > 0) {
-          quotaGroups = probed.quotaGroups;
+        if (freshAcc.tierCode) cfg.accounts[detectedChannelId].tierCode = freshAcc.tierCode;
+        if (freshAcc.tierName) cfg.accounts[detectedChannelId].tierName = freshAcc.tierName;
+        if (freshAcc.tierConfirmed) cfg.accounts[detectedChannelId].tierConfirmed = true;
+        if (freshAcc.tierRaw) cfg.accounts[detectedChannelId].tierRaw = freshAcc.tierRaw;
+        if (freshAcc.lastProbeError) {
+          cfg.accounts[detectedChannelId].lastProbeError = freshAcc.lastProbeError;
+        } else {
+          delete cfg.accounts[detectedChannelId].lastProbeError;
+          delete cfg.accounts[detectedChannelId].routeBlockedUntil;
+          delete cfg.accounts[detectedChannelId].routeBlockedReason;
         }
+      }
+      const probeSucceeded = Boolean(!freshAcc?.lastProbeError && isValidPersonalSnapshot(probed));
+      if (probeSucceeded) {
+        quotaGroups = Array.isArray(probed.quotaGroups) ? probed.quotaGroups : [];
         if (Array.isArray(probed.availableModels) && probed.availableModels.length > 0) {
-          availableModels = quotaGroups.length > 0 && liveTierInfo.tierCode !== "Free"
+          availableModels = quotaGroups.length > 0 && probed.tierCode !== "Free"
             ? buildProModelsFromQuotaGroups(
                 quotaGroups,
+                [],
                 probed.availableModels,
-                probed.availableModels,
-                cfg.__meta__?.liveTierModels?.personal || [],
-                hasLiveArgonAccess
+                [],
+                Boolean(probed.hasArgonAccess)
               )
             : probed.availableModels;
           probed.availableModels = availableModels;
         }
         cfg.accounts[detectedChannelId].cachedQuota = probed;
+      } else if (lsModeMatches && availableModels.length > 0) {
+        // 后台探测未成功时，绝不拿旧缓存覆写刚从 GetUserStatus 拿到的实时模型
+        if (freshAcc?.lastProbeError) {
+          quotaGroups = [];
+        }
+      } else if (probed) {
+        if (Array.isArray(probed.quotaGroups) && probed.quotaGroups.length > 0) {
+          quotaGroups = probed.quotaGroups;
+        }
+        if (Array.isArray(probed.availableModels) && probed.availableModels.length > 0) {
+          availableModels = probed.availableModels;
+        }
+        cfg.accounts[detectedChannelId].cachedQuota = probed;
       }
     } else {
-      quotaGroups = detCached.quotaGroups;
-      if (Array.isArray(detCached.availableModels) && detCached.availableModels.length > 0) {
-        availableModels = quotaGroups.length > 0 && liveTierInfo.tierCode !== "Free"
+      quotaGroups = Array.isArray(detCached.quotaGroups) ? detCached.quotaGroups : [];
+      if (lsModeMatches && availableModels.length > 0) {
+        if (quotaGroups.length > 0 && liveTierInfo.tierCode !== "Free") {
+          availableModels = buildProModelsFromQuotaGroups(
+            quotaGroups,
+            [],
+            availableModels,
+            [],
+            hasLiveArgonAccess
+          );
+        }
+      } else if (Array.isArray(detCached.availableModels) && detCached.availableModels.length > 0) {
+        availableModels = quotaGroups.length > 0 && detCached.tierCode !== "Free"
           ? buildProModelsFromQuotaGroups(
               quotaGroups,
+              [],
               detCached.availableModels,
-              detCached.availableModels,
-              cfg.__meta__?.liveTierModels?.personal || [],
-              hasLiveArgonAccess
+              [],
+              Boolean(detCached.hasArgonAccess)
             )
           : detCached.availableModels;
         detCached.availableModels = availableModels;
@@ -931,14 +961,17 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false) {
   }
   if (activeChannelId && activeChannelId !== detectedChannelId && cfg.accounts[activeChannelId]) {
     const activeIsGcp = Boolean(cfg.accounts[activeChannelId].gcpProjectId || cfg.accounts[activeChannelId].channelType === "gcp");
-    if (!activeIsGcp && cfg.accounts[activeChannelId].cachedQuotaByPool?.[activePool]?.quotaGroups?.length) {
+    if (!activeIsGcp && isValidPersonalSnapshot(cfg.accounts[activeChannelId].cachedQuotaByPool?.[activePool])) {
       cfg.accounts[activeChannelId].cachedQuota = cfg.accounts[activeChannelId].cachedQuotaByPool[activePool];
     }
     const cachedAt = Number(cfg.accounts[activeChannelId].cachedQuota?.updatedAt || 0);
     const cachedPool = cfg.accounts[activeChannelId].cachedQuota?.pool || cfg.accounts[activeChannelId].cachedQuota?.quotaPool || "";
+    const activeSnapValid = activeIsGcp
+      ? Boolean(cfg.accounts[activeChannelId].cachedQuota?.availableModels?.length)
+      : isValidPersonalSnapshot(cfg.accounts[activeChannelId].cachedQuota);
     if (
       forceWinCred ||
-      !cfg.accounts[activeChannelId].cachedQuota?.quotaGroups?.length ||
+      !activeSnapValid ||
       (!activeIsGcp && ((cachedPool && cachedPool !== activePool) || !cfg.accounts[activeChannelId].companionProjectId)) ||
       (Date.now() - cachedAt > 45000)
     ) {
@@ -1050,7 +1083,11 @@ export async function switchPersonalQuotaPool(targetPool) {
   writeRelayConfig(cfg);
 
   const missingPoolIds = Object.values(cfg.accounts || {})
-    .filter((acc) => acc && acc.channelType !== "gcp" && !acc.gcpProjectId && !acc.cachedQuotaByPool?.[pool]?.quotaGroups?.length)
+    .filter((acc) => {
+      if (!acc || acc.channelType === "gcp" || acc.gcpProjectId) return false;
+      const snap = acc.cachedQuotaByPool?.[pool];
+      return !(snap?.quotaGroups?.length > 0 || (snap?.probedVia === "cloudcode_http" && snap?.availableModels?.length > 0));
+    })
     .map((acc) => acc.id);
   for (const cid of missingPoolIds) {
     await probeChannelQuotaSnapshot(cid).catch(() => {});

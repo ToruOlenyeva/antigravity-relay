@@ -420,12 +420,8 @@ export function buildProModelsFromQuotaGroups(
     }
   };
 
-  if (Array.isArray(liveTierTemplate) && liveTierTemplate.length > 0) {
-    for (const m of liveTierTemplate) upsertCandidate(m);
-  }
-  const sourceModels = (Array.isArray(dynamicApiModels) && dynamicApiModels.length > 0)
-    ? dynamicApiModels
-    : (Array.isArray(prevModels) ? prevModels : []);
+  // 仅基于本次真实 API 返回的模型列表补充额度信息，绝不混入共享模板或旧快照模型
+  const sourceModels = Array.isArray(dynamicApiModels) ? dynamicApiModels : [];
   for (const m of sourceModels) upsertCandidate(m);
 
   return Array.from(mergedTemplateMap.values()).map((tpl) => {
@@ -433,15 +429,12 @@ export function buildProModelsFromQuotaGroups(
     const matchedBk = grpInfo?.primary || null;
     const wkBk = grpInfo?.weeklyBucket || null;
     const fhBk = grpInfo?.fiveHourBucket || null;
-    const prevMatch = (prevModels || []).find(
-      (p) => String(p.label || p.modelId || "").toLowerCase() === tpl.label.toLowerCase()
-    );
-    const pct = matchedBk?.remainingPct ?? tpl.remainingPct ?? prevMatch?.remainingPct ?? 100;
-    const rst = matchedBk?.resetTime || tpl.resetTime || prevMatch?.resetTime || "";
-    const weeklyPct = wkBk?.remainingPct ?? tpl.weeklyPct ?? prevMatch?.weeklyPct ?? pct;
-    const weeklyResetTime = wkBk?.resetTime || tpl.weeklyResetTime || prevMatch?.weeklyResetTime || rst;
-    const fiveHourPct = fhBk?.remainingPct ?? tpl.fiveHourPct ?? prevMatch?.fiveHourPct ?? pct;
-    const fiveHourResetTime = fhBk?.resetTime || tpl.fiveHourResetTime || prevMatch?.fiveHourResetTime || rst;
+    const pct = matchedBk?.remainingPct ?? tpl.remainingPct ?? 100;
+    const rst = matchedBk?.resetTime || tpl.resetTime || "";
+    const weeklyPct = wkBk?.remainingPct ?? tpl.weeklyPct ?? pct;
+    const weeklyResetTime = wkBk?.resetTime || tpl.weeklyResetTime || rst;
+    const fiveHourPct = fhBk?.remainingPct ?? tpl.fiveHourPct ?? pct;
+    const fiveHourResetTime = fhBk?.resetTime || tpl.fiveHourResetTime || rst;
 
     return {
       label: tpl.label,
@@ -540,9 +533,9 @@ export function sanitizeCachedQuotaModels(
     if (quotaGroups.length > 0 && tierInfo.tierCode !== "Free") {
       availableModels = buildProModelsFromQuotaGroups(
         quotaGroups,
+        [],
         availableModels,
-        availableModels,
-        liveTierTemplate,
+        [],
         hasArgonAccess
       );
     }
@@ -683,7 +676,8 @@ export function normalizeAccountChannels(cfg) {
   }
   ensureDynamicModelRegistry(cfg);
   if (cfg.__meta__?.liveTierModels && typeof cfg.__meta__.liveTierModels === "object") {
-    for (const tKey of ["gcp", "personal"]) {
+    delete cfg.__meta__.liveTierModels.personal;
+    for (const tKey of ["gcp"]) {
       const tpl = cfg.__meta__.liveTierModels[tKey];
       if (!Array.isArray(tpl)) continue;
       const mergedTpl = new Map();
@@ -737,8 +731,7 @@ export function normalizeAccountChannels(cfg) {
         : (item.tierName || "");
       const cleanGcpTier = gcpBillingMode === "gemini_enterprise" ? "Gemini Enterprise" : "Agent Platform";
 
-      const liveTierKey = isGcp && pid ? "gcp" : "personal";
-      const liveTierTemplate = cfg.__meta__?.liveTierModels?.[liveTierKey] || [];
+      const liveTierTemplate = (isGcp && pid) ? (cfg.__meta__?.liveTierModels?.gcp || []) : [];
       const cleanCompanionPid = !isGcp
         ? resolvePersonalCompanionProjectId(cfg, email, item.companionProjectId || item.cachedQuota?.companionProjectId || "")
         : "";
@@ -746,10 +739,16 @@ export function normalizeAccountChannels(cfg) {
         ? detectPersonalAccountTier([], item.tierRaw, item.tierRaw, undefined, "")
         : null;
       const hasAuthoritativeRawTier = Boolean(confirmedFromRaw && confirmedFromRaw.tierCode !== "Unknown");
+      const hasValidSnapshot = (q) => Boolean(
+        q &&
+        typeof q === "object" &&
+        ((Array.isArray(q.quotaGroups) && q.quotaGroups.length > 0) ||
+         (q.probedVia === "cloudcode_http" && Array.isArray(q.availableModels) && q.availableModels.length > 0))
+      );
       const hasConfirmedHistoricalQuota = Boolean(
         item.tierConfirmed ||
         item.cachedQuota?.probedVia ||
-        (Array.isArray(item.cachedQuota?.quotaGroups) && item.cachedQuota.quotaGroups.length > 0)
+        hasValidSnapshot(item.cachedQuota)
       );
       const effectiveHintName = hasAuthoritativeRawTier
         ? confirmedFromRaw.tierName
@@ -773,11 +772,11 @@ export function normalizeAccountChannels(cfg) {
           : {};
         for (const pKey of ["daily"]) {
           if (rawByPool[pKey] && typeof rawByPool[pKey] === "object") {
-            const poolConfirmed = Boolean(hasConfirmedHistoricalQuota || rawByPool[pKey].probedVia || rawByPool[pKey].quotaGroups?.length);
+            const poolConfirmed = Boolean(hasConfirmedHistoricalQuota || rawByPool[pKey].probedVia || hasValidSnapshot(rawByPool[pKey]));
             const sanitizedPool = sanitizeCachedQuotaModels(
               rawByPool[pKey],
               false,
-              liveTierTemplate,
+              [],
               hasAuthoritativeRawTier ? confirmedFromRaw.tierName : (poolConfirmed ? cleanPersonalTier : ""),
               hasAuthoritativeRawTier ? confirmedFromRaw.tierCode : (poolConfirmed ? (item.tierCode || "") : ""),
               hasAuthoritativeRawTier
@@ -791,7 +790,7 @@ export function normalizeAccountChannels(cfg) {
             }
           }
         }
-        if (cachedQuota && Array.isArray(cachedQuota.quotaGroups) && cachedQuota.quotaGroups.length > 0) {
+        if (cachedQuota && hasValidSnapshot(cachedQuota)) {
           const rawTag = cachedQuota.pool || cachedQuota.quotaPool || "daily";
           if (rawTag === "daily" && !cachedQuotaByPool.daily) {
             cachedQuota.pool = "daily";
@@ -800,7 +799,7 @@ export function normalizeAccountChannels(cfg) {
             cachedQuotaByPool.daily = cachedQuota;
           }
         }
-        if (cachedQuotaByPool.daily?.quotaGroups?.length) {
+        if (hasValidSnapshot(cachedQuotaByPool.daily)) {
           cachedQuota = cachedQuotaByPool.daily;
         }
       }
@@ -811,7 +810,7 @@ export function normalizeAccountChannels(cfg) {
         !isGcp &&
         (item.tierConfirmed ||
          cachedQuota?.probedVia ||
-         (Array.isArray(cachedQuota?.quotaGroups) && cachedQuota.quotaGroups.length > 0))
+         hasValidSnapshot(cachedQuota))
       );
       let resolvedTierCode = "Unknown";
       let resolvedPersonalTierName = "Unknown";

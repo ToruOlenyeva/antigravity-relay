@@ -734,9 +734,70 @@ function renderQuotaGroups() {
     return;
   }
 
+  const personalModels = Array.isArray(poolSnapshot?.availableModels) && poolSnapshot.availableModels.length > 0
+    ? poolSnapshot.availableModels
+    : (isViewingActive && Array.isArray(state.availableModels) ? state.availableModels : []);
+
   if (groups.length === 0 && !isGcpChannel) {
     const hasAuthExp = Boolean(viewedAcc?.authExpired);
     const hasProbeErr = Boolean(viewedAcc?.lastProbeError?.message);
+    if (!hasAuthExp && !hasProbeErr && personalModels.length > 0) {
+      const groupEl = document.createElement("div");
+      groupEl.className = "quota-group";
+
+      const titleEl = document.createElement("div");
+      titleEl.className = "quota-group-title";
+      titleEl.textContent = currentLang === "zh" ? "可用模型实时额度" : "Live Model Quotas";
+      groupEl.appendChild(titleEl);
+
+      for (const pm of personalModels) {
+        const pct = pm.remainingPct ?? 100;
+        const countdown = formatResetCountdown(pm.resetTime);
+
+        const row = document.createElement("div");
+        row.className = "quota-bucket-row";
+
+        const labelEl = document.createElement("span");
+        labelEl.className = "quota-bucket-label";
+        labelEl.textContent = pm.label || pm.modelId;
+
+        const rightCol = document.createElement("div");
+        rightCol.className = "quota-bucket-right";
+
+        const mainLine = document.createElement("div");
+        mainLine.className = "quota-bucket-main";
+
+        const pctSpan = document.createElement("span");
+        pctSpan.className = "quota-bucket-pct" + (pct === 100 ? " full" : "");
+        pctSpan.textContent = `${t.pctLeftPrefix}${pct}${t.pctLeftSuffix}`;
+
+        mainLine.appendChild(pctSpan);
+        mainLine.appendChild(createQuotaRingSvg(pct));
+        rightCol.appendChild(mainLine);
+
+        if (countdown) {
+          const resetLine = document.createElement("div");
+          resetLine.className = "quota-bucket-reset";
+          resetLine.textContent = `${t.resetsInPrefix}${countdown}${t.resetsInSuffix}`;
+          rightCol.appendChild(resetLine);
+        }
+
+        row.appendChild(labelEl);
+        row.appendChild(rightCol);
+        groupEl.appendChild(row);
+      }
+
+      container.appendChild(groupEl);
+      if (
+        viewedAcc?.cachedQuota?.probedVia !== "cloudcode_http" &&
+        targetChannelId &&
+        (lastAutoProbedChannelId !== targetChannelId || Date.now() - lastAutoProbedAt > 8000)
+      ) {
+        probeChannelQuotaInBackground(targetChannelId);
+      }
+      return;
+    }
+
     const hint = document.createElement("div");
     hint.className = "section-hint" + ((hasAuthExp || hasProbeErr) ? " quota-error-hint" : "");
     hint.style.padding = "6px 2px";
@@ -813,9 +874,6 @@ function renderQuotaGroups() {
     container.appendChild(groupEl);
   }
 
-  const personalModels = Array.isArray(poolSnapshot?.availableModels) && poolSnapshot.availableModels.length > 0
-    ? poolSnapshot.availableModels
-    : (isViewingActive && Array.isArray(state.availableModels) ? state.availableModels : []);
   if (personalModels.length > 0) {
     const modelsCard = document.createElement("div");
     modelsCard.className = "personal-pool-models-bar";

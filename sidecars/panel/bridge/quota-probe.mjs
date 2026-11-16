@@ -271,6 +271,12 @@ export async function probeChannelQuotaSnapshot(channelId) {
       callCloudCodeApi("/v1internal:fetchAvailableModels", tok, reqPayload, {}, hostName),
       callCloudCodeApi("/v1internal:retrieveUserQuotaSummary", tok, reqPayload, {}, hostName)
     ]);
+    if ((!modelsResp?.data?.models || modelsResp.status !== 200) && companionPid) {
+      const fallbackModels = await callCloudCodeApi("/v1internal:fetchAvailableModels", tok, {}, {}, hostName);
+      if (fallbackModels?.status === 200 && fallbackModels?.data?.models) {
+        modelsResp = fallbackModels;
+      }
+    }
     if (!quotaSummaryResp?.data?.groups?.length && companionPid) {
       const fallbackQs = await callCloudCodeApi("/v1internal:retrieveUserQuotaSummary", tok, {}, {}, hostName);
       if (fallbackQs?.data?.groups?.length) {
@@ -485,18 +491,26 @@ export async function probeChannelQuotaSnapshot(channelId) {
     attemptDiag.quotaErrorObj = quotaErrObj;
 
     if (!isGcp && probeRes.tierSourceConfirmed && probeRes.userTier) {
-      const confirmedInfo = detectPersonalAccountTier(dailyModels?.data?.models || {}, probeRes.userTier, probeRes.userTier, acc.cachedQuota?.hasArgonAccess, "");
+      const confirmedInfo = detectPersonalAccountTier(dailyModels?.data?.models || {}, probeRes.userTier, probeRes.userTier, undefined, "");
       if (confirmedInfo.tierCode && confirmedInfo.tierCode !== "Unknown") {
+        const prevTierCode = String(acc.tierCode || acc.cachedQuota?.tierCode || "").trim();
+        const tierChanged = Boolean(prevTierCode && prevTierCode !== "Unknown" && prevTierCode !== confirmedInfo.tierCode);
         acc.tierCode = confirmedInfo.tierCode;
         acc.tierName = confirmedInfo.tierName;
         acc.tierConfirmed = true;
         acc.tierRaw = probeRes.userTier;
-        for (const quotaTarget of [acc.cachedQuota, acc.cachedQuotaByPool?.daily]) {
-          if (quotaTarget && typeof quotaTarget === "object") {
-            quotaTarget.tierCode = confirmedInfo.tierCode;
-            quotaTarget.tierName = confirmedInfo.tierName;
-            quotaTarget.isPaidProOrUltra = confirmedInfo.isPaidProOrUltra;
-            quotaTarget.hasArgonAccess = confirmedInfo.hasArgonAccess;
+        if (tierChanged) {
+          // 账户真实等级发生变化（例如 Pro 过期降级为 Free）时，立即淘汰旧等级残留快照，绝不保留过期模型
+          acc.cachedQuota = null;
+          acc.cachedQuotaByPool = {};
+        } else {
+          for (const quotaTarget of [acc.cachedQuota, acc.cachedQuotaByPool?.daily]) {
+            if (quotaTarget && typeof quotaTarget === "object") {
+              quotaTarget.tierCode = confirmedInfo.tierCode;
+              quotaTarget.tierName = confirmedInfo.tierName;
+              quotaTarget.isPaidProOrUltra = confirmedInfo.isPaidProOrUltra;
+              quotaTarget.hasArgonAccess = confirmedInfo.hasArgonAccess;
+            }
           }
         }
       }
@@ -507,17 +521,27 @@ export async function probeChannelQuotaSnapshot(channelId) {
       const nextByPool = {};
       const finalCompPid = resolvePersonalCompanionProjectId(cfg, acc.email, probeRes.companionPid || acc.companionProjectId);
       const poolData = probeRes.byPool.daily;
-      const prevPoolQuota = acc.cachedQuotaByPool?.daily || acc.cachedQuota || null;
-      const hasPrevConfirmed = Boolean(acc.tierConfirmed || prevPoolQuota?.probedVia || prevPoolQuota?.quotaGroups?.length);
       const parsedPool = parseCloudCodeModelsAndQuota(
         poolData.modelsResp.data,
         poolData.quotaSummaryResp?.data || null,
         false,
-        probeRes.userTier,
-        hasPrevConfirmed ? prevPoolQuota : null,
-        liveTierTemplate
+        probeRes.userTier
       );
-      if (parsedPool && Array.isArray(parsedPool.quotaGroups) && parsedPool.quotaGroups.length > 0) {
+      const hasValidQuotaGroups = Boolean(
+        !probeRes.loadIneligibleInfo &&
+        parsedPool &&
+        Array.isArray(parsedPool.quotaGroups) &&
+        parsedPool.quotaGroups.length > 0
+      );
+      const hasValidModelsOnly = Boolean(
+        !loadErrObj &&
+        !probeRes.loadIneligibleInfo &&
+        poolData.modelsResp?.status === 200 &&
+        parsedPool &&
+        Array.isArray(parsedPool.availableModels) &&
+        parsedPool.availableModels.length > 0
+      );
+      if (parsedPool && (hasValidQuotaGroups || hasValidModelsOnly)) {
         parsedPool.pool = "daily";
         parsedPool.quotaPool = "daily";
         parsedPool.upstreamHostname = DAILY_HOSTNAME;
@@ -525,7 +549,7 @@ export async function probeChannelQuotaSnapshot(channelId) {
         nextByPool.daily = parsedPool;
       }
       const chosenPrimary = nextByPool.daily || null;
-      if (chosenPrimary && Array.isArray(chosenPrimary.quotaGroups) && chosenPrimary.quotaGroups.length > 0) {
+      if (chosenPrimary) {
         acc.companionProjectId = finalCompPid;
         acc.cachedQuotaByPool = nextByPool;
         acc.cachedQuota = chosenPrimary;
@@ -552,9 +576,7 @@ export async function probeChannelQuotaSnapshot(channelId) {
         probeRes.modelsResp.data,
         probeRes.quotaSummaryResp?.data || null,
         isGcp,
-        probeRes.userTier,
-        acc.cachedQuota || null,
-        liveTierTemplate
+        probeRes.userTier
       );
       if (parsed && isGcp && parsed.availableModels.length > 0) {
         acc.authExpired = false;

@@ -333,9 +333,7 @@ export function parseCloudCodeModelsAndQuota(
   rawModelsResp,
   rawQuotaSummaryResp = null,
   isGcpChannel = false,
-  userTier = "",
-  prevCachedQuota = null,
-  liveTierTemplate = []
+  userTier = ""
 ) {
   const modelsObj = rawModelsResp?.models;
   if (!modelsObj || typeof modelsObj !== "object") {
@@ -371,8 +369,8 @@ export function parseCloudCodeModelsAndQuota(
         modelsObj,
         userTier,
         userTier,
-        prevCachedQuota?.hasArgonAccess,
-        prevCachedQuota?.tierCode || ""
+        undefined,
+        ""
       );
   const hasArgonAccess = tierInfo.hasArgonAccess;
   const isPaidProOrUltra = tierInfo.isPaidProOrUltra;
@@ -450,9 +448,9 @@ export function parseCloudCodeModelsAndQuota(
     );
     const proModels = buildProModelsFromQuotaGroups(
       quotaGroups,
-      prevCachedQuota?.availableModels || [],
+      [],
       dynamicApiModels,
-      liveTierTemplate,
+      [],
       hasArgonAccess
     );
     return {
