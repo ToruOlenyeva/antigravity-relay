@@ -1023,11 +1023,49 @@ async function switchPersonalQuotaPool(pool) {
   } catch (e) {}
 }
 
-// 启动 SSE 实时流与定时轮询
-function connectSse() {
+let sseSource = null;
+let isViewportIntersecting = true;
+let lastVisibleRefreshAt = 0;
+
+function isEmbeddedSidecarWindow() {
+  if (typeof window === "undefined") return false;
+  if (window.location.port === "8089") return false;
+  return Boolean(window.sidecar || new URLSearchParams(window.location.search).get("token"));
+}
+
+function isPanelActuallyVisible() {
+  if (typeof document === "undefined") return false;
+  if (document.hidden) return false;
+  if (!isEmbeddedSidecarWindow()) return true;
+  if (!isViewportIntersecting) return false;
+  if (window.innerWidth <= 10 || window.innerHeight <= 10) return false;
+  if (!document.body || document.body.offsetWidth <= 10 || document.body.offsetHeight <= 10) return false;
+  return true;
+}
+
+function closeSseConnection() {
+  if (sseSource) {
+    try {
+      sseSource.close();
+    } catch (e) {}
+    sseSource = null;
+  }
+}
+
+// 启动 SSE 实时流与按需可见门控（仅在面板真实可见时保持长连接，避免多标签耗尽 Chromium 同源连接池）
+function ensureSseConnected() {
+  if (!isPanelActuallyVisible()) {
+    closeSseConnection();
+    return;
+  }
+  if (sseSource && sseSource.readyState !== 2) return;
+  closeSseConnection();
+  if (typeof window.EventSource !== "function") return;
   try {
     const es = new EventSource("/api/events");
+    sseSource = es;
     es.onmessage = (ev) => {
+      if (!isPanelActuallyVisible()) return;
       try {
         const snap = JSON.parse(ev.data);
         if (snap && !snap.error) {
@@ -1066,15 +1104,82 @@ function connectSse() {
   } catch (e) {}
 }
 
+function syncSseLifecycleForVisibility(forceStatusRefresh = false) {
+  const visibleNow = isPanelActuallyVisible();
+  if (!visibleNow) {
+    closeSseConnection();
+    return false;
+  }
+  ensureSseConnected();
+  const now = Date.now();
+  if (forceStatusRefresh || now - lastVisibleRefreshAt > 3000) {
+    lastVisibleRefreshAt = now;
+    loadSystemStatus(false, true);
+  }
+  return true;
+}
+
+function bindPanelVisibilityListeners() {
+  if (window.__agyRelayVisibilityBound) return;
+  window.__agyRelayVisibilityBound = true;
+  let wasVisible = isPanelActuallyVisible();
+
+  const onVisibilityTransition = () => {
+    const nowVisible = isPanelActuallyVisible();
+    if (nowVisible && !wasVisible) {
+      wasVisible = true;
+      syncSseLifecycleForVisibility(true);
+    } else if (!nowVisible && wasVisible) {
+      wasVisible = false;
+      closeSseConnection();
+    } else {
+      wasVisible = nowVisible;
+      if (!nowVisible) closeSseConnection();
+    }
+  };
+
+  window.addEventListener("focus", () => syncSseLifecycleForVisibility(false));
+  window.addEventListener("pagehide", closeSseConnection);
+  window.addEventListener("beforeunload", closeSseConnection);
+  document.addEventListener("visibilitychange", onVisibilityTransition);
+  document.addEventListener("pointerenter", () => syncSseLifecycleForVisibility(false));
+  document.addEventListener("pointerdown", () => syncSseLifecycleForVisibility(false));
+
+  if (window.ResizeObserver && document.documentElement) {
+    try {
+      new ResizeObserver(onVisibilityTransition).observe(document.documentElement);
+    } catch (e) {}
+  }
+  if (window.IntersectionObserver) {
+    try {
+      const io = new IntersectionObserver(
+        (entries) => {
+          for (const entry of entries) {
+            isViewportIntersecting = Boolean(entry.isIntersecting && entry.intersectionRatio > 0);
+          }
+          onVisibilityTransition();
+        },
+        { threshold: [0, 0.01, 0.1] }
+      );
+      io.observe(document.body || document.documentElement);
+    } catch (e) {}
+  }
+}
+
 function dataFrontendVer(snap) {
   return snap?.frontendVersion || "";
 }
 
 applyI18n();
-loadSystemStatus(false, true);
-connectSse();
+bindPanelVisibilityListeners();
+if (isPanelActuallyVisible()) {
+  lastVisibleRefreshAt = Date.now();
+  loadSystemStatus(false, true);
+  ensureSseConnected();
+}
 setInterval(() => {
-  if (!document.hidden) {
+  if (isPanelActuallyVisible()) {
+    lastVisibleRefreshAt = Date.now();
     loadSystemStatus(false, true);
   }
 }, 45000);

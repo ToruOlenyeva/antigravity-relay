@@ -449,9 +449,12 @@ async function requestHandler(req, res) {
     try {
       const { channelId } = await readJsonBody(req);
       const cachedQuota = await lsBridge.probeChannelQuotaSnapshot(channelId || "");
+      const probeDiagnostic = typeof lsBridge.getLastProbeDiagnostic === "function"
+        ? lsBridge.getLastProbeDiagnostic(channelId || "")
+        : null;
       const snap = await lsBridge.fetchLiveSystemSnapshot(false);
       broadcastSnapshot(snap);
-      return sendJson(res, 200, { success: true, channelId, cachedQuota, snapshot: snap });
+      return sendJson(res, 200, { success: true, channelId, cachedQuota, probeDiagnostic, snapshot: snap });
     } catch (err) {
       return sendJson(res, 500, { success: false, error: err.message });
     }

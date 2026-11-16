@@ -647,6 +647,14 @@ export function writeRelayConfig(cfg) {
                 cfg.__meta__.lastRoutedPool = diskCfg.__meta__.lastRoutedPool;
               }
             }
+            const diskErrAt = String(diskCfg.__meta__?.lastProxyError?.at || "");
+            const memErrAt = String(cfg.__meta__?.lastProxyError?.at || "");
+            if (diskErrAt && (!memErrAt || diskErrAt > memErrAt)) {
+              cfg.__meta__.lastProxyError = diskCfg.__meta__.lastProxyError;
+              if (Array.isArray(diskCfg.__meta__.recentProxyErrors)) {
+                cfg.__meta__.recentProxyErrors = diskCfg.__meta__.recentProxyErrors;
+              }
+            }
             if (diskCfg.__meta__?.dynamicModelRegistry && typeof diskCfg.__meta__.dynamicModelRegistry === "object") {
               if (!cfg.__meta__.dynamicModelRegistry || typeof cfg.__meta__.dynamicModelRegistry !== "object") {
                 cfg.__meta__.dynamicModelRegistry = { placeholderToSlug: {}, placeholderToFamily: {}, labelToSlug: {} };

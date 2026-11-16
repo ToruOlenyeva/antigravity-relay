@@ -507,6 +507,45 @@ export function parseCloudCodeModelsAndQuota(
   };
 }
 
+const probeDiagnosticByChannel = new Map();
+
+export function getLastProbeDiagnostic(channelId) {
+  return probeDiagnosticByChannel.get(String(channelId || "").trim()) || null;
+}
+
+function extractApiErrorSummary(resp) {
+  if (!resp) return "";
+  const errObj = resp.data?.error;
+  if (errObj && typeof errObj === "object") {
+    const code = errObj.code ? `HTTP ${errObj.code}` : (resp.status ? `HTTP ${resp.status}` : "");
+    const msg = String(errObj.message || errObj.status || "").trim();
+    return [code, msg].filter(Boolean).join(": ").slice(0, 320);
+  }
+  if (resp.error) return String(resp.error).slice(0, 320);
+  if (resp.raw) return `HTTP ${resp.status}: ${String(resp.raw).slice(0, 260)}`;
+  return resp.status ? `HTTP ${resp.status}` : "";
+}
+
+function persistRefreshedPersonalTokens(cfg, acc, baseToken, isGcp) {
+  if (!cfg || !acc || !baseToken?.token?.access_token) return;
+  const cleanTok = isGcp
+    ? buildCleanChannelToken(baseToken, (acc.gcpProjectId || "").trim(), acc.gcpLocation || "global", false, acc.gcpBillingMode || "agent_platform")
+    : buildCleanChannelToken(baseToken, "", "", false);
+  acc.authExpired = false;
+  acc.storedToken = cleanTok;
+  if (!cfg.__meta__.channelTokensById || typeof cfg.__meta__.channelTokensById !== "object") {
+    cfg.__meta__.channelTokensById = {};
+  }
+  cfg.__meta__.channelTokensById[acc.id] = JSON.parse(JSON.stringify(cleanTok));
+  if (!isGcp && acc.email) {
+    if (!cfg.__meta__.oauthTokensByEmail || typeof cfg.__meta__.oauthTokensByEmail !== "object") {
+      cfg.__meta__.oauthTokensByEmail = {};
+    }
+    cfg.__meta__.oauthTokensByEmail[acc.email] = JSON.parse(JSON.stringify(cleanTok));
+  }
+  writeRelayConfig(cfg);
+}
+
 export async function probeChannelQuotaSnapshot(channelId) {
   const cfg = readRelayConfig();
   normalizeAccountChannels(cfg);
@@ -749,67 +788,67 @@ export async function probeChannelQuotaSnapshot(channelId) {
 
   let sawAuthExpired = false;
   let sawValidToken = false;
+  const diag = { channelId: acc.id, at: Date.now(), attempts: [], ok: false };
+  const applyRefreshedToken = (baseToken, refreshToken, refreshed) => {
+    const accessToken = refreshed.access_token;
+    const expiryIso = new Date(Date.now() + (refreshed.expires_in || 3599) * 1000).toISOString();
+    baseToken.token.access_token = accessToken;
+    baseToken.token.refreshedForRt = refreshToken;
+    baseToken.token.expiry = expiryIso;
+    for (const item of Object.values(cfg.accounts || {})) {
+      if (item.storedToken?.token?.refresh_token === refreshToken) {
+        item.storedToken.token.access_token = accessToken;
+        item.storedToken.token.refreshedForRt = refreshToken;
+        item.storedToken.token.expiry = expiryIso;
+      }
+    }
+    return accessToken;
+  };
 
   for (const baseToken of candidateTokenObjs) {
     let accessToken = baseToken.token.access_token || "";
     const refreshToken = baseToken.token.refresh_token || "";
     const expiryMs = baseToken.token.expiry ? new Date(baseToken.token.expiry).getTime() : 0;
+    const attemptDiag = { refreshAttempted: false, refreshOk: false, refreshError: "" };
+    diag.attempts.push(attemptDiag);
     const needsImmediateRefresh = Boolean(
       refreshToken &&
       (!accessToken || baseToken.token.refreshedForRt !== refreshToken || (expiryMs > 0 && expiryMs - Date.now() < 300000))
     );
     if (needsImmediateRefresh) {
+      attemptDiag.refreshAttempted = true;
       try {
         const refreshed = await refreshOAuthAccessToken(refreshToken);
         if (refreshed && refreshed.access_token) {
           sawValidToken = true;
-          accessToken = refreshed.access_token;
-          baseToken.token.access_token = accessToken;
-          baseToken.token.refreshedForRt = refreshToken;
-          baseToken.token.expiry = new Date(Date.now() + (refreshed.expires_in || 3599) * 1000).toISOString();
-          for (const item of Object.values(cfg.accounts || {})) {
-            if (item.storedToken?.token?.refresh_token === refreshToken) {
-              item.storedToken.token.access_token = accessToken;
-              item.storedToken.token.refreshedForRt = refreshToken;
-              item.storedToken.token.expiry = baseToken.token.expiry;
-            }
-          }
+          attemptDiag.refreshOk = true;
+          accessToken = applyRefreshedToken(baseToken, refreshToken, refreshed);
+          persistRefreshedPersonalTokens(cfg, acc, baseToken, isGcp);
         }
       } catch (err) {
+        attemptDiag.refreshError = String(err?.message || err || "refresh_failed").slice(0, 260);
         if (err && err.isAuthExpired) sawAuthExpired = true;
       }
     }
 
     if (isGcp && gcpBillingMode === "agent_platform") {
       if (!accessToken && refreshToken) {
+        attemptDiag.refreshAttempted = true;
         try {
           const refreshed = await refreshOAuthAccessToken(refreshToken);
           if (refreshed && refreshed.access_token) {
             sawValidToken = true;
-            accessToken = refreshed.access_token;
-            baseToken.token.access_token = accessToken;
-            baseToken.token.refreshedForRt = refreshToken;
-            baseToken.token.expiry = new Date(Date.now() + (refreshed.expires_in || 3599) * 1000).toISOString();
+            attemptDiag.refreshOk = true;
+            accessToken = applyRefreshedToken(baseToken, refreshToken, refreshed);
           }
         } catch (err) {
+          attemptDiag.refreshError = String(err?.message || err || "refresh_failed").slice(0, 260);
           if (err && err.isAuthExpired) sawAuthExpired = true;
         }
       }
       if (accessToken) {
         sawValidToken = true;
-        const cleanGcpTok = buildCleanChannelToken(
-          baseToken,
-          gcpPid,
-          acc.gcpLocation || "global",
-          false,
-          "agent_platform"
-        );
-        acc.authExpired = false;
-        acc.storedToken = cleanGcpTok;
-        if (!cfg.__meta__.channelTokensById || typeof cfg.__meta__.channelTokensById !== "object") {
-          cfg.__meta__.channelTokensById = {};
-        }
-        cfg.__meta__.channelTokensById[acc.id] = JSON.parse(JSON.stringify(cleanGcpTok));
+        persistRefreshedPersonalTokens(cfg, acc, baseToken, true);
       } else {
         continue;
       }
@@ -817,27 +856,32 @@ export async function probeChannelQuotaSnapshot(channelId) {
 
     let probeRes = await tryProbeWithToken(accessToken);
     if ((probeRes.modelsResp.status === 401 || probeRes.modelsResp.status === 403 || !probeRes.modelsResp.data) && refreshToken) {
+      attemptDiag.refreshAttempted = true;
       try {
         const refreshed = await refreshOAuthAccessToken(refreshToken);
         if (refreshed && refreshed.access_token) {
           sawValidToken = true;
-          accessToken = refreshed.access_token;
-          baseToken.token.access_token = accessToken;
-          baseToken.token.refreshedForRt = refreshToken;
-          baseToken.token.expiry = new Date(Date.now() + (refreshed.expires_in || 3599) * 1000).toISOString();
-          for (const item of Object.values(cfg.accounts || {})) {
-            if (item.storedToken?.token?.refresh_token === refreshToken) {
-              item.storedToken.token.access_token = accessToken;
-              item.storedToken.token.refreshedForRt = refreshToken;
-              item.storedToken.token.expiry = baseToken.token.expiry;
-            }
-          }
+          attemptDiag.refreshOk = true;
+          accessToken = applyRefreshedToken(baseToken, refreshToken, refreshed);
+          persistRefreshedPersonalTokens(cfg, acc, baseToken, isGcp);
           probeRes = await tryProbeWithToken(accessToken);
         }
       } catch (err) {
+        attemptDiag.refreshError = String(err?.message || err || "refresh_failed").slice(0, 260);
         if (err && err.isAuthExpired) sawAuthExpired = true;
       }
     }
+
+    const dailyModels = probeRes.byPool?.daily?.modelsResp || probeRes.modelsResp;
+    const dailyQuota = probeRes.byPool?.daily?.quotaSummaryResp || probeRes.quotaSummaryResp;
+    attemptDiag.loadTier = probeRes.userTier || "";
+    attemptDiag.companionPid = probeRes.companionPid || "";
+    attemptDiag.loadStatus = probeRes.loadResp?.status || 0;
+    attemptDiag.loadError = attemptDiag.loadStatus !== 200 ? extractApiErrorSummary(probeRes.loadResp) : "";
+    attemptDiag.modelsStatus = dailyModels?.status || 0;
+    attemptDiag.modelsError = attemptDiag.modelsStatus !== 200 ? extractApiErrorSummary(dailyModels) : "";
+    attemptDiag.quotaStatus = dailyQuota?.status || 0;
+    attemptDiag.quotaError = attemptDiag.quotaStatus !== 200 ? extractApiErrorSummary(dailyQuota) : "";
 
     if (!isGcp && probeRes.byPool?.daily?.modelsResp?.data) {
       learnModelsFromCloudCodeResponse(cfg, probeRes.byPool.daily.modelsResp.data);
@@ -865,22 +909,14 @@ export async function probeChannelQuotaSnapshot(channelId) {
         acc.companionProjectId = finalCompPid;
         acc.cachedQuotaByPool = nextByPool;
         acc.cachedQuota = chosenPrimary;
+        delete acc.lastProbeError;
         if (chosenPrimary.tierCode) {
           acc.tierCode = chosenPrimary.tierCode;
           acc.tierName = chosenPrimary.tierName || acc.tierName;
         }
-        const cleanPersonalTok = buildCleanChannelToken(baseToken, "", "", false);
-        acc.authExpired = false;
-        acc.storedToken = cleanPersonalTok;
-        if (!cfg.__meta__.channelTokensById || typeof cfg.__meta__.channelTokensById !== "object") {
-          cfg.__meta__.channelTokensById = {};
-        }
-        cfg.__meta__.channelTokensById[acc.id] = JSON.parse(JSON.stringify(cleanPersonalTok));
-        if (!cfg.__meta__.oauthTokensByEmail || typeof cfg.__meta__.oauthTokensByEmail !== "object") {
-          cfg.__meta__.oauthTokensByEmail = {};
-        }
-        cfg.__meta__.oauthTokensByEmail[acc.email] = JSON.parse(JSON.stringify(cleanPersonalTok));
-        writeRelayConfig(cfg);
+        persistRefreshedPersonalTokens(cfg, acc, baseToken, false);
+        diag.ok = true;
+        probeDiagnosticByChannel.set(acc.id, diag);
         return acc.cachedQuota;
       }
     } else if (probeRes.modelsResp.status === 200 && probeRes.modelsResp.data) {
@@ -896,16 +932,28 @@ export async function probeChannelQuotaSnapshot(channelId) {
       if (parsed && isGcp && parsed.availableModels.length > 0) {
         acc.authExpired = false;
         acc.cachedQuota = parsed;
+        delete acc.lastProbeError;
         writeRelayConfig(cfg);
+        diag.ok = true;
+        probeDiagnosticByChannel.set(acc.id, diag);
         return acc.cachedQuota;
       }
     }
   }
 
-  if (sawAuthExpired && !sawValidToken) {
+  const lastAttempt = diag.attempts[diag.attempts.length - 1] || {};
+  const errSummary = lastAttempt.modelsError || lastAttempt.quotaError || lastAttempt.refreshError || lastAttempt.loadError || "";
+  if (errSummary) {
+    acc.lastProbeError = { at: Date.now(), message: errSummary };
+    if (sawAuthExpired && !sawValidToken) {
+      acc.authExpired = true;
+    }
+    writeRelayConfig(cfg);
+  } else if (sawAuthExpired && !sawValidToken) {
     acc.authExpired = true;
     writeRelayConfig(cfg);
   }
+  probeDiagnosticByChannel.set(acc.id, diag);
 
   if (isGcp && gcpBillingMode === "agent_platform") {
     const existingModels = acc.cachedQuota?.availableModels || [];

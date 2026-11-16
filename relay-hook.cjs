@@ -296,12 +296,15 @@ async function ensureLocalCloudCodeProxyMounted(lsTarget, relayCfg, instMeta = n
   if (!lsTarget || !lsTarget.port || !lsTarget.csrf) return false;
   const savedProxyUrl = String(instMeta?.cloudCodeProxyUrl || relayCfg?.__meta__?.cloudCodeProxyUrl || "").trim();
   const proxyUrl = /^http:\/\/127\.0\.0\.1:809\d$/i.test(savedProxyUrl) ? savedProxyUrl : "http://127.0.0.1:8091";
+  const syncedAgoMs = Date.now() - Number(instMeta?.cloudCodeProxySyncedAt || 0);
   if (
     instMeta &&
     instMeta.cloudCodeProxyMode === "local_proxy" &&
     Number(instMeta.cloudCodeProxyPid || 0) > 0 &&
     Number(instMeta.cloudCodeProxyPid) === Number(lsTarget.pid || 0) &&
-    instMeta.cloudCodeProxyUrl === proxyUrl
+    instMeta.cloudCodeProxyUrl === proxyUrl &&
+    syncedAgoMs >= 0 &&
+    syncedAgoMs < 15000
   ) {
     return true;
   }

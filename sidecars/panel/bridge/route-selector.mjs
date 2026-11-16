@@ -287,11 +287,19 @@ export function selectBestPersonalRouteCandidate(baseFamily, cfg, excludedIds = 
   const thresholdPct = Number(cfg?.routing?.lowQuotaThresholdPct ?? 5);
   const targetLower = (baseFamily || "").toLowerCase();
   const excludeSet = excludedIds instanceof Set ? excludedIds : new Set(Array.isArray(excludedIds) ? excludedIds : []);
+  const nowMs = Date.now();
+  const isTemporarilyBlocked = (acc) => {
+    const blockedUntil = Number(acc?.routeBlockedUntil || 0);
+    if (blockedUntil > nowMs) return true;
+    const errAt = Number(acc?.lastProbeError?.at || 0);
+    const errMsg = String(acc?.lastProbeError?.message || "");
+    return errAt > 0 && (nowMs - errAt) < 600000 && /#3501|valid license|\b401\b|\b403\b/i.test(errMsg);
+  };
   const candidates = [];
 
   for (const acc of accounts) {
     const isGcp = acc.channelType === "gcp" || Boolean(acc.gcpProjectId);
-    if (isGcp || acc.authExpired || excludeSet.has(acc.id)) continue;
+    if (isGcp || acc.authExpired || excludeSet.has(acc.id) || isTemporarilyBlocked(acc)) continue;
 
     for (const poolKey of poolsOrder) {
       if (excludeSet.has(`${acc.id}@${poolKey}`)) continue;
