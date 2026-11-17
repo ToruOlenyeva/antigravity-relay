@@ -221,6 +221,7 @@ function renderTelemetryConvSelector(tel, viewedItem, isProjectTotalView) {
       const defaultActiveId = tel.fullConversationId || tel.conversationId || "";
       selectedTelemetryConvId = (opt.value === defaultActiveId) ? "" : opt.value;
       renderSessionTelemetry();
+      if (typeof flushDeferredRender === "function") flushDeferredRender();
     };
 
     menu.appendChild(item);
@@ -228,10 +229,8 @@ function renderTelemetryConvSelector(tel, viewedItem, isProjectTotalView) {
 
   trigger.onclick = (ev) => {
     ev.stopPropagation();
-    const isOpen = wrapper.classList.contains("open");
-    document.querySelectorAll(".custom-dropdown.open").forEach((el) => el.classList.remove("open"));
-    if (!isOpen) {
-      wrapper.classList.add("open");
+    if (typeof toggleCustomDropdownWrapper === "function") {
+      toggleCustomDropdownWrapper(wrapper);
     }
   };
 
@@ -562,6 +561,7 @@ function renderSessionSelector() {
       selectedQuotaChannelId = ch.id === activeChannelId ? "" : ch.id;
       renderSessionSelector();
       renderQuotaGroups();
+      if (typeof flushDeferredRender === "function") flushDeferredRender();
       if (ch.id !== activeChannelId) {
         probeChannelQuotaInBackground(ch.id);
       }
@@ -572,10 +572,8 @@ function renderSessionSelector() {
 
   trigger.onclick = (ev) => {
     ev.stopPropagation();
-    const isOpen = wrapper.classList.contains("open");
-    document.querySelectorAll(".custom-dropdown.open").forEach((el) => el.classList.remove("open"));
-    if (!isOpen) {
-      wrapper.classList.add("open");
+    if (typeof toggleCustomDropdownWrapper === "function") {
+      toggleCustomDropdownWrapper(wrapper);
     }
   };
 
@@ -600,7 +598,9 @@ async function probeChannelQuotaInBackground(channelId) {
     const data = await res.json();
     if (data && data.snapshot) {
       state = data.snapshot;
-      if (typeof renderAll === "function") {
+      if (typeof safeRenderAll === "function") {
+        safeRenderAll();
+      } else if (typeof renderAll === "function") {
         renderAll();
       } else {
         renderSessionSelector();

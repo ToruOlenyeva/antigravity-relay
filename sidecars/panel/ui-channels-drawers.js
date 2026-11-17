@@ -71,6 +71,7 @@ function createCompactFormDropdown(options, selectedValue, onSelect) {
       if (opt.value !== activeOpt.value) {
         onSelect(opt.value);
       }
+      if (typeof flushDeferredRender === "function") flushDeferredRender();
     };
 
     menu.appendChild(item);
@@ -78,10 +79,8 @@ function createCompactFormDropdown(options, selectedValue, onSelect) {
 
   trigger.onclick = (ev) => {
     ev.stopPropagation();
-    const isOpen = wrapper.classList.contains("open");
-    document.querySelectorAll(".custom-dropdown.open").forEach((el) => el.classList.remove("open"));
-    if (!isOpen) {
-      wrapper.classList.add("open");
+    if (typeof toggleCustomDropdownWrapper === "function") {
+      toggleCustomDropdownWrapper(wrapper);
     }
   };
 

@@ -81,10 +81,67 @@ if (window.matchMedia) {
   } catch (e) {}
 }
 
-// 点击空白处收起所有悬浮下拉框
+let hasDeferredRender = false;
+
+function hasOpenCustomDropdown() {
+  return Boolean(document.querySelector(".custom-dropdown.open"));
+}
+
+function closeCustomDropdowns(exceptWrapper = null) {
+  document.querySelectorAll(".custom-dropdown.open").forEach((el) => {
+    if (!exceptWrapper || el !== exceptWrapper) {
+      el.classList.remove("open");
+    }
+  });
+}
+
+function toggleCustomDropdownWrapper(wrapper, opts = {}) {
+  if (!wrapper) return;
+  const isOpen = wrapper.classList.contains("open");
+  closeCustomDropdowns();
+  if (!isOpen) {
+    if (opts.allowDropUp) {
+      const rect = wrapper.getBoundingClientRect();
+      if (window.innerHeight - rect.bottom < 190) {
+        wrapper.classList.add("drop-up");
+      } else {
+        wrapper.classList.remove("drop-up");
+      }
+    }
+    wrapper.classList.add("open");
+  } else {
+    flushDeferredRender();
+  }
+}
+
+function flushDeferredRender() {
+  if (hasDeferredRender && !hasOpenCustomDropdown()) {
+    hasDeferredRender = false;
+    renderAll();
+  }
+}
+
+function safeRenderAll() {
+  if (hasOpenCustomDropdown()) {
+    hasDeferredRender = true;
+    return;
+  }
+  hasDeferredRender = false;
+  renderAll();
+}
+
+// 点击空白处或按 Escape 收起所有悬浮下拉框并冲刷挂起的后台刷新
 document.addEventListener("click", (e) => {
-  if (!e.target.closest(".custom-dropdown")) {
-    document.querySelectorAll(".custom-dropdown.open").forEach((el) => el.classList.remove("open"));
+  if (!e.target.closest(".custom-dropdown") && hasOpenCustomDropdown()) {
+    closeCustomDropdowns();
+    flushDeferredRender();
+  }
+});
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && hasOpenCustomDropdown()) {
+    closeCustomDropdowns();
+    flushDeferredRender();
   }
 });
 
@@ -126,6 +183,7 @@ function applyI18n() {
 }
 
 function renderAll() {
+  hasDeferredRender = false;
   const t = I18N[currentLang];
   const lsBadge = document.getElementById("uiLsBadge");
   if (state.lsOnline) {
@@ -344,6 +402,7 @@ function createCustomDropdown(selectedValue, onSelect, modelObj = null, isGcpSco
       if (opt.value !== activeOpt.value) {
         onSelect(opt.value);
       }
+      flushDeferredRender();
     };
 
     menu.appendChild(item);
@@ -351,17 +410,7 @@ function createCustomDropdown(selectedValue, onSelect, modelObj = null, isGcpSco
 
   trigger.onclick = (ev) => {
     ev.stopPropagation();
-    const isOpen = wrapper.classList.contains("open");
-    document.querySelectorAll(".custom-dropdown.open").forEach((el) => el.classList.remove("open"));
-    if (!isOpen) {
-      const rect = wrapper.getBoundingClientRect();
-      if (window.innerHeight - rect.bottom < 190) {
-        wrapper.classList.add("drop-up");
-      } else {
-        wrapper.classList.remove("drop-up");
-      }
-      wrapper.classList.add("open");
-    }
+    toggleCustomDropdownWrapper(wrapper, { allowDropUp: true });
   };
 
   wrapper.appendChild(trigger);
@@ -698,7 +747,11 @@ async function loadSystemStatus(force = false, silent = false) {
       if (switchingAccountId && prevActive?.channelId) {
         state.activeAccount = prevActive;
       }
-      renderAll();
+      if (force) {
+        renderAll();
+      } else {
+        safeRenderAll();
+      }
       if (!silent) showToast(I18N[currentLang].toastRefreshed);
     }
   } catch (e) {}
@@ -1157,15 +1210,15 @@ function ensureSseConnected() {
               addGcpDraft.email = prevOAuthEvent.email;
               addGcpDraft.channelType = "gcp";
               addGcpDraft.scannedProjects = [];
-              renderAll();
+              safeRenderAll();
               showToast(`${I18N[currentLang].toastOAuthSuccess}${prevOAuthEvent.email}`);
               return;
             }
-            renderAll();
+            safeRenderAll();
             showToast(`${I18N[currentLang].toastOAuthSuccess}${prevOAuthEvent.email}`);
             return;
           }
-          renderAll();
+          safeRenderAll();
         }
       } catch (e) {}
     };
@@ -1178,9 +1231,15 @@ function syncSseLifecycleForVisibility(forceStatusRefresh = false) {
     closeSseConnection();
     return false;
   }
+  const hadLiveSse = Boolean(sseSource && sseSource.readyState === 1);
   ensureSseConnected();
+  // 若任意下拉菜单正在展开中，切勿由 pointerenter / pointerdown / focus 触发状态重绘把菜单收起
+  if (hasOpenCustomDropdown()) {
+    return true;
+  }
   const now = Date.now();
-  if (forceStatusRefresh || now - lastVisibleRefreshAt > 3000) {
+  // 仅在隐藏恢复可见强刷或 SSE 断线重连后（>10s）补拉一次 /api/status；SSE 在线时不因点击或移入高频重绘
+  if (forceStatusRefresh || (!hadLiveSse && now - lastVisibleRefreshAt > 10000)) {
     lastVisibleRefreshAt = now;
     loadSystemStatus(false, true);
   }
