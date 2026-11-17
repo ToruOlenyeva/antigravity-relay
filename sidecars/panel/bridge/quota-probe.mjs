@@ -449,7 +449,7 @@ export async function probeChannelQuotaSnapshot(channelId) {
     }
 
     let probeRes = await tryProbeWithToken(accessToken);
-    if ((probeRes.modelsResp.status === 401 || probeRes.modelsResp.status === 403 || !probeRes.modelsResp.data) && refreshToken) {
+    if ((probeRes.modelsResp.status === 401 || (!probeRes.modelsResp.data && probeRes.modelsResp.status <= 0)) && refreshToken) {
       attemptDiag.refreshAttempted = true;
       try {
         const refreshed = await refreshOAuthAccessToken(refreshToken);
@@ -703,11 +703,16 @@ export async function probeAllChannelsQuotaSnapshot() {
   }
   const channelIds = Object.keys(cfg0.accounts || {});
   const results = {};
-  for (const cid of channelIds) {
-    try {
-      results[cid] = await probeChannelQuotaSnapshot(cid);
-    } catch (err) {
-      results[cid] = { error: err.message };
+  const settled = await Promise.allSettled(
+    channelIds.map(async (cid) => [cid, await probeChannelQuotaSnapshot(cid)])
+  );
+  for (let i = 0; i < settled.length; i++) {
+    const cid = channelIds[i];
+    const item = settled[i];
+    if (item.status === "fulfilled") {
+      results[cid] = item.value[1];
+    } else {
+      results[cid] = { error: item.reason?.message || "probe_failed" };
     }
   }
   return results;

@@ -105,6 +105,13 @@ function broadcastSnapshot(snapshot) {
   }
 }
 
+globalThis.__agyBroadcastLatestSnapshot = async () => {
+  try {
+    const snap = await lsBridge.fetchLiveSystemSnapshot(false, { skipPersonalProbe: true });
+    broadcastSnapshot(snap);
+  } catch {}
+};
+
 function readRawBufferBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -252,7 +259,7 @@ async function requestHandler(req, res) {
       if (force) {
         await lsBridge.probeAllChannelsQuotaSnapshot().catch(() => {});
       }
-      const snap = await lsBridge.fetchLiveSystemSnapshot(force);
+      const snap = await lsBridge.fetchLiveSystemSnapshot(force, { skipPersonalProbe: force });
       broadcastSnapshot(snap);
       return sendJson(res, 200, snap);
     } catch (err) {

@@ -729,32 +729,57 @@ function renderRoutingList() {
 }
 
 let currentFrontendVersion = "";
+let manualRefreshInFlight = null;
+
+function setRefreshButtonLoading(isLoading) {
+  const btn = document.getElementById("refreshBtn");
+  if (!btn) return;
+  const t = I18N[currentLang];
+  btn.disabled = Boolean(isLoading);
+  btn.textContent = isLoading
+    ? (t.refreshingBtn || (currentLang === "zh" ? "刷新中..." : "Refreshing..."))
+    : t.refreshBtn;
+}
 
 async function loadSystemStatus(force = false, silent = false) {
-  try {
-    const res = await fetch(`/api/status${force ? "?force=1" : ""}`);
-    const data = await res.json();
-    if (data && !data.error) {
-      if (data.frontendVersion) {
-        if (currentFrontendVersion && currentFrontendVersion !== data.frontendVersion) {
-          window.location.reload();
-          return;
+  if (force && manualRefreshInFlight) {
+    return manualRefreshInFlight;
+  }
+  const run = (async () => {
+    if (force) setRefreshButtonLoading(true);
+    try {
+      const res = await fetch(`/api/status${force ? "?force=1" : ""}`);
+      const data = await res.json();
+      if (data && !data.error) {
+        if (data.frontendVersion) {
+          if (currentFrontendVersion && currentFrontendVersion !== data.frontendVersion) {
+            window.location.reload();
+            return;
+          }
+          currentFrontendVersion = data.frontendVersion;
         }
-        currentFrontendVersion = data.frontendVersion;
+        const prevActive = state.activeAccount;
+        state = data;
+        if (switchingAccountId && prevActive?.channelId) {
+          state.activeAccount = prevActive;
+        }
+        if (force) {
+          renderAll();
+        } else {
+          safeRenderAll();
+        }
+        if (!silent) showToast(I18N[currentLang].toastRefreshed);
       }
-      const prevActive = state.activeAccount;
-      state = data;
-      if (switchingAccountId && prevActive?.channelId) {
-        state.activeAccount = prevActive;
-      }
-      if (force) {
-        renderAll();
-      } else {
-        safeRenderAll();
-      }
-      if (!silent) showToast(I18N[currentLang].toastRefreshed);
+    } catch (e) {} finally {
+      if (force) setRefreshButtonLoading(false);
     }
-  } catch (e) {}
+  })();
+  if (force) {
+    manualRefreshInFlight = run.finally(() => {
+      manualRefreshInFlight = null;
+    });
+  }
+  return run;
 }
 
 function handleManualRefresh() {
@@ -1304,9 +1329,9 @@ if (isPanelActuallyVisible()) {
   loadSystemStatus(false, true);
   ensureSseConnected();
 }
+// 仅按本地时钟每 60 秒刷新一次倒计时分钟数显示，不发起任何云端或状态网络轮询（零风控）
 setInterval(() => {
-  if (isPanelActuallyVisible()) {
-    lastVisibleRefreshAt = Date.now();
-    loadSystemStatus(false, true);
+  if (isPanelActuallyVisible() && !hasOpenCustomDropdown()) {
+    renderQuotaGroups();
   }
-}, 45000);
+}, 60000);

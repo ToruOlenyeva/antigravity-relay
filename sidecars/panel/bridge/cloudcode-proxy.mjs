@@ -615,8 +615,13 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
             }
             try { res.end(); } catch {}
             if (routedTargetAcc?.id && isStreamOrGenerate) {
-              setTimeout(() => {
-                probeChannelQuotaSnapshot(routedTargetAcc.id).catch(() => {});
+              setTimeout(async () => {
+                try {
+                  await probeChannelQuotaSnapshot(routedTargetAcc.id);
+                  if (typeof globalThis.__agyBroadcastLatestSnapshot === "function") {
+                    await globalThis.__agyBroadcastLatestSnapshot();
+                  }
+                } catch {}
               }, 2000);
             }
             resolve();
