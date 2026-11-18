@@ -1,10 +1,12 @@
 import http from "node:http";
+import net from "node:net";
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
   PLUGINS_DIR,
+  RELAY_CONFIG_FILE,
   APP_STORAGE_FILE,
   PRELOAD_SDK_PATH,
   readRelayConfig,
@@ -18,21 +20,79 @@ const __dirname = path.dirname(__filename);
 const PORT = Number(process.env.ANTIGRAVITY_SIDECAR_WEB_PORT || process.env.PORT || 8089);
 globalThis.__AGY_RELAY_MAIN_V2__ = true;
 
-function checkParentLanguageServerAlive() {
-  const ppid = Number(process.env.AGY_PARENT_LS_PID || process.ppid || 0);
-  if (ppid <= 0) return true;
-  try {
-    process.kill(ppid, 0);
-    return true;
-  } catch (err) {
-    if (err && err.code === "ESRCH") {
-      process.exit(0);
-    }
-    return true;
-  }
+let isHostLsReachable = true;
+let lsProbeFailCount = 0;
+
+function parseHostLsAddress() {
+  const raw = String(process.env.ANTIGRAVITY_LS_ADDRESS || "").trim();
+  if (!raw) return null;
+  const idx = raw.lastIndexOf(":");
+  if (idx <= 0) return null;
+  const host = raw.slice(0, idx).replace(/^\[|\]$/g, "").trim() || "127.0.0.1";
+  const port = Number(raw.slice(idx + 1));
+  if (!Number.isFinite(port) || port <= 0) return null;
+  return { host, port };
 }
 
-setInterval(checkParentLanguageServerAlive, 5000).unref();
+function probeHostLsTcpOnce(timeoutMs = 1500) {
+  const target = parseHostLsAddress();
+  if (!target) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (ok) => {
+      if (settled) return;
+      settled = true;
+      resolve(ok);
+    };
+    try {
+      const sock = net.createConnection({ host: target.host, port: target.port });
+      sock.setTimeout(timeoutMs);
+      sock.once("connect", () => {
+        try { sock.destroy(); } catch {}
+        done(true);
+      });
+      sock.once("timeout", () => {
+        try { sock.destroy(); } catch {}
+        done(false);
+      });
+      sock.once("error", () => {
+        try { sock.destroy(); } catch {}
+        done(false);
+      });
+    } catch {
+      done(false);
+    }
+  });
+}
+
+async function checkParentLanguageServerAlive() {
+  const ppid = Number(process.env.AGY_PARENT_LS_PID || process.ppid || 0);
+  if (ppid > 0) {
+    try {
+      process.kill(ppid, 0);
+    } catch (err) {
+      if (err && err.code === "ESRCH") {
+        process.exit(0);
+      }
+    }
+  }
+  if (process.env.ANTIGRAVITY_SIDECAR_WEB_PORT && parseHostLsAddress()) {
+    const alive = await probeHostLsTcpOnce(1200);
+    if (alive) {
+      isHostLsReachable = true;
+      lsProbeFailCount = 0;
+    } else if (process.uptime() > 15) {
+      lsProbeFailCount += 1;
+      if (lsProbeFailCount >= 2) {
+        isHostLsReachable = false;
+        process.exit(0);
+      }
+    }
+  }
+  return true;
+}
+
+setInterval(() => { checkParentLanguageServerAlive().catch(() => {}); }, 5000).unref();
 try {
   process.stdin.on("end", () => process.exit(0));
   process.stdin.on("close", () => process.exit(0));
@@ -90,6 +150,32 @@ process.on("unhandledRejection", (reason) => {
 
 const sseClients = new Set();
 let latestSnapshot = null;
+let snapshotRevision = 1;
+let snapshotUpdatedAt = Date.now();
+let lastSnapshotSignature = "";
+let latestOAuthEvent = null;
+let latestOAuthEventAt = 0;
+
+function computeRelaySnapshotSignature(snapshot) {
+  if (!snapshot || typeof snapshot !== "object") return "";
+  const activeId = snapshot.activeAccount?.channelId || snapshot.activeAccount?.id || "";
+  const accountsSig = Array.isArray(snapshot.accounts)
+    ? snapshot.accounts.map((a) => {
+        const groups = Array.isArray(a.quotaGroups)
+          ? a.quotaGroups.map((g) => `${g.groupKey || g.label || ""}:${g.remainingPercent ?? g.remainingFraction ?? ""}:${g.resetTime || ""}`).join(",")
+          : "";
+        return `${a.channelId || a.id || ""}|${a.tierCode || ""}|${a.lastProbeError?.code || a.lastProbeError?.message || ""}|${groups}`;
+      }).join(";")
+    : "";
+  const topGroups = Array.isArray(snapshot.quotaGroups)
+    ? snapshot.quotaGroups.map((g) => `${g.groupKey || g.label || ""}:${g.remainingPercent ?? g.remainingFraction ?? ""}:${g.resetTime || ""}`).join(",")
+    : "";
+  const tel = snapshot.telemetry || {};
+  const telSig = `${tel.fullConversationId || tel.conversationId || ""}:${tel.totalTokens ?? ""}:${tel.roundCount ?? ""}`;
+  const oauthSig = `${snapshot.oauthPending ? 1 : 0}:${snapshot.lastOAuthEvent?.eventId || snapshot.lastOAuthEvent?.email || ""}`;
+  const routeSig = snapshot.routing ? JSON.stringify(snapshot.routing) : "";
+  return `${snapshot.frontendVersion || ""}|${snapshot.lsOnline ? 1 : 0}|${snapshot.personalQuotaPool || ""}|${activeId}|${topGroups}|${accountsSig}|${telSig}|${oauthSig}|${routeSig}`;
+}
 
 function getFrontendAssetsVersion() {
   let ver = 0;
@@ -104,16 +190,57 @@ function getFrontendAssetsVersion() {
 function broadcastSnapshot(snapshot) {
   if (!snapshot) return;
   snapshot.frontendVersion = getFrontendAssetsVersion();
+  if (snapshot.lastOAuthEvent?.success) {
+    latestOAuthEvent = {
+      ...snapshot.lastOAuthEvent,
+      eventId: snapshot.lastOAuthEvent.eventId || `${snapshot.lastOAuthEvent.email || ""}:${Date.now()}`
+    };
+    latestOAuthEventAt = Date.now();
+    snapshot.lastOAuthEvent = latestOAuthEvent;
+  } else if (latestOAuthEvent && (Date.now() - latestOAuthEventAt < 60000) && !snapshot.lastOAuthEvent) {
+    snapshot.lastOAuthEvent = latestOAuthEvent;
+  }
+  const nextSig = computeRelaySnapshotSignature(snapshot);
+  if (nextSig && nextSig !== lastSnapshotSignature) {
+    lastSnapshotSignature = nextSig;
+    snapshotRevision += 1;
+    snapshotUpdatedAt = Date.now();
+  }
+  snapshot.stateRevision = snapshotRevision;
   latestSnapshot = snapshot;
+  if (sseClients.size === 0) return;
   const payload = `data: ${JSON.stringify(snapshot)}\n\n`;
-  for (const clientRes of sseClients) {
+  for (const clientRes of [...sseClients]) {
     try {
+      if (clientRes.destroyed || clientRes.writableEnded) {
+        clientRes.__sseCleanup?.();
+        sseClients.delete(clientRes);
+        continue;
+      }
       clientRes.write(payload);
     } catch {
+      clientRes.__sseCleanup?.();
       sseClients.delete(clientRes);
     }
   }
 }
+
+setInterval(() => {
+  if (sseClients.size === 0) return;
+  for (const clientRes of [...sseClients]) {
+    try {
+      if (clientRes.destroyed || clientRes.writableEnded) {
+        clientRes.__sseCleanup?.();
+        sseClients.delete(clientRes);
+      } else {
+        clientRes.write(": keepalive\n\n");
+      }
+    } catch {
+      clientRes.__sseCleanup?.();
+      sseClients.delete(clientRes);
+    }
+  }
+}, 25000).unref();
 
 globalThis.__agyBroadcastLatestSnapshot = async () => {
   try {
@@ -186,7 +313,15 @@ async function requestHandler(req, res) {
   if (req.method === "POST" && pathname === "/api/restart-sidecar") {
     const onlyStandalone = url.searchParams.get("onlyStandalone") === "1";
     if (onlyStandalone && process.env.ANTIGRAVITY_SIDECAR_WEB_PORT) {
-      return sendJson(res, 200, { success: false, ignored: true });
+      const lsAlive = await probeHostLsTcpOnce(400);
+      if (lsAlive) {
+        isHostLsReachable = true;
+        return sendJson(res, 200, { success: false, ignored: true });
+      }
+      isHostLsReachable = false;
+      sendJson(res, 200, { success: true, evictedStaleParent: true });
+      setTimeout(() => process.exit(0), 100);
+      return;
     }
     sendJson(res, 200, { success: true });
     if (onlyStandalone) {
@@ -246,30 +381,87 @@ async function requestHandler(req, res) {
     return;
   }
 
+  if (req.method === "GET" && pathname === "/api/state-version") {
+    let configMtimeMs = 0;
+    try {
+      if (fs.existsSync(RELAY_CONFIG_FILE)) {
+        configMtimeMs = Math.floor(fs.statSync(RELAY_CONFIG_FILE).mtimeMs);
+      }
+    } catch {}
+    return sendJson(res, 200, {
+      revision: snapshotRevision,
+      frontendVersion: getFrontendAssetsVersion(),
+      configMtimeMs,
+      activeChannelId: latestSnapshot?.activeAccount?.channelId || latestSnapshot?.activeAccount?.id || "",
+      oauthPending: Boolean(latestSnapshot?.oauthPending),
+      lastOAuthEventId: latestOAuthEvent && (Date.now() - latestOAuthEventAt < 60000) ? latestOAuthEvent.eventId : "",
+      updatedAt: snapshotUpdatedAt
+    });
+  }
+
   if (req.method === "GET" && pathname === "/api/events") {
+    const localPort = Number(req.socket?.localPort || PORT);
+    const isGatewayPort = Boolean(PORT !== 8089 && localPort === PORT);
+    res.__localPort = localPort;
+
+    if (isGatewayPort) {
+      // Safeguard plugin:// LS gateway against Chromium 6-socket pool exhaustion from legacy/cached tabs
+      const gatewayClients = [...sseClients].filter((c) => c.__localPort === PORT);
+      while (gatewayClients.length >= 2) {
+        const oldest = gatewayClients.shift();
+        if (oldest) {
+          oldest.__sseCleanup?.();
+          sseClients.delete(oldest);
+          try { oldest.end(); } catch {}
+        }
+      }
+    }
+
     res.writeHead(200, {
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-store, no-cache, must-revalidate",
-      "Connection": "keep-alive"
+      "Connection": isGatewayPort ? "close" : "keep-alive"
     });
-    res.write(": connected\n\n");
+    res.write(isGatewayPort ? "retry: 3000\n: connected\n\n" : ": connected\n\n");
     if (latestSnapshot) {
       try {
         res.write(`data: ${JSON.stringify(latestSnapshot)}\n\n`);
       } catch {}
     }
+
+    let cleaned = false;
+    let ttlTimer = null;
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
+      if (ttlTimer) clearTimeout(ttlTimer);
+      sseClients.delete(res);
+    };
+    res.__sseCleanup = cleanup;
     sseClients.add(res);
-    req.on("close", () => sseClients.delete(res));
+    req.on("close", cleanup);
+    res.on("close", cleanup);
+    res.on("error", cleanup);
+    req.socket?.on("close", cleanup);
+
+    if (isGatewayPort) {
+      ttlTimer = setTimeout(() => {
+        cleanup();
+        try { res.end(); } catch {}
+      }, 20000);
+      ttlTimer.unref();
+    }
     return;
   }
 
   if (req.method === "GET" && pathname === "/api/status") {
     try {
       const force = url.searchParams.get("force") === "1";
+      const isLight = url.searchParams.get("light") === "1";
       if (force) {
         await lsBridge.probeAllChannelsQuotaSnapshot().catch(() => {});
       }
-      const snap = await lsBridge.fetchLiveSystemSnapshot(force, { skipPersonalProbe: force });
+      const snap = await lsBridge.fetchLiveSystemSnapshot(force, { skipPersonalProbe: force || isLight });
       broadcastSnapshot(snap);
       return sendJson(res, 200, snap);
     } catch (err) {
@@ -725,7 +917,13 @@ async function requestHandler(req, res) {
   res.end("Not Found");
 }
 
-const server = http.createServer(requestHandler);
+function configureSidecarHttpServer(srv) {
+  srv.keepAliveTimeout = 4000;
+  srv.headersTimeout = 6000;
+  return srv;
+}
+
+const server = configureSidecarHttpServer(http.createServer(requestHandler));
 server.on("error", (err) => {
   console.log(`[AGY Relay Sidecar] Port ${PORT} notice: ${err.message}`);
 });
@@ -736,7 +934,7 @@ server.listen(PORT, "127.0.0.1", () => {
 const startupInstanceCtx = resolveCurrentInstanceContext();
 
 if (PORT !== 8089 && !startupInstanceCtx.isIsolatedInstance) {
-  const standaloneServer = http.createServer(requestHandler);
+  const standaloneServer = configureSidecarHttpServer(http.createServer(requestHandler));
   let retriedStandalone8089 = false;
   standaloneServer.on("error", (err) => {
     if (!retriedStandalone8089 && err && err.code === "EADDRINUSE") {
@@ -747,14 +945,14 @@ if (PORT !== 8089 && !startupInstanceCtx.isIsolatedInstance) {
           port: 8089,
           path: "/api/restart-sidecar?onlyStandalone=1",
           method: "POST",
-          timeout: 500
+          timeout: 800
         }, () => {});
         evictReq.on("error", () => {});
         evictReq.end();
       } catch {}
       setTimeout(() => {
         try { standaloneServer.listen(8089, "127.0.0.1"); } catch {}
-      }, 400);
+      }, 650);
     }
   });
   try {
@@ -765,10 +963,20 @@ if (PORT !== 8089 && !startupInstanceCtx.isIsolatedInstance) {
 }
 
 const boundPorts = new Set([PORT, 8089]);
-function bindAdditionalRelayPorts() {
+let lastObservedAppStorageMtime = 0;
+function bindAdditionalRelayPorts(forceScan = false) {
   try {
     const ctx = resolveCurrentInstanceContext();
     if (ctx.isIsolatedInstance) return;
+    let currentMtime = 0;
+    try {
+      if (fs.existsSync(APP_STORAGE_FILE)) {
+        currentMtime = Math.floor(fs.statSync(APP_STORAGE_FILE).mtimeMs);
+      }
+    } catch {}
+    if (!forceScan && currentMtime === lastObservedAppStorageMtime && boundPorts.size > 2) return;
+    lastObservedAppStorageMtime = currentMtime;
+
     const isolatedPorts = getActiveIsolatedSidecarPorts();
     const candidatePorts = new Set();
     const cfg = readRelayConfig();
@@ -794,7 +1002,7 @@ function bindAdditionalRelayPorts() {
       if (boundPorts.has(p)) continue;
       boundPorts.add(p);
       try {
-        const s = http.createServer(requestHandler);
+        const s = configureSidecarHttpServer(http.createServer(requestHandler));
         s.on("error", () => boundPorts.delete(p));
         s.listen(p, "127.0.0.1");
       } catch {
@@ -805,8 +1013,9 @@ function bindAdditionalRelayPorts() {
 }
 
 if (!startupInstanceCtx.isIsolatedInstance) {
-  bindAdditionalRelayPorts();
-  setTimeout(bindAdditionalRelayPorts, 4000);
+  bindAdditionalRelayPorts(true);
+  setTimeout(() => bindAdditionalRelayPorts(true), 4000);
+  setInterval(() => bindAdditionalRelayPorts(false), 30000).unref();
 }
 
 // 启动即预热一次实时状态快照与全通道余额探测，同步更新 agy-relay-config.json 与 SSE 缓存

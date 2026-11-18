@@ -753,30 +753,72 @@ function reconcileSwitchingState(nextSnap, prevActive) {
   return nextSnap;
 }
 
-async function loadSystemStatus(force = false, silent = false) {
+let lastHandledOAuthEventKey = "";
+let lastKnownStateRevision = 0;
+let lastKnownConfigMtimeMs = 0;
+let lastFullStatusFetchAt = 0;
+
+function applyIncomingSnapshot(nextSnap, opts = {}) {
+  if (!nextSnap || nextSnap.error) return false;
+  if (nextSnap.frontendVersion) {
+    if (currentFrontendVersion && currentFrontendVersion !== dataFrontendVer(nextSnap)) {
+      window.location.reload();
+      return false;
+    }
+    currentFrontendVersion = nextSnap.frontendVersion;
+  }
+  if (nextSnap.stateRevision !== undefined) {
+    lastKnownStateRevision = Math.max(lastKnownStateRevision, Number(nextSnap.stateRevision || 0));
+  }
+  lastFullStatusFetchAt = Date.now();
+
+  const prevOAuthEvent = nextSnap.lastOAuthEvent;
+  const prevActive = state.activeAccount;
+  state = reconcileSwitchingState(nextSnap, prevActive);
+
+  if (prevOAuthEvent?.success && prevOAuthEvent.email) {
+    const eventKey = prevOAuthEvent.eventId || `${prevOAuthEvent.email}|${prevOAuthEvent.autoScanGcp ? "gcp" : "personal"}`;
+    const isNewOAuthEvent = eventKey !== lastHandledOAuthEventKey;
+    if (isNewOAuthEvent) {
+      lastHandledOAuthEventKey = eventKey;
+      if (prevOAuthEvent.autoScanGcp) {
+        isAddGcpDrawerOpen = true;
+        addGcpDraft.sourceMode = "existing";
+        addGcpDraft.email = prevOAuthEvent.email;
+        addGcpDraft.channelType = "gcp";
+        addGcpDraft.scannedProjects = [];
+      }
+    }
+    if (opts.forceRender) {
+      renderAll();
+    } else {
+      safeRenderAll();
+    }
+    if (isNewOAuthEvent && opts.allowOAuthToast !== false) {
+      showToast(`${I18N[currentLang].toastOAuthSuccess}${prevOAuthEvent.email}`);
+    }
+    return true;
+  }
+
+  if (opts.forceRender) {
+    renderAll();
+  } else {
+    safeRenderAll();
+  }
+  return true;
+}
+
+async function loadSystemStatus(force = false, silent = false, opts = {}) {
   if (force && manualRefreshInFlight) {
     return manualRefreshInFlight;
   }
   const run = (async () => {
     if (force) setRefreshButtonLoading(true);
     try {
-      const res = await fetch(`/api/status${force ? "?force=1" : ""}`);
+      const qs = force ? "?force=1" : (opts?.light ? "?light=1" : "");
+      const res = await fetch(`/api/status${qs}`, { cache: "no-store" });
       const data = await res.json();
-      if (data && !data.error) {
-        if (data.frontendVersion) {
-          if (currentFrontendVersion && currentFrontendVersion !== data.frontendVersion) {
-            window.location.reload();
-            return;
-          }
-          currentFrontendVersion = data.frontendVersion;
-        }
-        const prevActive = state.activeAccount;
-        state = reconcileSwitchingState(data, prevActive);
-        if (force) {
-          renderAll();
-        } else {
-          safeRenderAll();
-        }
+      if (applyIncomingSnapshot(data, { forceRender: force, allowOAuthToast: true })) {
         if (!silent) showToast(I18N[currentLang].toastRefreshed);
       }
     } catch (e) {} finally {
@@ -1195,14 +1237,17 @@ async function switchPersonalQuotaPool(pool) {
   } catch (e) {}
 }
 
+const isPluginCustomScheme = typeof window !== "undefined" && window.location?.protocol === "plugin:";
 let sseSource = null;
+let embeddedPollTimer = null;
+let embeddedPollInFlight = false;
 let isViewportIntersecting = true;
 let lastVisibleRefreshAt = 0;
 
 function isEmbeddedSidecarWindow() {
   if (typeof window === "undefined") return false;
   if (window.location.port === "8089") return false;
-  return Boolean(window.sidecar || new URLSearchParams(window.location.search).get("token"));
+  return Boolean(isPluginCustomScheme || window.sidecar || new URLSearchParams(window.location.search).get("token"));
 }
 
 function isPanelActuallyVisible() {
@@ -1215,7 +1260,15 @@ function isPanelActuallyVisible() {
   return true;
 }
 
+function stopEmbeddedPollTimer() {
+  if (embeddedPollTimer) {
+    clearTimeout(embeddedPollTimer);
+    embeddedPollTimer = null;
+  }
+}
+
 function closeSseConnection() {
+  stopEmbeddedPollTimer();
   if (sseSource) {
     try {
       sseSource.close();
@@ -1224,10 +1277,60 @@ function closeSseConnection() {
   }
 }
 
-// 启动 SSE 实时流与按需可见门控（仅在面板真实可见时保持长连接，避免多标签耗尽 Chromium 同源连接池）
+function scheduleEmbeddedPoll() {
+  if (!isPluginCustomScheme || !isPanelActuallyVisible()) {
+    stopEmbeddedPollTimer();
+    return;
+  }
+  if (embeddedPollTimer) return;
+  const delayMs = (state.oauthPending || probingChannelIds.size > 0 || switchingAccountId) ? 750 : 1400;
+  embeddedPollTimer = setTimeout(async () => {
+    embeddedPollTimer = null;
+    if (!isPluginCustomScheme || !isPanelActuallyVisible()) return;
+    if (!hasOpenCustomDropdown() && !embeddedPollInFlight) {
+      embeddedPollInFlight = true;
+      try {
+        const res = await fetch("/api/state-version", { cache: "no-store" });
+        if (res.ok) {
+          const ver = await res.json();
+          if (ver?.frontendVersion && currentFrontendVersion && currentFrontendVersion !== ver.frontendVersion) {
+            window.location.reload();
+            return;
+          }
+          const nextRev = Number(ver?.revision || 0);
+          const nextMtime = Number(ver?.configMtimeMs || 0);
+          const nextOAuthId = String(ver?.lastOAuthEventId || "");
+          const needsRefresh =
+            (nextRev > 0 && nextRev !== lastKnownStateRevision) ||
+            (nextMtime > 0 && nextMtime !== lastKnownConfigMtimeMs) ||
+            (nextOAuthId && nextOAuthId !== lastHandledOAuthEventKey) ||
+            (Date.now() - lastFullStatusFetchAt >= 15000);
+          if (needsRefresh) {
+            if (nextRev > 0) lastKnownStateRevision = nextRev;
+            if (nextMtime > 0) lastKnownConfigMtimeMs = nextMtime;
+            await loadSystemStatus(false, true, { light: true });
+          }
+        }
+      } catch (e) {} finally {
+        embeddedPollInFlight = false;
+      }
+    }
+    scheduleEmbeddedPoll();
+  }, delayMs);
+}
+
+// 启动实时同步与按需可见门控：Standalone 页面维持 0ms SSE，plugin:// 嵌套面板改用可见态轻量版本轮询，彻底避免 Chromium/Electron 同源 6 连接池被 SSE 耗尽
 function ensureSseConnected() {
   if (!isPanelActuallyVisible()) {
     closeSseConnection();
+    return;
+  }
+  if (isPluginCustomScheme) {
+    if (sseSource) {
+      try { sseSource.close(); } catch (e) {}
+      sseSource = null;
+    }
+    scheduleEmbeddedPoll();
     return;
   }
   if (sseSource && sseSource.readyState !== 2) return;
@@ -1240,34 +1343,7 @@ function ensureSseConnected() {
       if (!isPanelActuallyVisible()) return;
       try {
         const snap = JSON.parse(ev.data);
-        if (snap && !snap.error) {
-          if (snap.frontendVersion) {
-            if (currentFrontendVersion && currentFrontendVersion !== dataFrontendVer(snap)) {
-              window.location.reload();
-              return;
-            }
-            currentFrontendVersion = snap.frontendVersion;
-          }
-          const prevOAuthEvent = snap.lastOAuthEvent;
-          const prevActive = state.activeAccount;
-          state = reconcileSwitchingState(snap, prevActive);
-          if (prevOAuthEvent?.success && prevOAuthEvent.email) {
-            if (prevOAuthEvent.autoScanGcp) {
-              isAddGcpDrawerOpen = true;
-              addGcpDraft.sourceMode = "existing";
-              addGcpDraft.email = prevOAuthEvent.email;
-              addGcpDraft.channelType = "gcp";
-              addGcpDraft.scannedProjects = [];
-              safeRenderAll();
-              showToast(`${I18N[currentLang].toastOAuthSuccess}${prevOAuthEvent.email}`);
-              return;
-            }
-            safeRenderAll();
-            showToast(`${I18N[currentLang].toastOAuthSuccess}${prevOAuthEvent.email}`);
-            return;
-          }
-          safeRenderAll();
-        }
+        applyIncomingSnapshot(snap, { forceRender: false, allowOAuthToast: true });
       } catch (e) {}
     };
   } catch (e) {}
@@ -1279,17 +1355,19 @@ function syncSseLifecycleForVisibility(forceStatusRefresh = false) {
     closeSseConnection();
     return false;
   }
-  const hadLiveSse = Boolean(sseSource && sseSource.readyState === 1);
+  const hadLiveSync = isPluginCustomScheme
+    ? Boolean(embeddedPollTimer || embeddedPollInFlight)
+    : Boolean(sseSource && sseSource.readyState === 1);
   ensureSseConnected();
   // 若任意下拉菜单正在展开中，切勿由 pointerenter / pointerdown / focus 触发状态重绘把菜单收起
   if (hasOpenCustomDropdown()) {
     return true;
   }
   const now = Date.now();
-  // 仅在隐藏恢复可见强刷或 SSE 断线重连后（>10s）补拉一次 /api/status；SSE 在线时不因点击或移入高频重绘
-  if (forceStatusRefresh || (!hadLiveSse && now - lastVisibleRefreshAt > 10000)) {
+  // 仅在隐藏恢复可见强刷或同步通道刚恢复且距上次刷新 >10s 时补拉一次 /api/status
+  if (forceStatusRefresh || (!hadLiveSync && now - lastVisibleRefreshAt > 10000)) {
     lastVisibleRefreshAt = now;
-    loadSystemStatus(false, true);
+    loadSystemStatus(false, true, { light: true });
   }
   return true;
 }

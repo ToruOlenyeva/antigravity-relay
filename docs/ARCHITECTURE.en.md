@@ -130,13 +130,13 @@ All endpoints are served identically from both the host-assigned internal Sideca
 
 ### 4.1 Get Live System Snapshot and Quota State
 - <b>Route</b>: `GET /api/status`
-- <b>Query Parameters</b>: `force=1` (optional, bypasses cache to probe live upstream quotas across all channels)
-- <b>Response</b>: Full JSON snapshot containing `lsOnline`, `activeAccount`, `availableModels`, `quotaGroups`, `accounts`, `routing`, and `oauthPending`.
+- <b>Query Parameters</b>: `force=1` (optional, bypasses cache to probe live upstream quotas across all channels), `light=1` (optional, skips redundant personal quota cloud probes during version-triggered syncs).
+- <b>Response</b>: Full JSON snapshot containing `lsOnline`, `activeAccount`, `availableModels`, `quotaGroups`, `accounts`, `routing`, `stateRevision`, and `oauthPending`.
 
-### 4.2 Real-Time State Broadcast Stream (SSE)
-- <b>Route</b>: `GET /api/events`
-- <b>Content-Type</b>: `text/event-stream; charset=utf-8`
-- <b>Description</b>: Broadcasts updated snapshots in `0ms` across all open panels whenever quotas refresh, OAuth completes, or channel states change.
+### 4.2 Real-Time State Broadcast (SSE), Embedded Version Check & Orphan Exit Watchdog
+- <b>Standalone SSE Stream</b>: `GET /api/events` (`text/event-stream; charset=utf-8`) keeps a live push stream on `http://127.0.0.1:8089` for `0ms` updates; requests arriving on the host-assigned gateway port behind `plugin://` are defensively capped at `<= 2` streams and closed cleanly after `20s`.
+- <b>Embedded Panel Version Probe</b>: `GET /api/state-version` returns `revision`, `frontendVersion`, `configMtimeMs`, `oauthPending`, and `lastOAuthEventId`. Inside `plugin://` iframes, `app.js` never opens `EventSource('/api/events')` and instead polls `/api/state-version` only while `isPanelActuallyVisible()` is `true`, eliminating socket leaks in Electron `customScheme` `fetchWithoutFollowing` that otherwise exhaust Chromium's 6-connection pool per origin when opening new projects.
+- <b>Host LS Liveness Watchdog</b>: `main.mjs` probes `ANTIGRAVITY_LS_ADDRESS` over TCP every `5s` (compensating for Windows `cmd.exe` wrappers masking `language_server.exe` exit in `process.ppid`), exiting cleanly after `2` failed probes and honoring `/api/restart-sidecar?onlyStandalone=1` immediately when the originating host LS is dead.
 
 ### 4.3 Channel, Instance & Diagnostic Management Endpoints
 - <b>Save Currently Logged-In Account</b>: `POST /api/save-current-account`
