@@ -239,7 +239,7 @@ export function extractModelDualQuota(accOrQuota, matched, baseFamily) {
     }
   }
   if (!grp) {
-    if (/argon/i.test(clean)) {
+    if (/\bargon\b|orchestrator/i.test(clean)) {
       grp = groups.find((g) => /argon/i.test(g.id || g.displayName || ""));
     } else if (/gemini/i.test(clean)) {
       grp = groups.find((g) => /gemini\s*models/i.test(g.id || g.displayName || ""));

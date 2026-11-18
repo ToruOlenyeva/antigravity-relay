@@ -26,6 +26,9 @@ export function stripModelVariantSuffix(rawLabel) {
 export function deriveCloudCodeSlugFromLabel(rawLabel) {
   const clean = String(rawLabel || "").trim();
   if (!clean) return "";
+  if (/^orchestrator\s*\(argon\)$/i.test(clean)) {
+    return "gemini-pro-orchestrator-g1-pro";
+  }
   let slug = clean
     .toLowerCase()
     .replace(/[()]/g, "")
@@ -37,26 +40,161 @@ export function deriveCloudCodeSlugFromLabel(rawLabel) {
   return slug;
 }
 
+const GENERIC_MODEL_MATCH_TOKENS = new Set([
+  "model",
+  "placeholder",
+  "gemini",
+  "claude",
+  "gpt",
+  "oss",
+  "pro",
+  "g1",
+  "g2",
+  "g3",
+  "tiered",
+  "thinking",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "extra",
+  "max",
+  "the",
+  "and",
+  "for",
+  "with",
+  "preview",
+  "latest",
+  "exp"
+]);
+
+function extractDistinctiveModelTokens(str) {
+  return String(str || "")
+    .toLowerCase()
+    .split(/[^a-z0-9.]+/)
+    .filter((tok) => tok && !GENERIC_MODEL_MATCH_TOKENS.has(tok));
+}
+
+function isArgonGatedLabelOrId(labelOrId) {
+  return /\bargon\b|orchestrator/i.test(String(labelOrId || ""));
+}
+
+/**
+ * 解析云端内部模型 ID（含无 displayName 或新上架模型）对应的 Antigravity 原生模型家族展示名。
+ * @param {string} modelKey 云端模型 slug 或占位符
+ * @param {object|null} modelObj 可选的模型元数据对象
+ * @param {object|null} regInput 动态模型注册表对象
+ * @returns {string}
+ */
+export function resolveFamilyForCloudSlug(modelKey, modelObj = null, regInput = null) {
+  const rawKey = String(modelKey || "").trim();
+  if (!rawKey) return "";
+  const lowerKey = rawKey.toLowerCase();
+  const reg = regInput || globalThis.__agyDynamicModelRegistryRef || {};
+
+  if (reg.placeholderToFamily?.[lowerKey]) {
+    return stripModelVariantSuffix(reg.placeholderToFamily[lowerKey]);
+  }
+  if (/orchestrator.*g1-pro|gemini-pro-orchestrator|^orchestrator-argon$/i.test(lowerKey)) {
+    return "Orchestrator (Argon)";
+  }
+
+  const aliasId = String(modelObj?.modelOrAlias?.model || modelObj?.modelOrAlias?.alias || modelObj?.model || "").trim().toLowerCase();
+  if (aliasId && reg.placeholderToFamily?.[aliasId]) {
+    return stripModelVariantSuffix(reg.placeholderToFamily[aliasId]);
+  }
+
+  const rawDisplay = String(modelObj?.displayName || modelObj?.label || "").trim();
+  const hasRichDisplay = Boolean(
+    rawDisplay &&
+    rawDisplay.toLowerCase() !== lowerKey &&
+    (/[\s()]/.test(rawDisplay) || /[A-Z]/.test(rawDisplay))
+  );
+  if (hasRichDisplay) {
+    return stripModelVariantSuffix(rawDisplay);
+  }
+
+  const catalog = Array.isArray(reg.clientCatalog) ? reg.clientCatalog : [];
+  if (catalog.length > 0) {
+    for (const item of catalog) {
+      if (Array.isArray(item?.variantIds) && item.variantIds.some((v) => String(v).toLowerCase() === lowerKey)) {
+        return item.label;
+      }
+    }
+    const slugTokens = new Set(extractDistinctiveModelTokens(lowerKey));
+    const mReset = String(modelObj?.quotaInfo?.resetTime || "").trim();
+    const mFrac = modelObj?.quotaInfo?.remainingFraction;
+    let bestLabel = "";
+    let bestScore = 0;
+    let tied = false;
+    for (const item of catalog) {
+      if (!item?.label) continue;
+      const catTokens = extractDistinctiveModelTokens(item.label);
+      let overlap = 0;
+      for (const t of catTokens) {
+        if (slugTokens.has(t)) overlap++;
+      }
+      if (overlap === 0) continue;
+      let score = overlap * 10;
+      if (mReset && item.quotaFingerprint?.resetTime && mReset === item.quotaFingerprint.resetTime) {
+        score += 5;
+        if (mFrac !== undefined && item.quotaFingerprint.remainingFraction === mFrac) {
+          score += 2;
+        }
+      }
+      if (score > bestScore) {
+        bestScore = score;
+        bestLabel = item.label;
+        tied = false;
+      } else if (score === bestScore) {
+        tied = true;
+      }
+    }
+    if (bestLabel && !tied && bestScore >= 10) {
+      return bestLabel;
+    }
+  }
+  return "";
+}
+
 export function ensureDynamicModelRegistry(cfg) {
-  if (!cfg || typeof cfg !== "object") return { placeholderToSlug: {}, placeholderToFamily: {}, labelToSlug: {} };
+  if (!cfg || typeof cfg !== "object") {
+    return { placeholderToSlug: {}, placeholderToFamily: {}, labelToSlug: {}, clientCatalog: [] };
+  }
   if (!cfg.__meta__ || typeof cfg.__meta__ !== "object") cfg.__meta__ = {};
   if (!cfg.__meta__.dynamicModelRegistry || typeof cfg.__meta__.dynamicModelRegistry !== "object") {
     cfg.__meta__.dynamicModelRegistry = {
       placeholderToSlug: {},
       placeholderToFamily: {},
-      labelToSlug: {}
+      labelToSlug: {},
+      clientCatalog: []
     };
   }
   const reg = cfg.__meta__.dynamicModelRegistry;
   if (!reg.placeholderToSlug) reg.placeholderToSlug = {};
   if (!reg.placeholderToFamily) reg.placeholderToFamily = {};
   if (!reg.labelToSlug) reg.labelToSlug = {};
+  if (!Array.isArray(reg.clientCatalog)) reg.clientCatalog = [];
+
   for (const [k, fam] of Object.entries(reg.placeholderToFamily)) {
     const cleanFam = stripModelVariantSuffix(fam);
     if (cleanFam && cleanFam !== fam) {
       reg.placeholderToFamily[k] = cleanFam;
     }
   }
+
+  // 修正并固化 Orchestrator (Argon) 占位符与云端模型 ID 映射，避免误推导为 orchestrator-argon
+  if (!reg.placeholderToSlug["model_placeholder_m668"] || reg.placeholderToSlug["model_placeholder_m668"] === "orchestrator-argon") {
+    reg.placeholderToSlug["model_placeholder_m668"] = "gemini-pro-orchestrator-g1-pro";
+  }
+  if (!reg.labelToSlug["orchestrator (argon)"] || reg.labelToSlug["orchestrator (argon)"] === "orchestrator-argon") {
+    reg.labelToSlug["orchestrator (argon)"] = "gemini-pro-orchestrator-g1-pro";
+  }
+  reg.placeholderToFamily["model_placeholder_m668"] = "Orchestrator (Argon)";
+  reg.placeholderToFamily["gemini-pro-orchestrator-g1-pro"] = "Orchestrator (Argon)";
+  reg.placeholderToFamily["orchestrator-argon"] = "Orchestrator (Argon)";
+
+  globalThis.__agyDynamicModelRegistryRef = reg;
   return reg;
 }
 
@@ -66,24 +204,38 @@ export function learnModelsFromCloudCodeResponse(cfg, rawModelsResp) {
   const reg = ensureDynamicModelRegistry(cfg);
   let changed = false;
   for (const [modelKey, m] of Object.entries(modelsObj)) {
-    if (!m || typeof m !== "object" || /disabled$/i.test(modelKey)) continue;
-    const rawLabel = String(m.displayName || m.label || "").trim();
-    if (!rawLabel || isLegacyDeprecatedModel(rawLabel) || isLegacyDeprecatedModel(modelKey)) continue;
-    const lowerLabel = rawLabel.toLowerCase();
-    const baseFamily = stripModelVariantSuffix(rawLabel);
-    if (reg.labelToSlug[lowerLabel] !== modelKey) {
-      reg.labelToSlug[lowerLabel] = modelKey;
-      changed = true;
-    }
+    if (!m || typeof m !== "object" || /disabled$/i.test(modelKey) || isLegacyDeprecatedModel(modelKey)) continue;
     const lowerKey = modelKey.toLowerCase();
-    if (baseFamily && reg.placeholderToFamily[lowerKey] !== baseFamily) {
+    const rawLabel = String(m.displayName || m.label || "").trim();
+    const baseFamily = resolveFamilyForCloudSlug(modelKey, m, reg);
+    if (!baseFamily || isLegacyDeprecatedModel(baseFamily) || (rawLabel && isLegacyDeprecatedModel(rawLabel))) continue;
+
+    if (rawLabel && rawLabel.toLowerCase() !== lowerKey) {
+      const lowerLabel = rawLabel.toLowerCase();
+      if (reg.labelToSlug[lowerLabel] !== modelKey) {
+        reg.labelToSlug[lowerLabel] = modelKey;
+        changed = true;
+      }
+    }
+    const baseLower = baseFamily.toLowerCase();
+    if (!stripModelVariantSuffix(modelKey).includes(modelKey) || !/\((Low|Medium|High|XHigh|Extra|Max)\)$/i.test(rawLabel)) {
+      if (!reg.labelToSlug[baseLower] || reg.labelToSlug[baseLower] === "orchestrator-argon") {
+        reg.labelToSlug[baseLower] = modelKey;
+        changed = true;
+      }
+    }
+    if (reg.placeholderToFamily[lowerKey] !== baseFamily) {
       reg.placeholderToFamily[lowerKey] = baseFamily;
       changed = true;
     }
-    if (baseFamily) {
-      const famSlug = deriveCloudCodeSlugFromLabel(baseFamily);
-      if (famSlug && reg.placeholderToFamily[famSlug] !== baseFamily) {
-        reg.placeholderToFamily[famSlug] = baseFamily;
+    const famSlug = deriveCloudCodeSlugFromLabel(baseFamily);
+    if (famSlug && reg.placeholderToFamily[famSlug] !== baseFamily) {
+      reg.placeholderToFamily[famSlug] = baseFamily;
+      changed = true;
+    }
+    for (const catItem of reg.clientCatalog) {
+      if (catItem?.label === baseFamily && Array.isArray(catItem.variantIds) && !catItem.variantIds.includes(modelKey)) {
+        catItem.variantIds.push(modelKey);
         changed = true;
       }
     }
@@ -91,41 +243,93 @@ export function learnModelsFromCloudCodeResponse(cfg, rawModelsResp) {
   return changed;
 }
 
-export function learnModelsFromLsClientConfigs(cfg, clientModelConfigs) {
+export function learnModelsFromLsClientConfigs(cfg, clientModelConfigs, opts = {}) {
   if (!Array.isArray(clientModelConfigs) || clientModelConfigs.length === 0) return false;
   const reg = ensureDynamicModelRegistry(cfg);
   let changed = false;
+  const isPersonal = Boolean(opts?.isPersonal);
+  const catalogMap = new Map();
+
   for (const m of clientModelConfigs) {
     if (!m || typeof m !== "object") continue;
     const rawLabel = String(m.label || m.displayName || "").trim();
     const modelId = String(m.modelOrAlias?.model || m.modelOrAlias?.alias || m.model || "").trim();
     if (!rawLabel || !modelId || isLegacyDeprecatedModel(rawLabel)) continue;
     const baseFamily = stripModelVariantSuffix(rawLabel);
+    if (!baseFamily || isLegacyDeprecatedModel(baseFamily)) continue;
+
     const lowerId = modelId.toLowerCase();
     const lowerLabel = rawLabel.toLowerCase();
-    const cloudSlug = reg.labelToSlug[lowerLabel] || deriveCloudCodeSlugFromLabel(rawLabel);
-    if (baseFamily && reg.placeholderToFamily[lowerId] !== baseFamily) {
+    const existingLabelSlug = reg.labelToSlug[lowerLabel] === "orchestrator-argon" ? "" : reg.labelToSlug[lowerLabel];
+    const existingPhSlug = reg.placeholderToSlug[lowerId] === "orchestrator-argon" ? "" : reg.placeholderToSlug[lowerId];
+    const derivedSlug = deriveCloudCodeSlugFromLabel(rawLabel);
+    const cloudSlug = existingLabelSlug || existingPhSlug || derivedSlug;
+
+    if (reg.placeholderToFamily[lowerId] !== baseFamily) {
       reg.placeholderToFamily[lowerId] = baseFamily;
       changed = true;
     }
-    if (cloudSlug && reg.placeholderToSlug[lowerId] !== cloudSlug) {
+    if (cloudSlug && !existingPhSlug) {
       reg.placeholderToSlug[lowerId] = cloudSlug;
       changed = true;
     }
-    if (cloudSlug && !reg.labelToSlug[lowerLabel]) {
+    if (cloudSlug && !existingLabelSlug) {
       reg.labelToSlug[lowerLabel] = cloudSlug;
       changed = true;
     }
-    if (baseFamily && cloudSlug && reg.placeholderToFamily[cloudSlug.toLowerCase()] !== baseFamily) {
+    if (cloudSlug && reg.placeholderToFamily[cloudSlug.toLowerCase()] !== baseFamily) {
       reg.placeholderToFamily[cloudSlug.toLowerCase()] = baseFamily;
       changed = true;
     }
-    if (baseFamily) {
-      const famSlug = deriveCloudCodeSlugFromLabel(baseFamily);
-      if (famSlug && reg.placeholderToFamily[famSlug] !== baseFamily) {
-        reg.placeholderToFamily[famSlug] = baseFamily;
-        changed = true;
+    const famSlug = deriveCloudCodeSlugFromLabel(baseFamily);
+    if (famSlug && reg.placeholderToFamily[famSlug] !== baseFamily) {
+      reg.placeholderToFamily[famSlug] = baseFamily;
+      changed = true;
+    }
+
+    if (isPersonal && !isModelEntryRestrictedOrSunset(m) && !isGcpOnlyModel(baseFamily) && !isGcpOnlyModel(modelId)) {
+      const candidateVars = [baseFamily, rawLabel, modelId, cloudSlug].filter(Boolean);
+      const baseSlug = reg.labelToSlug[baseFamily.toLowerCase()];
+      if (baseSlug && baseSlug !== "orchestrator-argon") candidateVars.push(baseSlug);
+      if (!catalogMap.has(baseFamily)) {
+        catalogMap.set(baseFamily, {
+          label: baseFamily,
+          variantIds: Array.from(new Set(candidateVars)),
+          requiresArgon: isArgonGatedLabelOrId(baseFamily),
+          quotaFingerprint: m.quotaInfo
+            ? {
+                resetTime: String(m.quotaInfo.resetTime || ""),
+                remainingFraction: m.quotaInfo.remainingFraction
+              }
+            : null
+        });
+      } else {
+        const entry = catalogMap.get(baseFamily);
+        for (const v of candidateVars) {
+          if (!entry.variantIds.includes(v)) entry.variantIds.push(v);
+        }
+        if (!entry.quotaFingerprint && m.quotaInfo) {
+          entry.quotaFingerprint = {
+            resetTime: String(m.quotaInfo.resetTime || ""),
+            remainingFraction: m.quotaInfo.remainingFraction
+          };
+        }
       }
+    }
+  }
+
+  if (isPersonal && catalogMap.size > 0) {
+    const prevByLabel = new Map((reg.clientCatalog || []).map((item) => [item?.label, item]));
+    const nextCatalog = Array.from(catalogMap.values()).map((item) => {
+      const prev = prevByLabel.get(item.label);
+      const mergedVars = prev?.variantIds
+        ? Array.from(new Set([...item.variantIds, ...prev.variantIds.filter((v) => v !== "orchestrator-argon")]))
+        : item.variantIds;
+      return { ...item, variantIds: mergedVars };
+    });
+    if (JSON.stringify(reg.clientCatalog) !== JSON.stringify(nextCatalog)) {
+      reg.clientCatalog = nextCatalog;
+      changed = true;
     }
   }
   return changed;
@@ -333,12 +537,145 @@ export function detectPersonalAccountTier(
   };
 }
 
+/**
+ * 结合 Antigravity 原生客户端目录与当前账号权限（hasArgonAccess），补全并规范个人账号可用模型列表。
+ * 既保留每个账号独立云端探测得到的专属可用集，又确保如 Orchestrator (Argon) 等客户端派生/同池模型在所有达标账号中自动识别、排序与关联变体。
+ * @param {Array} sourceModels 原始模型数组
+ * @param {boolean} hasArgonAccess 账号是否具备 Argon 权限
+ * @param {boolean} _isPaidProOrUltra 是否付费 Pro/Ultra 等级
+ * @param {object|null} cfg 可选配置对象
+ * @returns {Array}
+ */
+export function mergeNativeCatalogIntoPersonalModels(
+  sourceModels = [],
+  hasArgonAccess = true,
+  _isPaidProOrUltra = true,
+  cfg = null
+) {
+  const reg = (cfg && ensureDynamicModelRegistry(cfg)) || globalThis.__agyDynamicModelRegistryRef || {};
+  const catalog = Array.isArray(reg.clientCatalog) ? reg.clientCatalog : [];
+  const mergedMap = new Map();
+
+  const addOrMergeModel = (item) => {
+    if (!item || typeof item !== "object") return;
+    const rawLabel = String(item.label || item.modelId || "").trim();
+    if (!rawLabel) return;
+    const baseLabel = stripModelVariantSuffix(rawLabel);
+    if (
+      !baseLabel ||
+      isLegacyDeprecatedModel(baseLabel) ||
+      isLegacyDeprecatedModel(rawLabel) ||
+      isGcpOnlyModel(baseLabel) ||
+      isGcpOnlyModel(rawLabel)
+    ) {
+      return;
+    }
+    if (!hasArgonAccess && isArgonGatedLabelOrId(baseLabel)) return;
+
+    const existingVars = Array.isArray(item.variantIds) ? item.variantIds : [baseLabel, rawLabel];
+    const extraVars = [];
+    if (/^orchestrator\s*\(argon\)$/i.test(baseLabel)) {
+      extraVars.push("Orchestrator (Argon)", "MODEL_PLACEHOLDER_M668", "gemini-pro-orchestrator-g1-pro");
+    }
+    const cleanVars = Array.from(new Set([baseLabel, rawLabel, ...existingVars, ...extraVars])).filter(
+      (v) => v && v !== "orchestrator-argon" && !isLegacyDeprecatedModel(v) && !isGcpOnlyModel(v)
+    );
+
+    if (!mergedMap.has(baseLabel)) {
+      mergedMap.set(baseLabel, {
+        ...item,
+        label: baseLabel,
+        modelId: baseLabel,
+        variantIds: cleanVars
+      });
+    } else {
+      const existing = mergedMap.get(baseLabel);
+      for (const v of cleanVars) {
+        if (!existing.variantIds.includes(v)) existing.variantIds.push(v);
+      }
+      if (existing.remainingPct === undefined && item.remainingPct !== undefined) {
+        existing.remainingPct = item.remainingPct;
+      }
+      if (!existing.resetTime && item.resetTime) {
+        existing.resetTime = item.resetTime;
+      }
+      if (existing.weeklyPct === undefined && item.weeklyPct !== undefined) {
+        existing.weeklyPct = item.weeklyPct;
+      }
+      if (!existing.weeklyResetTime && item.weeklyResetTime) {
+        existing.weeklyResetTime = item.weeklyResetTime;
+      }
+      if (existing.fiveHourPct === undefined && item.fiveHourPct !== undefined) {
+        existing.fiveHourPct = item.fiveHourPct;
+      }
+      if (!existing.fiveHourResetTime && item.fiveHourResetTime) {
+        existing.fiveHourResetTime = item.fiveHourResetTime;
+      }
+    }
+  };
+
+  for (const m of Array.isArray(sourceModels) ? sourceModels : []) {
+    addOrMergeModel(m);
+  }
+
+  if (hasArgonAccess) {
+    const argonCatalogEntries = [
+      ...catalog.filter((c) => c && (c.requiresArgon || isArgonGatedLabelOrId(c.label))),
+      {
+        label: "Orchestrator (Argon)",
+        variantIds: ["Orchestrator (Argon)", "MODEL_PLACEHOLDER_M668", "gemini-pro-orchestrator-g1-pro"],
+        requiresArgon: true
+      }
+    ];
+    for (const catItem of argonCatalogEntries) {
+      addOrMergeModel({
+        label: catItem.label,
+        modelId: catItem.label,
+        variantIds: catItem.variantIds || [catItem.label],
+        unlimited: false
+      });
+    }
+  }
+
+  // 若原生目录已知顺序，优先按原生 UI 顺序排列已命中的模型
+  const ordered = [];
+  const emitted = new Set();
+  for (const catItem of catalog) {
+    const key = catItem?.label;
+    if (key && mergedMap.has(key) && !emitted.has(key)) {
+      ordered.push(mergedMap.get(key));
+      emitted.add(key);
+    }
+  }
+  for (const [key, val] of mergedMap.entries()) {
+    if (!emitted.has(key)) {
+      ordered.push(val);
+      emitted.add(key);
+    }
+  }
+
+  // 确保 Orchestrator (Argon) 紧随 Gemini 4 Hydrogen / Gemini 4 Argon 之后（若未在 clientCatalog 确定位置）
+  if (catalog.length === 0) {
+    const orchIdx = ordered.findIndex((m) => /^orchestrator\s*\(argon\)$/i.test(m.label));
+    if (orchIdx >= 0) {
+      const [orchItem] = ordered.splice(orchIdx, 1);
+      const hydIdx = ordered.findIndex((m) => /^gemini\s*4\s*hydrogen$/i.test(m.label));
+      const argIdx = ordered.findIndex((m) => /^gemini\s*4\s*argon$/i.test(m.label));
+      const targetIdx = hydIdx >= 0 ? hydIdx + 1 : (argIdx >= 0 ? argIdx + 1 : ordered.length);
+      ordered.splice(targetIdx, 0, orchItem);
+    }
+  }
+
+  return ordered;
+}
+
 export function buildProModelsFromQuotaGroups(
   quotaGroups,
   prevModels = [],
   dynamicApiModels = [],
   liveTierTemplate = [],
-  hasArgonAccess = true
+  hasArgonAccess = true,
+  cfg = null
 ) {
   const groups = Array.isArray(quotaGroups) ? quotaGroups : [];
   const geminiGroup = groups.find((g) => /gemini\s*models/i.test(g.id || g.displayName || ""));
@@ -359,7 +696,7 @@ export function buildProModelsFromQuotaGroups(
     };
   };
 
-  const matchGroupInfoForModel = (label) => {
+  const matchGroupInfoForModel = (label, item = null) => {
     const clean = String(label || "").trim().toLowerCase();
     if (!clean) return null;
     for (const g of groups) {
@@ -369,63 +706,30 @@ export function buildProModelsFromQuotaGroups(
         return extractGroupDualBuckets(g);
       }
     }
-    if (/argon/i.test(clean)) return extractGroupDualBuckets(argonGroup);
+    if (isArgonGatedLabelOrId(clean)) return extractGroupDualBuckets(argonGroup);
     if (/gemini/i.test(clean)) return extractGroupDualBuckets(geminiGroup);
     if (/claude|gpt/i.test(clean)) return extractGroupDualBuckets(claudeGroup);
+    if (item?.resetTime) {
+      for (const g of groups) {
+        const hit = (g.buckets || []).some(
+          (b) => b.resetTime && b.resetTime === item.resetTime && (item.remainingPct === undefined || b.remainingPct === item.remainingPct)
+        );
+        if (hit) return extractGroupDualBuckets(g);
+      }
+    }
     return null;
   };
 
-  const mergedTemplateMap = new Map();
-  const upsertCandidate = (item) => {
-    if (!item) return;
-    const rawLabel = String(item.label || item.modelId || "").trim();
-    if (!rawLabel) return;
-    const baseLabel = stripModelVariantSuffix(rawLabel);
-    if (
-      !baseLabel ||
-      isLegacyDeprecatedModel(baseLabel) ||
-      isLegacyDeprecatedModel(rawLabel) ||
-      isGcpOnlyModel(baseLabel) ||
-      isGcpOnlyModel(rawLabel)
-    ) {
-      return;
-    }
-    if (!hasArgonAccess && /argon/i.test(baseLabel)) return;
-    const vars = (Array.isArray(item.variantIds) ? item.variantIds : [baseLabel, rawLabel]).filter(
-      (v) => v && !isLegacyDeprecatedModel(v) && !isGcpOnlyModel(v)
-    );
-    if (!mergedTemplateMap.has(baseLabel)) {
-      mergedTemplateMap.set(baseLabel, {
-        label: baseLabel,
-        modelId: baseLabel,
-        variantIds: Array.from(new Set([baseLabel, ...vars])),
-        remainingPct: item.remainingPct,
-        resetTime: item.resetTime || "",
-        weeklyPct: item.weeklyPct,
-        weeklyResetTime: item.weeklyResetTime || "",
-        fiveHourPct: item.fiveHourPct,
-        fiveHourResetTime: item.fiveHourResetTime || ""
-      });
-    } else {
-      const existing = mergedTemplateMap.get(baseLabel);
-      for (const v of vars) {
-        if (!existing.variantIds.includes(v)) existing.variantIds.push(v);
-      }
-      if (existing.remainingPct === undefined && item.remainingPct !== undefined) {
-        existing.remainingPct = item.remainingPct;
-      }
-      if (!existing.resetTime && item.resetTime) {
-        existing.resetTime = item.resetTime;
-      }
-    }
-  };
+  // 基于本次真实 API 返回的可用模型列表，并按 hasArgonAccess 权限合入原生同池客户端模型
+  const sourceModels = mergeNativeCatalogIntoPersonalModels(
+    Array.isArray(dynamicApiModels) ? dynamicApiModels : [],
+    hasArgonAccess,
+    true,
+    cfg
+  );
 
-  // 仅基于本次真实 API 返回的模型列表补充额度信息，绝不混入共享模板或旧快照模型
-  const sourceModels = Array.isArray(dynamicApiModels) ? dynamicApiModels : [];
-  for (const m of sourceModels) upsertCandidate(m);
-
-  return Array.from(mergedTemplateMap.values()).map((tpl) => {
-    const grpInfo = matchGroupInfoForModel(tpl.label);
+  return sourceModels.map((tpl) => {
+    const grpInfo = matchGroupInfoForModel(tpl.label, tpl);
     const matchedBk = grpInfo?.primary || null;
     const wkBk = grpInfo?.weeklyBucket || null;
     const fhBk = grpInfo?.fiveHourBucket || null;
@@ -497,7 +801,7 @@ export function sanitizeCachedQuotaModels(
     if (isGcp && /4[._-\s]*6|gpt-oss/i.test(`${baseLabel} ${rawLabel}`)) {
       continue;
     }
-    if (!isGcp && !hasArgonAccess && /argon/i.test(baseLabel)) {
+    if (!isGcp && !hasArgonAccess && isArgonGatedLabelOrId(baseLabel)) {
       continue;
     }
     const vars = (Array.isArray(m.variantIds) ? m.variantIds : [baseLabel, rawLabel]).filter(
@@ -537,6 +841,12 @@ export function sanitizeCachedQuotaModels(
         availableModels,
         [],
         hasArgonAccess
+      );
+    } else {
+      availableModels = mergeNativeCatalogIntoPersonalModels(
+        availableModels,
+        hasArgonAccess,
+        isPaidProOrUltra
       );
     }
   }

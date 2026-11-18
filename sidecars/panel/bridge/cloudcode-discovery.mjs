@@ -12,8 +12,10 @@ import {
 } from "./wincred-ls.mjs";
 import {
   isLegacyDeprecatedModel,
+  isGcpOnlyModel,
   stripModelVariantSuffix,
   isModelEntryRestrictedOrSunset,
+  resolveFamilyForCloudSlug,
   detectPersonalAccountTier,
   buildProModelsFromQuotaGroups,
   isValidOfficialQuotaGroup,
@@ -351,15 +353,19 @@ export function parseCloudCodeModelsAndQuota(
   }
 
   const orderedEntries = [];
+  const seenModelIds = new Set();
   if (allowedModelIds.size > 0) {
     for (const mid of allowedModelIds) {
-      if (modelsObj[mid]) {
+      if (modelsObj[mid] && !seenModelIds.has(mid)) {
         orderedEntries.push([mid, modelsObj[mid]]);
+        seenModelIds.add(mid);
       }
     }
-  } else {
-    for (const [mid, m] of Object.entries(modelsObj)) {
+  }
+  for (const [mid, m] of Object.entries(modelsObj)) {
+    if (!seenModelIds.has(mid)) {
       orderedEntries.push([mid, m]);
+      seenModelIds.add(mid);
     }
   }
 
@@ -380,15 +386,23 @@ export function parseCloudCodeModelsAndQuota(
     if (!m || typeof m !== "object") continue;
     if (/disabled$/i.test(modelId)) continue;
     if (isModelEntryRestrictedOrSunset(m)) continue;
-    if (!isGcpChannel && !m.quotaInfo && !allowedModelIds.has(modelId)) continue;
-    const rawLabel = String(m.displayName || m.label || "").trim();
+    if (!isGcpChannel && isGcpOnlyModel(modelId)) continue;
+    const rawDisplay = String(m.displayName || m.label || "").trim();
+    const resolvedFamily = resolveFamilyForCloudSlug(modelId, m);
+    const rawLabel = rawDisplay && !/^([a-z0-9._-]+)$/.test(rawDisplay)
+      ? rawDisplay
+      : (resolvedFamily || rawDisplay);
     if (!rawLabel) continue;
     const baseLabel = stripModelVariantSuffix(rawLabel);
     if (isLegacyDeprecatedModel(baseLabel) || isLegacyDeprecatedModel(rawLabel) || isLegacyDeprecatedModel(modelId)) {
       continue;
     }
+    if (!isGcpChannel && isGcpOnlyModel(baseLabel)) continue;
+    if (!isGcpChannel && !m.quotaInfo && !allowedModelIds.has(modelId) && !(hasArgonAccess && /orchestrator|\bargon\b/i.test(baseLabel))) {
+      continue;
+    }
     if (!isGcpChannel) {
-      if (!hasArgonAccess && /argon/i.test(baseLabel)) {
+      if (!hasArgonAccess && /\bargon\b|orchestrator/i.test(baseLabel)) {
         continue;
       }
     }
@@ -403,7 +417,7 @@ export function parseCloudCodeModelsAndQuota(
       groupedModelMap.set(baseLabel, {
         label: baseLabel,
         modelId: baseLabel,
-        variantIds: [baseLabel, rawLabel, modelId],
+        variantIds: Array.from(new Set([baseLabel, rawLabel, modelId])),
         remainingPct,
         resetTime,
         unlimited: isGcpChannel
@@ -466,9 +480,12 @@ export function parseCloudCodeModelsAndQuota(
     };
   }
 
-  const availableModels = Array.from(groupedModelMap.values()).filter(
+  let availableModels = Array.from(groupedModelMap.values()).filter(
     (m) => !isLegacyDeprecatedModel(m.label) && !isLegacyDeprecatedModel(m.modelId)
   );
+  if (!isGcpChannel) {
+    availableModels = mergeNativeCatalogIntoPersonalModels(availableModels, hasArgonAccess, isPaidProOrUltra);
+  }
 
   return {
     tierCode: tierInfo.tierCode,
