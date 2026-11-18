@@ -741,6 +741,18 @@ function setRefreshButtonLoading(isLoading) {
     : t.refreshBtn;
 }
 
+function reconcileSwitchingState(nextSnap, prevActive) {
+  if (!nextSnap || typeof nextSnap !== "object") return nextSnap;
+  if (switchingAccountId) {
+    if (nextSnap.activeAccount?.channelId === switchingAccountId) {
+      switchingAccountId = "";
+    } else if (prevActive?.channelId) {
+      nextSnap.activeAccount = prevActive;
+    }
+  }
+  return nextSnap;
+}
+
 async function loadSystemStatus(force = false, silent = false) {
   if (force && manualRefreshInFlight) {
     return manualRefreshInFlight;
@@ -759,10 +771,7 @@ async function loadSystemStatus(force = false, silent = false) {
           currentFrontendVersion = data.frontendVersion;
         }
         const prevActive = state.activeAccount;
-        state = data;
-        if (switchingAccountId && prevActive?.channelId) {
-          state.activeAccount = prevActive;
-        }
+        state = reconcileSwitchingState(data, prevActive);
         if (force) {
           renderAll();
         } else {
@@ -1043,13 +1052,17 @@ async function handleManualScrubSignatures(mode = "mismatched") {
   } catch (e) {}
 }
 
+let switchingFallbackTimer = null;
+
 async function switchGoogleAccount(accountId, scrubSignatures = false) {
   if (switchingAccountId) return;
+  const t = I18N[currentLang];
+  clearTimeout(switchingFallbackTimer);
   try {
     selectedQuotaChannelId = "";
     switchingAccountId = accountId;
     renderAccountList();
-    showToast(I18N[currentLang].toastAccountSwitching);
+    showToast(t.toastAccountSwitching);
     const tel = state.telemetry || {};
     const currentConvId = tel.fullConversationId || tel.conversationId || "";
     const res = await fetch("/api/switch-account", {
@@ -1061,29 +1074,42 @@ async function switchGoogleAccount(accountId, scrubSignatures = false) {
         conversationId: currentConvId
       })
     });
-    const data = await res.json();
-    if (data && data.error) {
+    let data = null;
+    try { data = await res.json(); } catch {}
+    if (!res.ok || data?.error || data?.success === false) {
       switchingAccountId = "";
-      showToast(data.error);
-      if (data.snapshot) {
-        state = data.snapshot;
-      }
+      if (data?.snapshot) state = data.snapshot;
       renderAll();
+      showToast(data?.error || `${t.toastAccountSwitchFailed || "切换失败："}${res.status}`);
       return;
     }
-    // 保持「切换中...」过渡态直至 Workbench 自动刷新重载完成（若在独立浏览器打开无 CDP 重载，则在 1.8 秒后切换为「使用中」）
-    setTimeout(() => {
-      switchingAccountId = "";
-      if (data && data.snapshot) {
-        state = data.snapshot;
-      }
-      renderAll();
-      showToast(I18N[currentLang].toastRefreshed);
-      loadSystemStatus(true, true);
-    }, 1800);
-  } catch (e) {
+    if (data?.restarting) {
+      // 保持「重启中...」状态等待宿主重拉；若为独立浏览器页面或宿主异常未重载，则在恢复连通后兜底校验并刷新
+      switchingFallbackTimer = setTimeout(async () => {
+        if (switchingAccountId !== accountId) return;
+        await loadSystemStatus(true, true);
+        if (switchingAccountId === accountId) {
+          switchingAccountId = "";
+          renderAll();
+        }
+      }, 12000);
+      return;
+    }
     switchingAccountId = "";
-    renderAccountList();
+    if (data?.snapshot) state = data.snapshot;
+    renderAll();
+    showToast(t.toastRefreshed);
+    loadSystemStatus(true, true);
+  } catch (e) {
+    // 若在 Antigravity 关闭或代理断连瞬间请求被中止，延迟探测是否已完成重启切换
+    switchingFallbackTimer = setTimeout(async () => {
+      await loadSystemStatus(true, true);
+      if (switchingAccountId === accountId) {
+        switchingAccountId = "";
+        renderAccountList();
+        showToast(`${t.toastAccountSwitchFailed || "切换失败："}${e?.message || "ERR_ABORTED"}`);
+      }
+    }, 3000);
   }
 }
 
@@ -1224,10 +1250,7 @@ function ensureSseConnected() {
           }
           const prevOAuthEvent = snap.lastOAuthEvent;
           const prevActive = state.activeAccount;
-          state = snap;
-          if (switchingAccountId && prevActive?.channelId) {
-            state.activeAccount = prevActive;
-          }
+          state = reconcileSwitchingState(snap, prevActive);
           if (prevOAuthEvent?.success && prevOAuthEvent.email) {
             if (prevOAuthEvent.autoScanGcp) {
               isAddGcpDrawerOpen = true;

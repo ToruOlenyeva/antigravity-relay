@@ -336,22 +336,41 @@ async function requestHandler(req, res) {
     }
   }
 
-  // 5. 切换通道或谷歌账号（写入凭据并调度当前实例独立自动重启，立即返回 HTTP 响应供前端展示重启过渡态）
+  // 5. 切换通道或谷歌账号（先准备重启配置并立刻返回 HTTP 200，再在响应落盘后触发独立重启进程）
   if (req.method === "POST" && pathname === "/api/switch-account") {
     try {
       const { accountId, scrubSignatures, conversationId } = await readJsonBody(req);
       const targetConvId = conversationId || latestSnapshot?.telemetry?.fullConversationId || latestSnapshot?.telemetry?.conversationId || "";
       const result = await lsBridge.switchActiveGoogleAccount(accountId, {
         scrubSignatures,
-        conversationId: targetConvId
+        conversationId: targetConvId,
+        deferRestart: true
       });
-      const snap = result?.restarting && latestSnapshot
+      const { triggerRestart, ...publicResult } = result || {};
+      const snap = publicResult?.restarting && latestSnapshot
         ? latestSnapshot
         : await lsBridge.fetchLiveSystemSnapshot(false);
-      if (!result?.restarting) {
+      if (!publicResult?.restarting) {
         broadcastSnapshot(snap);
       }
-      return sendJson(res, 200, { success: true, ...result, snapshot: snap });
+      let triggered = false;
+      const fireRestart = () => {
+        if (triggered) return;
+        triggered = true;
+        if (typeof triggerRestart === "function") {
+          setTimeout(() => {
+            Promise.resolve(triggerRestart()).catch((err) => {
+              console.error("[AGY Relay] deferred restart failed:", err?.message || err);
+            });
+          }, 60);
+        }
+      };
+      if (typeof triggerRestart === "function") {
+        res.once("finish", fireRestart);
+      }
+      sendJson(res, 200, { success: true, ...publicResult, snapshot: snap });
+      fireRestart();
+      return;
     } catch (err) {
       return sendJson(res, 500, { success: false, error: err.message });
     }

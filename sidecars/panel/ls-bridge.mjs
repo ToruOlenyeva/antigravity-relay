@@ -74,6 +74,8 @@ import {
   computeSessionTelemetrySnapshot,
   launchIsolatedAntigravityInstance,
   reloadInstanceWorkbenchViaCdp,
+  prepareAntigravityRestartPlan,
+  launchPreparedRestartPlan,
   restartCurrentAntigravityInstance,
   cancelIsolatedOAuthFlow,
   startIsolatedOAuthFlow,
@@ -1252,7 +1254,13 @@ export async function switchActiveGoogleAccount(accountId, opts = {}) {
   }
   const baseToken = JSON.parse(JSON.stringify(rawBaseToken));
 
-  if (baseToken.token?.refresh_token) {
+  const expiryMs = baseToken.token?.expiry ? Date.parse(baseToken.token.expiry) : 0;
+  const hasFreshAccessToken = Boolean(
+    baseToken.token?.access_token &&
+    Number.isFinite(expiryMs) &&
+    expiryMs - Date.now() > 120000
+  );
+  if (baseToken.token?.refresh_token && !hasFreshAccessToken) {
     try {
       const rt = baseToken.token.refresh_token;
       const refreshed = await refreshOAuthAccessToken(rt);
@@ -1324,22 +1332,7 @@ export async function switchActiveGoogleAccount(accountId, opts = {}) {
     cfg.__meta__.activeEmail = target.email;
     cfg.__meta__.lastAppliedGcpProject = targetProject;
   }
-  syncInstanceAppStorage(
-    ctx.userDataDir,
-    target.email,
-    Boolean(targetProject),
-    Boolean(ctx.isIsolatedInstance),
-    targetProject,
-    targetBillingMode,
-    targetLocation
-  );
-  syncInstanceStateVscdb(
-    ctx.userDataDir,
-    tokenToWrite,
-    target.email,
-    targetProject,
-    prevChannelId
-  );
+
   instMeta.cloudCodeProxyMode = desiredProxyMode;
   instMeta.cloudCodeProxyUrl = targetUrl;
   if (!ctx.isIsolatedInstance) {
@@ -1350,31 +1343,12 @@ export async function switchActiveGoogleAccount(accountId, opts = {}) {
   cfg.__meta__.convLastChannelMap = {};
   writeRelayConfig(cfg);
 
-  if (ctx.isIsolatedInstance && ctx.userDataDir) {
-    writeInstanceTokenFile(ctx.userDataDir, tokenToWrite);
-  }
-
-  if (!targetProject) {
-    const cachedAt = Number(target.cachedQuota?.updatedAt || 0);
-    if (!target.cachedQuota?.quotaGroups?.length || Date.now() - cachedAt > 20000) {
-      await probeChannelQuotaSnapshot(target.id).catch(() => {});
-    }
-  }
-
   const shouldScrub = Boolean(isCrossChannel || opts.scrubSignatures === true);
   const currentActiveConvId = String(opts.conversationId || instMeta.lastActiveConvId || cfg.__meta__?.lastActiveConvId || "").trim();
   let scrubbedCount = 0;
-  if (shouldScrub && currentActiveConvId) {
-    const scrubbedIds = await scrubRecentConversationsSignatures(currentLs, {
-      mode: "current",
-      conversationId: currentActiveConvId,
-      activeIsGcp: nextIsGcp
-    }).catch(() => []);
-    scrubbedCount = Array.isArray(scrubbedIds) ? scrubbedIds.length : 0;
-  }
 
   const restartCtx = { ...ctx };
-  await restartCurrentAntigravityInstance(restartCtx, {
+  const restartPlan = prepareAntigravityRestartPlan(restartCtx, {
     tokenObj: tokenToWrite,
     email: target.email,
     gcpProjectId: targetProject,
@@ -1384,7 +1358,51 @@ export async function switchActiveGoogleAccount(accountId, opts = {}) {
     targetChannelId: target.id,
     scrubConvId: shouldScrub ? currentActiveConvId : "",
     lsPid: Number(currentLs?.pid || 0)
-  }).catch(() => {});
+  });
+
+  if (!restartPlan.canRestartProcess) {
+    syncInstanceAppStorage(
+      ctx.userDataDir,
+      target.email,
+      Boolean(targetProject),
+      Boolean(ctx.isIsolatedInstance),
+      targetProject,
+      targetBillingMode,
+      targetLocation
+    );
+    syncInstanceStateVscdb(
+      ctx.userDataDir,
+      tokenToWrite,
+      target.email,
+      targetProject,
+      prevChannelId
+    );
+    if (ctx.isIsolatedInstance && ctx.userDataDir) {
+      writeInstanceTokenFile(ctx.userDataDir, tokenToWrite);
+    } else {
+      writeWinCredToken(tokenToWrite);
+    }
+    if (shouldScrub && currentActiveConvId) {
+      const scrubbedIds = await scrubRecentConversationsSignatures(currentLs, {
+        mode: "current",
+        conversationId: currentActiveConvId,
+        activeIsGcp: nextIsGcp
+      }).catch(() => []);
+      scrubbedCount = Array.isArray(scrubbedIds) ? scrubbedIds.length : 0;
+    }
+  }
+
+  const triggerRestart = async () => {
+    const ok = await launchPreparedRestartPlan(restartPlan);
+    if (!ok) {
+      throw new Error("启动 Antigravity 重启脚本失败");
+    }
+    return ok;
+  };
+
+  if (!opts.deferRestart) {
+    await triggerRestart();
+  }
 
   return {
     switchedTo: target.email,
@@ -1393,7 +1411,8 @@ export async function switchActiveGoogleAccount(accountId, opts = {}) {
     isCrossChannel,
     scrubbedSignatures: shouldScrub,
     scrubbedCount,
-    restarting: true,
-    instant: false
+    restarting: Boolean(restartPlan.canRestartProcess),
+    instant: !restartPlan.canRestartProcess,
+    ...(opts.deferRestart ? { triggerRestart } : {})
   };
 }
