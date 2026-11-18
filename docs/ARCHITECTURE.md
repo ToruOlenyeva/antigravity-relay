@@ -104,13 +104,13 @@ antigravity-relay/
    - Google Gemini 模型的思考签名（`thought_signature`）与生成该签名的通道类型（`personal` vs `gcp`）强绑定；系统在读取官方 `transcript.jsonl` 实时计算「会话统计 / 项目汇总」Token 账单时，同步检测各会话 `.db` 与 `.db-wal` 是否包含思考签名（内置 `readOk` 锁竞争守卫防止误缓存空状态）并标记 `GCP` / `个人` / `无签名` 徽章；
    - 面板「当前会话统计 / 项目汇总」卡片内置双模式「清除签名」下拉菜单：支持「仅清除当前会话签名」或「全项目扫描清除与当前通道不匹配的遗留签名」，递归剥离 `~/.gemini/antigravity/conversations/<cascade_id>.db` 中的签名魔数头（`0x01 0x69 0x14 0x7d 0x13` 或 Base64 `AWkUfR` / `FpFH0T`），提交事务后强制执行 `PRAGMA wal_checkpoint(TRUNCATE);` 截断 `.db-wal` 残留，100% 保留聊天正文与工具调用记录。
 
-### 3.2 第二层：个人通道本地透明反向代理、双服切换与双层重置算力接力
-当主界面处于任意个人通道（`Free` / `Plus` / `Pro` / `Ultra`）时，底部「模型算力路由」在不重载界面的前提下实现跨个人账号及跨 `Prod / Daily` 双服的算力接力（`GCP` 通道完全独立，不参与底部个人池路由）：
+### 3.2 第二层：个人通道本地透明反向代理与双层重置算力接力
+当主界面处于任意个人通道（`Free` / `Plus` / `Pro` / `Ultra`）时，底部「模型算力路由」在不重载界面的前提下实现跨个人账号的算力接力（`GCP` 通道完全独立，不参与底部个人池路由；个人配额统一接入 `daily-cloudcode-pa.googleapis.com`）：
 1. <b>常驻挂载 `SetCloudCodeURL` 本地透明代理</b>：在个人通道模式下，Sidecar 与 `relay-hook.cjs` 自动向 `language_server.exe` 发送 `SetCloudCodeURL` RPC，将其上游地址指向本地透明代理 `http://127.0.0.1:<proxyPort>`（若切换到 `GCP` 主通道，则自动恢复为官方 `https://cloudcode-pa.googleapis.com`）。
-2. <b>双服 `2N` 候选池 2 层自动轮询排序、同窗口防跳变与动态 `Bearer Token` / `Host` 替换</b>：
+2. <b>全账号候选池 2 层自动轮询排序、同窗口防跳变与动态 `Bearer Token` 替换</b>：
    - 当 `language_server.exe` 发起 `/v1internal:streamGenerateContent` 或 `/v1internal:generateContent` 请求时，透明代理提取请求体中的 `model` 标识并映射为基础模型家族（如 `Gemini 4 Argon`、`Gemini 3.8 Flash`、`Claude Opus 5.5`）。
-   - 根据 `routing.models[family]` 配置（`follow_current`、`auto_poll` 或指定 `account:<email>#personal`），`auto_poll` 将所有非 `authExpired` 个人账号的 `prod` 与 `daily` 双账本共 `2N` 个独立算力桶纳入候选，先按 `5 小时限额 > 5%` 门控过滤，再严格执行<b>2 层排序（第 1 层按周限额重置时间升序，第 2 层按 5 小时限额重置时间升序；当两层重置时间处于同一窗口时优先锁定当前激活账号与当前选定账本池，防微小百分比差跨号跳变）</b>选出最优 `(acc, pool)`。
-   - 在内存中将 HTTP 请求头替换为目标个人账号的 `Authorization: Bearer <AccessToken>`、将 `body.project` 替换为该账号真实的私有 `companionProjectId`，跨号路由时自动调用 `stripThoughtSignaturesFromJson` 剥离请求体 JSON 中的残留签名，并按目标账本 `pool` 动态路由至 `cloudcode-pa.googleapis.com`（`prod`）或 `daily-cloudcode-pa.googleapis.com`（`daily`），流式响应结束后 2 秒异步刷新目标账号双服配额。
+   - 根据 `routing.models[family]` 配置（`follow_current`、`auto_poll` 或指定 `account:<email>#personal`），`auto_poll` 将所有非 `authExpired` 个人账号的配额账本纳入候选，先按 `5 小时限额 > 5%` 门控过滤，再严格执行<b>2 层排序（第 1 层按周限额重置时间升序，第 2 层按 5 小时限额重置时间升序；当两层重置时间处于同一窗口时优先锁定当前激活账号，防微小百分比差跨号跳变）</b>选出最优个人账号。
+   - 在内存中将 HTTP 请求头替换为目标个人账号的 `Authorization: Bearer <AccessToken>`、将 `body.project` 替换为该账号真实的私有 `companionProjectId`，跨号路由时自动调用 `stripThoughtSignaturesFromJson` 剥离请求体 JSON 中的残留签名，统一转发至 `daily-cloudcode-pa.googleapis.com`，流式响应结束后 2 秒异步刷新目标账号配额。
 3. <b>拦截 `/v1internal:fetchAvailableModels` 防止主账号 `0%` 锁死</b>：
    - 当当前登录的主个人账号某模型配额降至 `0%`（或如 `Plus` / `Free` 账号本身无 `Gemini 4 Argon` 额度），但用户在底部路由中已将该模型路由至其他有额度的个人账号（或开启 `auto_poll` 且池内其他个人账号有额度）时，透明代理在返回模型列表给 `language_server.exe` 前自动注入目标路由账号的剩余配额百分比，防止客户端前端将模型下拉项置灰锁死。
 4. <b>个人通道与 `GCP` 通道不可通过本地反代跨通道路由的三大实测物理边界</b>：

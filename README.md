@@ -26,9 +26,9 @@
 
 ## ✨ 核心特性
 
-- <b>全等级精准识别、原生模型列表对齐与 Daily 账本透视</b>：基于动态客户端版本握手与 CloudCode 原生探针，精准区分 <code>Free</code>、<code>Plus</code>（含渠道赠送版）、<code>Pro</code>、<code>Ultra</code> 与 <code>GCP</code> 通道等级（未确认订阅源时按 <code>Unknown</code> 保底），直连个人 <code>Daily 服</code> 还原三大官方配额池与倒计时；可用模型严格对齐 Antigravity 原生列表（前台直读 <code>GetUserStatus</code> 实时可用集，后台遵循 <code>agentModelSorts</code> 原生白名单与 <code>dynamicModelRegistry</code> 动态自学习注册表，自动识别 <code>Orchestrator (Argon)</code> 并剔除内部 <code>sonar</code> 节点），面板内置 <code>translate="no"</code> 防外部 DOM 翻译劫持。
-- <b>个人通道免重载无感路由</b>：内置本地透明反向代理（默认 <code>8091</code> 端口，支持 <code>8091..8095</code> 及随机端口自动递增防冲突回退），按模型家族与目标账本（<code>Prod / Daily</code>）实时替换目标个人账号 <code>Bearer Token</code> 与上游网关，对话全程 0 界面重载、0 中断。
-- <b>双层重置时间智能自动轮询</b>：每个模型支持设置「跟随当前通道」、「指定个人账号通道」或「自动轮询有余额通道」（跨全个人账号 <code>Prod / Daily</code> 双池执行「先周限额重置时间、再 5 小时限额重置时间」两层排序，同窗口优先锁定当前激活账号，并在主账号 <code>0%</code> 时自动解除前端模型灰显锁死）。
+- <b>全等级精准识别、原生模型列表对齐与官方配额透视</b>：基于动态客户端版本握手与 CloudCode 原生探针，精准区分 <code>Free</code>、<code>Plus</code>（含渠道赠送版）、<code>Pro</code>、<code>Ultra</code> 与 <code>GCP</code> 通道等级（未确认订阅源时按 <code>Unknown</code> 保底），直连个人官方配额账本还原三大官方配额池与倒计时；可用模型严格对齐 Antigravity 原生列表（前台直读 <code>GetUserStatus</code> 实时可用集，后台遵循 <code>agentModelSorts</code> 原生白名单与 <code>dynamicModelRegistry</code> 动态自学习注册表，自动识别 <code>Orchestrator (Argon)</code> 并剔除内部 <code>sonar</code> 节点），面板内置 <code>translate="no"</code> 防外部 DOM 翻译劫持。
+- <b>个人通道免重载无感路由</b>：内置本地透明反向代理（默认 <code>8091</code> 端口，支持 <code>8091..8095</code> 及随机端口自动递增防冲突回退），按模型家族实时替换目标个人账号 <code>Bearer Token</code> 与伴生项目上下文，对话全程 0 界面重载、0 中断。
+- <b>双层重置时间智能自动轮询</b>：每个模型支持设置「跟随当前通道」、「指定个人账号通道」或「自动轮询有余额通道」（跨全个人账号执行「先周限额重置时间、再 5 小时限额重置时间」两层排序，同窗口优先锁定当前激活账号，并在主账号 <code>0%</code> 时自动解除前端模型灰显锁死）。
 - <b>双层思维签名识别、WAL 截断与无损剥离</b>：实时识别并展示当前会话及历史会话的签名归属徽章（<code>GCP</code> / <code>个人</code> / <code>无签名</code>），卡片右上角提供「仅清除当前会话签名」与「全项目扫描清除跨通道不匹配签名」双模式清理（内置 SQLite <code>readOk</code> 锁守卫与 <code>wal_checkpoint(TRUNCATE)</code> 防签名反弹），结合跨号代理自动剥离彻底根除 <code>Invalid thought signature (400)</code> 报错。
 - <b>会话统计与项目汇总一键切换</b>：直读官方 <code>transcript.jsonl</code> 原生 Token 账单，支持在卡片内一键按钮切换「当前会话统计」（支持下拉切换项目内任意历史会话）与「项目汇总」（统计当前项目全部会话累计用词、缓存命中率与按模型细分用量）。
 - <b>独立多开实例、四重登录态同步与双通道互锁</b>：支持 <code>+ 多开实例</code> 一键拉起独立用户目录的个人或 <code>GCP</code> 实例（当个人与 <code>GCP</code> 双通道实例同时在场时自动互锁防串扰）；跨通道切换内置 Antigravity 2.29+ 四重登录态同步（<code>WinCred</code> + <code>state.vscdb</code> Protobuf Sentinel + <code>app_storage.json</code> + <code>auth_method</code> 隔离）与单实例无感自重启。

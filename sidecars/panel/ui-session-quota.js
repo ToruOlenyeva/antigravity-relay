@@ -879,9 +879,7 @@ function renderQuotaGroups() {
 
     const modelsLabel = document.createElement("div");
     modelsLabel.className = "gcp-models-label";
-    modelsLabel.textContent = activePool === "daily"
-      ? (t.personalModelsLabelDaily || "Daily 服已识别可用模型：")
-      : (t.personalModelsLabelProd || "正式服 (Prod) 已识别可用模型：");
+    modelsLabel.textContent = t.personalModelsLabel || t.personalModelsLabelDaily || "该账号已识别可用模型：";
     modelsCard.appendChild(modelsLabel);
 
     const chipsWrap = document.createElement("div");
