@@ -46,6 +46,20 @@ function getChannelBadgeInfo(ch) {
   return { badgeType: "unknown", badgeText: t.channelUnknownBadge || "未知" };
 }
 
+/**
+ * 创建带防外部 DOM 翻译保护的通道类型徽章节点。
+ * @param {string} badgeType 徽章样式类别
+ * @param {string} badgeText 徽章文本
+ * @returns {HTMLSpanElement}
+ */
+function createChannelBadgeNode(badgeType, badgeText) {
+  const badge = document.createElement("span");
+  badge.className = `channel-type-badge ${badgeType || "personal"} notranslate`;
+  badge.setAttribute("translate", "no");
+  badge.textContent = badgeText;
+  return badge;
+}
+
 function formatCompactTokenCount(num) {
   const n = Number(num || 0);
   if (!Number.isFinite(n) || n <= 0) return "0";
@@ -111,10 +125,7 @@ function renderTelemetryConvSelector(tel, viewedItem, isProjectTotalView) {
     leftWrap.appendChild(dot);
 
     if (projSigDisp.shortText) {
-      const b = document.createElement("span");
-      b.className = "channel-type-badge " + (projSigDisp.pillType || "personal");
-      b.textContent = projSigDisp.shortText;
-      leftWrap.appendChild(b);
+      leftWrap.appendChild(createChannelBadgeNode(projSigDisp.pillType || "personal", projSigDisp.shortText));
     }
 
     const textEl = document.createElement("span");
@@ -160,10 +171,7 @@ function renderTelemetryConvSelector(tel, viewedItem, isProjectTotalView) {
   leftWrap.appendChild(triggerDot);
 
   if (activeOpt.badgeText) {
-    const b = document.createElement("span");
-    b.className = "channel-type-badge " + (activeOpt.badgeType || "personal");
-    b.textContent = activeOpt.badgeText;
-    leftWrap.appendChild(b);
+    leftWrap.appendChild(createChannelBadgeNode(activeOpt.badgeType || "personal", activeOpt.badgeText));
   }
 
   const triggerText = document.createElement("span");
@@ -195,10 +203,7 @@ function renderTelemetryConvSelector(tel, viewedItem, isProjectTotalView) {
     itemLeft.appendChild(itemDot);
 
     if (opt.badgeText) {
-      const b = document.createElement("span");
-      b.className = "channel-type-badge " + (opt.badgeType || "personal");
-      b.textContent = opt.badgeText;
-      itemLeft.appendChild(b);
+      itemLeft.appendChild(createChannelBadgeNode(opt.badgeType || "personal", opt.badgeText));
     }
 
     const itemLabel = document.createElement("span");
@@ -488,10 +493,7 @@ function renderSessionSelector() {
   leftWrap.appendChild(dot);
 
   const curBadge = getChannelBadgeInfo(currentViewed);
-  const prefixBadge = document.createElement("span");
-  prefixBadge.className = "channel-type-badge " + curBadge.badgeType;
-  prefixBadge.textContent = curBadge.badgeText;
-  leftWrap.appendChild(prefixBadge);
+  leftWrap.appendChild(createChannelBadgeNode(curBadge.badgeType, curBadge.badgeText));
 
   const emailText = document.createElement("span");
   emailText.className = "active-email";
@@ -530,10 +532,7 @@ function renderSessionSelector() {
     itemLeft.appendChild(itemDot);
 
     const chBadge = getChannelBadgeInfo(ch);
-    const itemBadge = document.createElement("span");
-    itemBadge.className = "channel-type-badge " + chBadge.badgeType;
-    itemBadge.textContent = chBadge.badgeText;
-    itemLeft.appendChild(itemBadge);
+    itemLeft.appendChild(createChannelBadgeNode(chBadge.badgeType, chBadge.badgeText));
 
     const itemLabel = document.createElement("span");
     itemLabel.className = "dropdown-option-label";

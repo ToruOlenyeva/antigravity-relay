@@ -26,7 +26,7 @@
 
 ## ✨ 核心特性
 
-- <b>全等级精准识别、Daily 账本透视与 Unknown 保底</b>：基于动态客户端版本握手（优先正式网关并自动回落 Daily 网关）与 CloudCode 原生探针，精准区分 <code>Free</code>（无会员）、<code>Plus</code>（含渠道赠送版）、<code>Pro</code>、<code>Ultra</code> 与 <code>GCP</code> 通道等级（无法确认订阅归属时按 <code>Unknown</code> 保底而不误标为 <code>Pro</code>），直连个人 <code>Daily 服</code> 官方账本 1:1 还原 <code>Gemini 模型</code>、<code>Claude 和 GPT 模型</code> 及 <code>Gemini 4 Argon</code> 周限额/5 小时限额与重置倒计时。
+- <b>全等级精准识别、原生模型列表对齐与 Daily 账本透视</b>：基于动态客户端版本握手与 CloudCode 原生探针，精准区分 <code>Free</code>、<code>Plus</code>（含渠道赠送版）、<code>Pro</code>、<code>Ultra</code> 与 <code>GCP</code> 通道等级（未确认订阅源时按 <code>Unknown</code> 保底），直连个人 <code>Daily 服</code> 还原三大官方配额池与倒计时；可用模型严格对齐 Antigravity 原生列表（前台直读 <code>GetUserStatus</code> 实时可用集，后台遵循 <code>agentModelSorts</code> 原生白名单与 <code>dynamicModelRegistry</code> 动态自学习注册表，自动识别 <code>Orchestrator (Argon)</code> 并剔除内部 <code>sonar</code> 节点），面板内置 <code>translate="no"</code> 防外部 DOM 翻译劫持。
 - <b>个人通道免重载无感路由</b>：内置本地透明反向代理（默认 <code>8091</code> 端口，支持 <code>8091..8095</code> 及随机端口自动递增防冲突回退），按模型家族与目标账本（<code>Prod / Daily</code>）实时替换目标个人账号 <code>Bearer Token</code> 与上游网关，对话全程 0 界面重载、0 中断。
 - <b>双层重置时间智能自动轮询</b>：每个模型支持设置「跟随当前通道」、「指定个人账号通道」或「自动轮询有余额通道」（跨全个人账号 <code>Prod / Daily</code> 双池执行「先周限额重置时间、再 5 小时限额重置时间」两层排序，同窗口优先锁定当前激活账号，并在主账号 <code>0%</code> 时自动解除前端模型灰显锁死）。
 - <b>双层思维签名识别、WAL 截断与无损剥离</b>：实时识别并展示当前会话及历史会话的签名归属徽章（<code>GCP</code> / <code>个人</code> / <code>无签名</code>），卡片右上角提供「仅清除当前会话签名」与「全项目扫描清除跨通道不匹配签名」双模式清理（内置 SQLite <code>readOk</code> 锁守卫与 <code>wal_checkpoint(TRUNCATE)</code> 防签名反弹），结合跨号代理自动剥离彻底根除 <code>Invalid thought signature (400)</code> 报错。

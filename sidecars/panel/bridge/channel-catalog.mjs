@@ -12,7 +12,7 @@ export const AGENT_PLATFORM_DEFAULT_MODELS = [];
 export function isLegacyDeprecatedModel(labelOrId) {
   const s = String(labelOrId || "").trim();
   return (
-    /2[-_.\s]*5|gemini[\s-]*3(?:\.0)?[\s-]*flash\b|gemini[\s-]*3\.5[\s-]*flash[\s-]*lite|gemini[\s-]*3\.1[\s-]*flash|3\.8-flash-tiered|chat_|tab_/i.test(s) ||
+    /2[-_.\s]*5|gemini[\s-]*3(?:\.0)?[\s-]*flash\b|gemini[\s-]*3\.5[\s-]*flash[\s-]*lite|gemini[\s-]*3\.1[\s-]*flash|3\.8-flash-tiered|\bsonar\b|chat_|tab_/i.test(s) ||
     /^(gemini\s*(flash|pro)|claude\s*(opus|sonnet)|gpt-oss)$/i.test(s)
   );
 }
@@ -284,7 +284,7 @@ export function learnModelsFromLsClientConfigs(cfg, clientModelConfigs, opts = {
     if (!m || typeof m !== "object") continue;
     const rawLabel = String(m.label || m.displayName || "").trim();
     const modelId = String(m.modelOrAlias?.model || m.modelOrAlias?.alias || m.model || "").trim();
-    if (!rawLabel || !modelId || isLegacyDeprecatedModel(rawLabel)) continue;
+    if (!rawLabel || !modelId || isLegacyDeprecatedModel(rawLabel) || isLegacyDeprecatedModel(modelId)) continue;
     const baseFamily = stripModelVariantSuffix(rawLabel);
     if (!baseFamily || isLegacyDeprecatedModel(baseFamily)) continue;
 
@@ -648,23 +648,21 @@ export function mergeNativeCatalogIntoPersonalModels(
     addOrMergeModel(m);
   }
 
-  if (hasArgonAccess) {
-    const argonCatalogEntries = [
-      ...catalog.filter((c) => c && (c.requiresArgon || isArgonGatedLabelOrId(c.label))),
-      {
-        label: "Orchestrator (Argon)",
-        variantIds: ["Orchestrator (Argon)", "MODEL_PLACEHOLDER_M668", "gemini-pro-orchestrator-g1-pro"],
-        requiresArgon: true
-      }
-    ];
-    for (const catItem of argonCatalogEntries) {
-      addOrMergeModel({
-        label: catItem.label,
-        modelId: catItem.label,
-        variantIds: catItem.variantIds || [catItem.label],
-        unlimited: false
-      });
-    }
+  const hasGemini4ArgonInSourceOrCatalog =
+    Array.from(mergedMap.keys()).some((lbl) => /\bargon\b/i.test(lbl)) ||
+    catalog.some((c) => c && /gemini\s*4\s*argon/i.test(c.label || ""));
+  if (hasArgonAccess && hasGemini4ArgonInSourceOrCatalog) {
+    const orchCatalogItem = catalog.find((c) => c && /^orchestrator\s*\(argon\)$/i.test(c.label || ""));
+    addOrMergeModel({
+      label: "Orchestrator (Argon)",
+      modelId: "Orchestrator (Argon)",
+      variantIds: orchCatalogItem?.variantIds || [
+        "Orchestrator (Argon)",
+        "MODEL_PLACEHOLDER_M668",
+        "gemini-pro-orchestrator-g1-pro"
+      ],
+      unlimited: false
+    });
   }
 
   // 若原生目录已知顺序，优先按原生 UI 顺序排列已命中的模型
@@ -834,9 +832,14 @@ export function sanitizeCachedQuotaModels(
     if (!isGcp && !hasArgonAccess && isArgonGatedLabelOrId(baseLabel)) {
       continue;
     }
-    const vars = (Array.isArray(m.variantIds) ? m.variantIds : [baseLabel, rawLabel]).filter(
-      (v) => !isLegacyDeprecatedModel(v) && (isGcp || !isGcpOnlyModel(v))
+    const rawVars = Array.isArray(m.variantIds) ? m.variantIds : [baseLabel, rawLabel];
+    const hadDistinctRawVariant = rawVars.some((v) => v && v !== baseLabel && v !== rawLabel);
+    const vars = rawVars.filter(
+      (v) => v && !isLegacyDeprecatedModel(v) && (isGcp || !isGcpOnlyModel(v))
     );
+    if (hadDistinctRawVariant && !vars.some((v) => v && v !== baseLabel && v !== rawLabel)) {
+      continue;
+    }
     if (!merged.has(baseLabel)) {
       merged.set(baseLabel, {
         ...m,

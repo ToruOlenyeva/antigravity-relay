@@ -362,11 +362,12 @@ export function parseCloudCodeModelsAndQuota(
         seenModelIds.add(mid);
       }
     }
-  }
-  for (const [mid, m] of Object.entries(modelsObj)) {
-    if (!seenModelIds.has(mid)) {
-      orderedEntries.push([mid, m]);
-      seenModelIds.add(mid);
+  } else {
+    for (const [mid, m] of Object.entries(modelsObj)) {
+      if (!seenModelIds.has(mid)) {
+        orderedEntries.push([mid, m]);
+        seenModelIds.add(mid);
+      }
     }
   }
 

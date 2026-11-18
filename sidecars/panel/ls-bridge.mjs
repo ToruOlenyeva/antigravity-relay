@@ -745,7 +745,7 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false, opts = {}) {
     const modelId = m.modelOrAlias?.model || m.modelOrAlias?.alias || "";
     if (!rawLabel || !modelId) continue;
     const baseLabel = stripModelVariantSuffix(rawLabel);
-    if (isLegacyDeprecatedModel(baseLabel) || isLegacyDeprecatedModel(rawLabel)) {
+    if (isLegacyDeprecatedModel(baseLabel) || isLegacyDeprecatedModel(rawLabel) || isLegacyDeprecatedModel(modelId)) {
       continue;
     }
     if (!activeGcpProject) {
@@ -882,6 +882,23 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false, opts = {}) {
     };
   }
   const activePool = getActivePersonalQuotaPool(cfg);
+  const enrichLiveLsWithCloudMetadata = (liveModels, cloudModels, argonFlag, paidFlag) => {
+    const liveLabelSet = new Set(
+      (liveModels || [])
+        .map((m) => String(m?.label || m?.modelId || "").trim().toLowerCase())
+        .filter(Boolean)
+    );
+    const matchedCloudExtras = (Array.isArray(cloudModels) ? cloudModels : []).filter((m) => {
+      const lbl = String(m?.label || m?.modelId || "").trim().toLowerCase();
+      return lbl && liveLabelSet.has(lbl);
+    });
+    return mergeNativeCatalogIntoPersonalModels(
+      [...(liveModels || []), ...matchedCloudExtras],
+      Boolean(argonFlag),
+      Boolean(paidFlag),
+      cfg
+    );
+  };
   if (!activeGcpProject && detectedChannelId && cfg.accounts[detectedChannelId]) {
     let detCached = cfg.accounts[detectedChannelId].cachedQuota;
     const poolMatchedSnapshot = cfg.accounts[detectedChannelId].cachedQuotaByPool?.[activePool];
@@ -926,11 +943,11 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false, opts = {}) {
         quotaGroups = Array.isArray(probed.quotaGroups) ? probed.quotaGroups : [];
         if (Array.isArray(probed.availableModels) && probed.availableModels.length > 0) {
           const combinedModels = liveLsPersonalModels.length > 0
-            ? mergeNativeCatalogIntoPersonalModels(
-                [...liveLsPersonalModels, ...probed.availableModels],
-                Boolean(probed.hasArgonAccess),
-                Boolean(probed.isPaidProOrUltra),
-                cfg
+            ? enrichLiveLsWithCloudMetadata(
+                liveLsPersonalModels,
+                probed.availableModels,
+                probed.hasArgonAccess,
+                probed.isPaidProOrUltra
               )
             : probed.availableModels;
           availableModels = quotaGroups.length > 0 && probed.tierCode !== "Free"
@@ -979,11 +996,11 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false, opts = {}) {
       }
       if (lsModeMatches && availableModels.length > 0) {
         const mergedWithCached = Array.isArray(detCached.availableModels) && detCached.availableModels.length > 0
-          ? mergeNativeCatalogIntoPersonalModels(
-              [...availableModels, ...detCached.availableModels],
+          ? enrichLiveLsWithCloudMetadata(
+              availableModels,
+              detCached.availableModels,
               hasLiveArgonAccess,
-              isLivePaidProOrUltra,
-              cfg
+              isLivePaidProOrUltra
             )
           : availableModels;
         availableModels = quotaGroups.length > 0 && liveTierInfo.tierCode !== "Free"
