@@ -16,6 +16,7 @@ import {
   stripModelVariantSuffix,
   isModelEntryRestrictedOrSunset,
   resolveFamilyForCloudSlug,
+  mergeNativeCatalogIntoPersonalModels,
   detectPersonalAccountTier,
   buildProModelsFromQuotaGroups,
   isValidOfficialQuotaGroup,

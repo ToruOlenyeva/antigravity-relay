@@ -56,7 +56,8 @@ import {
   normalizePersonalQuotaPool,
   getActivePersonalQuotaPool,
   getDetectedClientVersion,
-  learnModelsFromLsClientConfigs
+  learnModelsFromLsClientConfigs,
+  mergeNativeCatalogIntoPersonalModels
 } from "./bridge/quota-probe.mjs";
 import {
   hasActivePersonalRoutingConfig,
@@ -705,6 +706,9 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false, opts = {}) {
       : (!logPid && !tierIndicatesGcp))
   );
   const effectiveClientModels = lsModeMatches ? clientModelConfigs : [];
+  if (!activeGcpProject && effectiveClientModels.length > 0) {
+    learnModelsFromLsClientConfigs(cfg, effectiveClientModels, { isPersonal: true });
+  }
 
   const liveChannelKey = activeEmail
     ? (activeGcpProject ? `${activeEmail}#gcp:${activeGcpProject}` : `${activeEmail}#personal`)
@@ -748,7 +752,7 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false, opts = {}) {
       if (isGcpOnlyModel(baseLabel) || isGcpOnlyModel(rawLabel)) {
         continue;
       }
-      if (!hasLiveArgonAccess && /argon/i.test(baseLabel)) {
+      if (!hasLiveArgonAccess && /\bargon\b|orchestrator/i.test(baseLabel)) {
         continue;
       }
     }
@@ -775,6 +779,17 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false, opts = {}) {
     }
   }
   let availableModels = Array.from(groupedModelMap.values());
+  if (!activeGcpProject && lsModeMatches && availableModels.length > 0) {
+    availableModels = mergeNativeCatalogIntoPersonalModels(
+      availableModels,
+      hasLiveArgonAccess,
+      isLivePaidProOrUltra,
+      cfg
+    );
+  }
+  const liveLsPersonalModels = (!activeGcpProject && lsModeMatches && availableModels.length > 0)
+    ? availableModels.map((m) => ({ ...m, variantIds: [...(m.variantIds || [m.label])] }))
+    : [];
   if (activeGcpProject && lsHasGcpModels && availableModels.length > 0) {
     if (!cfg.__meta__.liveTierModels || typeof cfg.__meta__.liveTierModels !== "object") {
       cfg.__meta__.liveTierModels = {};
@@ -831,7 +846,8 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false, opts = {}) {
       [],
       availableModels,
       [],
-      hasLiveArgonAccess
+      hasLiveArgonAccess,
+      cfg
     );
   }
 
@@ -909,16 +925,28 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false, opts = {}) {
       if (probeSucceeded) {
         quotaGroups = Array.isArray(probed.quotaGroups) ? probed.quotaGroups : [];
         if (Array.isArray(probed.availableModels) && probed.availableModels.length > 0) {
+          const combinedModels = liveLsPersonalModels.length > 0
+            ? mergeNativeCatalogIntoPersonalModels(
+                [...liveLsPersonalModels, ...probed.availableModels],
+                Boolean(probed.hasArgonAccess),
+                Boolean(probed.isPaidProOrUltra),
+                cfg
+              )
+            : probed.availableModels;
           availableModels = quotaGroups.length > 0 && probed.tierCode !== "Free"
             ? buildProModelsFromQuotaGroups(
                 quotaGroups,
                 [],
-                probed.availableModels,
+                combinedModels,
                 [],
-                Boolean(probed.hasArgonAccess)
+                Boolean(probed.hasArgonAccess),
+                cfg
               )
-            : probed.availableModels;
+            : combinedModels;
           probed.availableModels = availableModels;
+          if (cfg.accounts[detectedChannelId].cachedQuotaByPool?.[activePool]) {
+            cfg.accounts[detectedChannelId].cachedQuotaByPool[activePool].availableModels = availableModels;
+          }
         }
         cfg.accounts[detectedChannelId].cachedQuota = probed;
       } else if (lsModeMatches && availableModels.length > 0) {
@@ -950,14 +978,27 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false, opts = {}) {
         detCached.updatedAt = Date.now();
       }
       if (lsModeMatches && availableModels.length > 0) {
-        if (quotaGroups.length > 0 && liveTierInfo.tierCode !== "Free") {
-          availableModels = buildProModelsFromQuotaGroups(
-            quotaGroups,
-            [],
-            availableModels,
-            [],
-            hasLiveArgonAccess
-          );
+        const mergedWithCached = Array.isArray(detCached.availableModels) && detCached.availableModels.length > 0
+          ? mergeNativeCatalogIntoPersonalModels(
+              [...availableModels, ...detCached.availableModels],
+              hasLiveArgonAccess,
+              isLivePaidProOrUltra,
+              cfg
+            )
+          : availableModels;
+        availableModels = quotaGroups.length > 0 && liveTierInfo.tierCode !== "Free"
+          ? buildProModelsFromQuotaGroups(
+              quotaGroups,
+              [],
+              mergedWithCached,
+              [],
+              hasLiveArgonAccess,
+              cfg
+            )
+          : mergedWithCached;
+        detCached.availableModels = availableModels;
+        if (cfg.accounts[detectedChannelId].cachedQuotaByPool?.[activePool]) {
+          cfg.accounts[detectedChannelId].cachedQuotaByPool[activePool].availableModels = availableModels;
         }
       } else if (Array.isArray(detCached.availableModels) && detCached.availableModels.length > 0) {
         availableModels = quotaGroups.length > 0 && detCached.tierCode !== "Free"
@@ -966,10 +1007,19 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false, opts = {}) {
               [],
               detCached.availableModels,
               [],
-              Boolean(detCached.hasArgonAccess)
+              Boolean(detCached.hasArgonAccess),
+              cfg
             )
-          : detCached.availableModels;
+          : mergeNativeCatalogIntoPersonalModels(
+              detCached.availableModels,
+              Boolean(detCached.hasArgonAccess),
+              Boolean(detCached.isPaidProOrUltra),
+              cfg
+            );
         detCached.availableModels = availableModels;
+        if (cfg.accounts[detectedChannelId].cachedQuotaByPool?.[activePool]) {
+          cfg.accounts[detectedChannelId].cachedQuotaByPool[activePool].availableModels = availableModels;
+        }
       }
     }
   }

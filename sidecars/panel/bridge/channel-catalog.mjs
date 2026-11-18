@@ -48,6 +48,10 @@ const GENERIC_MODEL_MATCH_TOKENS = new Set([
   "gpt",
   "oss",
   "pro",
+  "flash",
+  "sonnet",
+  "opus",
+  "lite",
   "g1",
   "g2",
   "g3",
@@ -88,7 +92,7 @@ function isArgonGatedLabelOrId(labelOrId) {
  */
 export function resolveFamilyForCloudSlug(modelKey, modelObj = null, regInput = null) {
   const rawKey = String(modelKey || "").trim();
-  if (!rawKey) return "";
+  if (!rawKey || isLegacyDeprecatedModel(rawKey)) return "";
   const lowerKey = rawKey.toLowerCase();
   const reg = regInput || globalThis.__agyDynamicModelRegistryRef || {};
 
@@ -121,7 +125,9 @@ export function resolveFamilyForCloudSlug(modelKey, modelObj = null, regInput = 
         return item.label;
       }
     }
-    const slugTokens = new Set(extractDistinctiveModelTokens(lowerKey));
+    const slugTokensList = extractDistinctiveModelTokens(lowerKey);
+    const slugTokens = new Set(slugTokensList);
+    const slugVerTokens = slugTokensList.filter((t) => /^\d+(?:\.\d+)?$/.test(t));
     const mReset = String(modelObj?.quotaInfo?.resetTime || "").trim();
     const mFrac = modelObj?.quotaInfo?.remainingFraction;
     let bestLabel = "";
@@ -130,6 +136,11 @@ export function resolveFamilyForCloudSlug(modelKey, modelObj = null, regInput = 
     for (const item of catalog) {
       if (!item?.label) continue;
       const catTokens = extractDistinctiveModelTokens(item.label);
+      const catVerTokens = catTokens.filter((t) => /^\d+(?:\.\d+)?$/.test(t));
+      if (slugVerTokens.length > 0 && catVerTokens.length > 0) {
+        const verMismatch = slugVerTokens.some((sv) => !catVerTokens.includes(sv));
+        if (verMismatch) continue;
+      }
       let overlap = 0;
       for (const t of catTokens) {
         if (slugTokens.has(t)) overlap++;
@@ -177,9 +188,28 @@ export function ensureDynamicModelRegistry(cfg) {
   if (!Array.isArray(reg.clientCatalog)) reg.clientCatalog = [];
 
   for (const [k, fam] of Object.entries(reg.placeholderToFamily)) {
+    if (isLegacyDeprecatedModel(k) || isLegacyDeprecatedModel(fam)) {
+      delete reg.placeholderToFamily[k];
+      continue;
+    }
     const cleanFam = stripModelVariantSuffix(fam);
     if (cleanFam && cleanFam !== fam) {
       reg.placeholderToFamily[k] = cleanFam;
+    }
+  }
+  for (const [k, slug] of Object.entries(reg.placeholderToSlug)) {
+    if (isLegacyDeprecatedModel(k) || isLegacyDeprecatedModel(slug)) {
+      delete reg.placeholderToSlug[k];
+    }
+  }
+  for (const [lbl, slug] of Object.entries(reg.labelToSlug)) {
+    if (isLegacyDeprecatedModel(lbl) || isLegacyDeprecatedModel(slug)) {
+      delete reg.labelToSlug[lbl];
+    }
+  }
+  for (const catItem of reg.clientCatalog) {
+    if (catItem && Array.isArray(catItem.variantIds)) {
+      catItem.variantIds = catItem.variantIds.filter((v) => v && !isLegacyDeprecatedModel(v));
     }
   }
 

@@ -1,7 +1,10 @@
 import https from "node:https";
 import http from "node:http";
 import zlib from "node:zlib";
+import fs from "node:fs";
+import path from "node:path";
 import {
+  HOME_DIR,
   readRelayConfig,
   writeRelayConfig,
   resolveCurrentInstanceContext,
@@ -20,6 +23,10 @@ import {
   getActivePersonalQuotaPool,
   getCloudCodeHostnameForPool,
   learnModelsFromCloudCodeResponse,
+  isLegacyDeprecatedModel,
+  stripModelVariantSuffix,
+  ensureDynamicModelRegistry,
+  resolveFamilyForCloudSlug,
   parseCloudCodeApiError
 } from "./quota-probe.mjs";
 import {
@@ -181,8 +188,57 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
       parsedBodyJson = JSON.parse(rawBodyBuf.toString("utf8"));
       rawModel = String(parsedBodyJson.model || cfg.__meta__?.lastRoutedModel || "").trim();
       baseFamily = resolveBaseModelFamilyFromId(rawModel, cfg);
+      const reg = ensureDynamicModelRegistry(cfg);
+      if (rawModel && (!baseFamily || baseFamily.toLowerCase() === rawModel.toLowerCase())) {
+        let inferred = resolveFamilyForCloudSlug(rawModel, null, reg);
+        if (!inferred) {
+          const convId = String(instMeta?.lastActiveConvId || cfg.__meta__?.lastActiveConvId || "").trim();
+          if (convId) {
+            try {
+              const tPath = path.join(HOME_DIR, ".gemini", "antigravity", "brain", convId, ".system_generated", "logs", "transcript.jsonl");
+              if (fs.existsSync(tPath)) {
+                const st = fs.statSync(tPath);
+                const readSize = Math.min(st.size, 65536);
+                const fd = fs.openSync(tPath, "r");
+                const buf = Buffer.alloc(readSize);
+                try {
+                  fs.readSync(fd, buf, 0, readSize, Math.max(0, st.size - readSize));
+                } finally {
+                  fs.closeSync(fd);
+                }
+                const matches = [...buf.toString("utf8").matchAll(/changed setting `Model Selection` from .*? to ([^.\r\n]+)/g)];
+                if (matches.length > 0) {
+                  const selFam = stripModelVariantSuffix(String(matches[matches.length - 1][1] || "").trim());
+                  const selLower = selFam.toLowerCase();
+                  const existingSlug = reg.labelToSlug?.[selLower];
+                  if (selFam && (!existingSlug || existingSlug === "orchestrator-argon" || existingSlug.toLowerCase() === rawModel.toLowerCase())) {
+                    inferred = selFam;
+                  }
+                }
+              }
+            } catch {}
+          }
+        }
+        if (inferred) {
+          baseFamily = inferred;
+          const lowerRaw = rawModel.toLowerCase();
+          if (reg.placeholderToFamily[lowerRaw] !== inferred) {
+            reg.placeholderToFamily[lowerRaw] = inferred;
+            const infLower = inferred.toLowerCase();
+            if (!reg.labelToSlug[infLower] || reg.labelToSlug[infLower] === "orchestrator-argon") {
+              reg.labelToSlug[infLower] = rawModel;
+            }
+            writeRelayConfig(cfg);
+          }
+        }
+      }
       const routeMap = cfg.routing?.models || {};
-      routeSpec = routeMap[baseFamily] || routeMap[rawModel] || "follow_current";
+      routeSpec =
+        routeMap[baseFamily] ||
+        routeMap[rawModel] ||
+        routeMap[rawModel.toLowerCase()] ||
+        routeMap[rawModel.toUpperCase()] ||
+        "follow_current";
       if (parsedBodyJson.model) {
         parsedBodyJson.model = normalizeConsumerModelId(parsedBodyJson.model, cfg);
       }

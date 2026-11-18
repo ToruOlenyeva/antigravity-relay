@@ -38,13 +38,23 @@ try {
   process.stdin.on("close", () => process.exit(0));
 } catch {}
 
+let activeProxyRequests = 0;
+let pendingRestartTimer = null;
 let isRestartingSelf = false;
 function restartSelfGracefully() {
   if (isRestartingSelf) return;
-  isRestartingSelf = true;
-  setTimeout(() => {
+  if (pendingRestartTimer) clearTimeout(pendingRestartTimer);
+  pendingRestartTimer = setTimeout(() => {
+    const activeUpstream = Number(globalThis.__agyActiveProxyRequests || 0) + activeProxyRequests;
+    const recentDone = Date.now() - Number(globalThis.__agyLastProxyRequestDoneAt || 0) < 3500;
+    if (activeUpstream > 0 || recentDone) {
+      pendingRestartTimer = null;
+      restartSelfGracefully();
+      return;
+    }
+    isRestartingSelf = true;
     process.exit(0);
-  }, 120);
+  }, 2000);
 }
 
 let lsBridge = await import("./ls-bridge.mjs");
@@ -648,6 +658,22 @@ async function requestHandler(req, res) {
             const ekLower = existingKey.toLowerCase();
             if (ekLower === slugPrefix || ekLower.startsWith(`${slugPrefix}-`)) {
               targetRouteMap[existingKey] = targetSpec;
+            }
+          }
+        }
+        const dynReg = cfg.__meta__?.dynamicModelRegistry;
+        if (dynReg && typeof dynReg === "object") {
+          const cleanLower = cleanBase.toLowerCase();
+          const directSlug = dynReg.labelToSlug?.[cleanLower];
+          if (directSlug && directSlug !== "orchestrator-argon") {
+            targetRouteMap[directSlug] = targetSpec;
+          }
+          for (const [phKey, fam] of Object.entries(dynReg.placeholderToFamily || {})) {
+            if (String(fam || "").trim().toLowerCase() === cleanLower && phKey !== "orchestrator-argon") {
+              targetRouteMap[phKey] = targetSpec;
+              if (/^model_/i.test(phKey)) {
+                targetRouteMap[phKey.toUpperCase()] = targetSpec;
+              }
             }
           }
         }
