@@ -13,7 +13,9 @@ import {
   resolvePersonalCompanionProjectId,
   getCloudCodeHostnameForPool,
   stripModelVariantSuffix,
-  deriveCloudCodeSlugFromLabel
+  deriveCloudCodeSlugFromLabel,
+  findQuotaGroupForModel,
+  isGuessedOrchestratorSlug
 } from "./quota-probe.mjs";
 
 const GCP_SIG_BIN_MAGIC = Buffer.from([0x01, 0x8f, 0x3d, 0x6b, 0x5f]);
@@ -122,15 +124,24 @@ export function normalizeConsumerModelId(rawModelStr, cfg = null) {
   const s = String(rawModelStr || "").trim();
   if (!s) return s;
   const lower = s.toLowerCase();
+  const isPlaceholderOrEnum = /^model_(placeholder|openai)_/i.test(s);
+  const isRealWireSlug = /^[a-z0-9][a-z0-9._-]*$/.test(s) && !isPlaceholderOrEnum && !isGuessedOrchestratorSlug(s);
 
   // 1. 优先查询动态自学习注册表（随客户端版本与 GetUserStatus / fetchAvailableModels 实时同步）
   const activeCfg = cfg || (() => { try { return readRelayConfig(); } catch { return null; } })();
   const dynReg = activeCfg?.__meta__?.dynamicModelRegistry;
-  if (dynReg?.placeholderToSlug?.[lower]) {
-    return dynReg.placeholderToSlug[lower];
+  const phMapped = dynReg?.placeholderToSlug?.[lower];
+  if (phMapped && !isGuessedOrchestratorSlug(phMapped)) {
+    return phMapped;
   }
-  if (dynReg?.labelToSlug?.[lower]) {
-    return dynReg.labelToSlug[lower];
+  const lblMapped = dynReg?.labelToSlug?.[lower];
+  if (lblMapped && !isGuessedOrchestratorSlug(lblMapped)) {
+    return lblMapped;
+  }
+
+  // 若入参本身已经是合法真实云端 wire slug（非占位符、非旧猜测名），直接原样放行，绝不让 variantIds 反写篡改
+  if (isRealWireSlug) {
+    return s;
   }
 
   // 2. 若在已探测的 availableModels.variantIds 中同时存在 placeholder 与真实云端 slug，自动反查
@@ -145,7 +156,7 @@ export function normalizeConsumerModelId(rawModelStr, cfg = null) {
       if (!Array.isArray(m.variantIds)) continue;
       if (m.variantIds.some((v) => String(v).toLowerCase() === lower)) {
         const realSlug = m.variantIds.find(
-          (v) => /^[a-z0-9._-]+$/.test(String(v)) && !/^model_placeholder_/i.test(String(v))
+          (v) => /^[a-z0-9._-]+$/.test(String(v)) && !/^model_(placeholder|openai)_/i.test(String(v)) && !isGuessedOrchestratorSlug(String(v))
         );
         if (realSlug) return realSlug;
       }
@@ -229,24 +240,7 @@ export function extractModelDualQuota(accOrQuota, matched, baseFamily) {
     : (accOrQuota?.cachedQuota?.quotaGroups || []);
   const clean = String(baseFamily || matched?.label || matched?.modelId || "").toLowerCase();
 
-  let grp = null;
-  for (const g of groups) {
-    const desc = String(g.description || "").toLowerCase();
-    const gName = String(g.displayName || g.id || "").toLowerCase();
-    if ((clean && desc.includes(clean)) || (clean && gName === clean)) {
-      grp = g;
-      break;
-    }
-  }
-  if (!grp) {
-    if (/\bargon\b|orchestrator/i.test(clean)) {
-      grp = groups.find((g) => /argon/i.test(g.id || g.displayName || ""));
-    } else if (/gemini/i.test(clean)) {
-      grp = groups.find((g) => /gemini\s*models/i.test(g.id || g.displayName || ""));
-    } else if (/claude|gpt/i.test(clean)) {
-      grp = groups.find((g) => /claude|gpt/i.test(g.id || g.displayName || ""));
-    }
-  }
+  const grp = findQuotaGroupForModel(groups, clean, matched);
 
   const bks = grp?.buckets || [];
   const bWk = bks.find((b) => /weekly|7d/i.test(b.window || b.bucketId || ""));

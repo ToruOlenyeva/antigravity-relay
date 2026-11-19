@@ -26,6 +26,11 @@ import {
   mergeNativeCatalogIntoPersonalModels,
   resolveFamilyForCloudSlug,
   isGcpOnlyModel,
+  isArgonGatedLabelOrId,
+  isGuessedOrchestratorSlug,
+  extractOrchestratorTarget,
+  findQuotaGroupForModel,
+  learnObservedWireSlugForFamily,
   isModelEntryRestrictedOrSunset,
   detectPersonalAccountTier,
   buildProModelsFromQuotaGroups,
@@ -59,6 +64,11 @@ export {
   mergeNativeCatalogIntoPersonalModels,
   resolveFamilyForCloudSlug,
   isGcpOnlyModel,
+  isArgonGatedLabelOrId,
+  isGuessedOrchestratorSlug,
+  extractOrchestratorTarget,
+  findQuotaGroupForModel,
+  learnObservedWireSlugForFamily,
   isModelEntryRestrictedOrSunset,
   detectPersonalAccountTier,
   buildProModelsFromQuotaGroups,
@@ -156,11 +166,17 @@ export async function probeChannelQuotaSnapshot(channelId) {
             if (!rawLabel || !modelId) continue;
             const baseLabel = stripModelVariantSuffix(rawLabel);
             if (isLegacyDeprecatedModel(baseLabel) || isLegacyDeprecatedModel(rawLabel)) continue;
+            const rawWireSlug = String(m.modelId || "").trim();
+            const wireSlug = (rawWireSlug && !/disabled$/i.test(rawWireSlug) && !/^model_(placeholder|openai)_/i.test(rawWireSlug))
+              ? rawWireSlug
+              : "";
             if (!groupedMap.has(baseLabel)) {
+              const initVars = [baseLabel, rawLabel, modelId];
+              if (wireSlug && !initVars.includes(wireSlug)) initVars.push(wireSlug);
               groupedMap.set(baseLabel, {
                 label: baseLabel,
                 modelId: baseLabel,
-                variantIds: [baseLabel, rawLabel, modelId],
+                variantIds: initVars,
                 remainingPct: 100,
                 resetTime: "",
                 unlimited: true
@@ -169,6 +185,7 @@ export async function probeChannelQuotaSnapshot(channelId) {
               const entry = groupedMap.get(baseLabel);
               if (!entry.variantIds.includes(rawLabel)) entry.variantIds.push(rawLabel);
               if (!entry.variantIds.includes(modelId)) entry.variantIds.push(modelId);
+              if (wireSlug && !entry.variantIds.includes(wireSlug)) entry.variantIds.push(wireSlug);
             }
           }
           const liveModels = Array.from(groupedMap.values());

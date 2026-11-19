@@ -42,6 +42,7 @@ import {
   isLegacyDeprecatedModel,
   stripModelVariantSuffix,
   isGcpOnlyModel,
+  isArgonGatedLabelOrId,
   isModelEntryRestrictedOrSunset,
   detectPersonalAccountTier,
   buildProModelsFromQuotaGroups,
@@ -752,7 +753,7 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false, opts = {}) {
       if (isGcpOnlyModel(baseLabel) || isGcpOnlyModel(rawLabel)) {
         continue;
       }
-      if (!hasLiveArgonAccess && /\bargon\b|orchestrator/i.test(baseLabel)) {
+      if (!hasLiveArgonAccess && isArgonGatedLabelOrId(baseLabel)) {
         continue;
       }
     }
@@ -762,12 +763,20 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false, opts = {}) {
           ? Math.round(m.quotaInfo.remainingFraction * 100)
           : (m.quotaInfo?.resetTime ? 0 : 100));
     const resetTime = activeGcpProject ? "" : (m.quotaInfo?.resetTime || "");
+    const rawWireSlug = String(m.modelId || "").trim();
+    const nativeWireSlug = (
+      rawWireSlug &&
+      !/disabled$/i.test(rawWireSlug) &&
+      !/^model_(placeholder|openai)_/i.test(rawWireSlug)
+    ) ? rawWireSlug : "";
 
     if (!groupedModelMap.has(baseLabel)) {
+      const initVars = [baseLabel, rawLabel, modelId];
+      if (nativeWireSlug && !initVars.includes(nativeWireSlug)) initVars.push(nativeWireSlug);
       groupedModelMap.set(baseLabel, {
         label: baseLabel,
         modelId: baseLabel,
-        variantIds: [baseLabel, rawLabel, modelId],
+        variantIds: initVars,
         remainingPct,
         resetTime,
         unlimited: Boolean(activeGcpProject)
@@ -776,6 +785,7 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false, opts = {}) {
       const entry = groupedModelMap.get(baseLabel);
       if (!entry.variantIds.includes(rawLabel)) entry.variantIds.push(rawLabel);
       if (!entry.variantIds.includes(modelId)) entry.variantIds.push(modelId);
+      if (nativeWireSlug && !entry.variantIds.includes(nativeWireSlug)) entry.variantIds.push(nativeWireSlug);
     }
   }
   let availableModels = Array.from(groupedModelMap.values());

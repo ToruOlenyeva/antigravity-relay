@@ -445,6 +445,30 @@ function findModelInChannel(acc, modelObj, explicitPool = "") {
 
 const WEEK_PENALTY_MS = 7 * 24 * 3600 * 1000;
 
+function extractOrchestratorTargetUi(str) {
+  const s = String(str || "").trim();
+  if (!s) return "";
+  const pm = /^orchestrator\s*\(([^)]+)\)$/i.exec(s);
+  if (pm) return pm[1].trim().toLowerCase();
+  if (/orchestrator.*g1-pro|^orchestrator-argon$/i.test(s)) return "argon";
+  const sm = /orchestrator[-_]([a-z0-9][a-z0-9._-]*)$/i.exec(s);
+  if (sm) {
+    const raw = sm[1].toLowerCase().replace(/^g\d+[-_](?=[a-z])/i, "").replace(/[-_]+/g, " ").trim();
+    return raw === "pro" ? "argon" : raw;
+  }
+  return "";
+}
+
+function matchesTargetTokensUi(text, target) {
+  const tokens = String(target || "").trim().toLowerCase().split(/[^a-z0-9.]+/i).filter(Boolean);
+  if (tokens.length === 0) return false;
+  const hay = String(text || "");
+  return tokens.every((tok) => {
+    const escaped = tok.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`(^|[^a-z0-9.])${escaped}([^a-z0-9.]|$)`, "i").test(hay);
+  });
+}
+
 function extractModelDualQuotaUi(accOrQuota, matched, m) {
   const now = Date.now();
   const defaultWeeklyMs = now + WEEK_PENALTY_MS;
@@ -452,8 +476,12 @@ function extractModelDualQuotaUi(accOrQuota, matched, m) {
     ? accOrQuota.quotaGroups
     : (accOrQuota?.cachedQuota?.quotaGroups || []);
   const clean = String(m?.label || m?.modelId || matched?.label || matched?.modelId || "").toLowerCase();
+  const geminiGroup = groups.find((g) => /gemini\s*models/i.test(g.id || g.displayName || ""));
+  const claudeGroup = groups.find((g) => /claude|gpt/i.test(g.id || g.displayName || ""));
+  const argonGroup = groups.find((g) => /\bargon\b/i.test(g.id || g.displayName || ""));
 
   let grp = null;
+  // 1. Exact official group description or name match
   for (const g of groups) {
     const desc = String(g.description || "").toLowerCase();
     const gName = String(g.displayName || g.id || "").toLowerCase();
@@ -462,13 +490,37 @@ function extractModelDualQuotaUi(accOrQuota, matched, m) {
       break;
     }
   }
-  if (!grp) {
-    if (/argon/i.test(clean)) {
-      grp = groups.find((g) => /argon/i.test(g.id || g.displayName || ""));
+  // 2. Dynamic parenthetical / orchestrator target token match (group title first, then description)
+  if (!grp && clean) {
+    const target = extractOrchestratorTargetUi(clean);
+    if (target) {
+      grp = groups.find((g) => matchesTargetTokensUi(g.displayName || g.id || "", target)) ||
+            groups.find((g) => matchesTargetTokensUi(g.description || "", target)) ||
+            null;
+    }
+  }
+  // 3. Bucket resetTime fingerprint fallback
+  const itemReset = String(matched?.resetTime || m?.resetTime || "").trim();
+  if (!grp && itemReset) {
+    const targetPct = matched?.remainingPct ?? m?.remainingPct;
+    grp = groups.find((g) =>
+      (g.buckets || []).some((b) => b.resetTime && b.resetTime === itemReset && (targetPct === undefined || b.remainingPct === targetPct))
+    ) || null;
+    if (!grp) {
+      const resetHits = groups.filter((g) => (g.buckets || []).some((b) => b.resetTime && b.resetTime === itemReset));
+      if (resetHits.length === 1) grp = resetHits[0];
+    }
+  }
+  // 4. Keyword fallback (Argon-only -> Argon/Gemini; generic orchestrator -> Gemini)
+  if (!grp && clean) {
+    if (/\bargon\b|g1-pro|m668/i.test(clean)) {
+      grp = argonGroup || geminiGroup || null;
     } else if (/gemini/i.test(clean)) {
-      grp = groups.find((g) => /gemini\s*models/i.test(g.id || g.displayName || ""));
+      grp = geminiGroup || null;
     } else if (/claude|gpt/i.test(clean)) {
-      grp = groups.find((g) => /claude|gpt/i.test(g.id || g.displayName || ""));
+      grp = claudeGroup || null;
+    } else if (/orchestrator/i.test(clean)) {
+      grp = geminiGroup || null;
     }
   }
 

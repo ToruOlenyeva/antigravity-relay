@@ -23,6 +23,8 @@ import {
   getActivePersonalQuotaPool,
   getCloudCodeHostnameForPool,
   learnModelsFromCloudCodeResponse,
+  learnObservedWireSlugForFamily,
+  isGuessedOrchestratorSlug,
   isLegacyDeprecatedModel,
   stripModelVariantSuffix,
   ensureDynamicModelRegistry,
@@ -211,7 +213,7 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
                   const selFam = stripModelVariantSuffix(String(matches[matches.length - 1][1] || "").trim());
                   const selLower = selFam.toLowerCase();
                   const existingSlug = reg.labelToSlug?.[selLower];
-                  if (selFam && (!existingSlug || existingSlug === "orchestrator-argon" || existingSlug.toLowerCase() === rawModel.toLowerCase())) {
+                  if (selFam && (!existingSlug || isGuessedOrchestratorSlug(existingSlug) || existingSlug.toLowerCase() === rawModel.toLowerCase())) {
                     inferred = selFam;
                   }
                 }
@@ -221,15 +223,11 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
         }
         if (inferred) {
           baseFamily = inferred;
-          const lowerRaw = rawModel.toLowerCase();
-          if (reg.placeholderToFamily[lowerRaw] !== inferred) {
-            reg.placeholderToFamily[lowerRaw] = inferred;
-            const infLower = inferred.toLowerCase();
-            if (!reg.labelToSlug[infLower] || reg.labelToSlug[infLower] === "orchestrator-argon") {
-              reg.labelToSlug[infLower] = rawModel;
-            }
-            writeRelayConfig(cfg);
-          }
+        }
+      }
+      if (rawModel && baseFamily && baseFamily.toLowerCase() !== rawModel.toLowerCase()) {
+        if (learnObservedWireSlugForFamily(cfg, rawModel, baseFamily)) {
+          writeRelayConfig(cfg);
         }
       }
       const routeMap = cfg.routing?.models || {};
@@ -529,7 +527,9 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
                 const decodedBuf = decodeCompressedBody(respBuf, upRes.headers["content-encoding"]);
                 const respJson = JSON.parse(decodedBuf.toString("utf8"));
                 if (respJson?.models && typeof respJson.models === "object") {
-                  learnModelsFromCloudCodeResponse(cfg, respJson);
+                  if (learnModelsFromCloudCodeResponse(cfg, respJson)) {
+                    writeRelayConfig(cfg);
+                  }
                   const routeMap = cfg.routing?.models || {};
                   const curPool = getActivePersonalQuotaPool(cfg);
                   for (const [mKey, mObj] of Object.entries(respJson.models)) {

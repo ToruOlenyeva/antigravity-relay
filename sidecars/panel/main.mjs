@@ -839,10 +839,11 @@ async function requestHandler(req, res) {
             if (vid) targetRouteMap[vid] = targetSpec;
           }
         }
-        // 同步更新同模型族下的所有小写连字符变体键（如 gemini-4-argon-medium），彻底杜绝旧键残留
+        // 同步更新同模型族下的所有小写连字符变体键（如 gemini-4-argon-medium；仅剥离推理档位后缀，保留括号内 Neon/Argon 等型号标识防互相覆盖）
         const slugPrefix = cleanBase
           .toLowerCase()
-          .replace(/\s*\([^)]*\)\s*/g, "")
+          .replace(/\s*\((low|medium|high|xhigh|extra|max|thinking)\)\s*$/i, "")
+          .replace(/[()]/g, "")
           .trim()
           .replace(/[\s_]+/g, "-");
         if (slugPrefix) {
@@ -857,11 +858,11 @@ async function requestHandler(req, res) {
         if (dynReg && typeof dynReg === "object") {
           const cleanLower = cleanBase.toLowerCase();
           const directSlug = dynReg.labelToSlug?.[cleanLower];
-          if (directSlug && directSlug !== "orchestrator-argon") {
+          if (directSlug && !/^orchestrator-[a-z0-9._-]+$/i.test(directSlug)) {
             targetRouteMap[directSlug] = targetSpec;
           }
           for (const [phKey, fam] of Object.entries(dynReg.placeholderToFamily || {})) {
-            if (String(fam || "").trim().toLowerCase() === cleanLower && phKey !== "orchestrator-argon") {
+            if (String(fam || "").trim().toLowerCase() === cleanLower && !/^orchestrator-[a-z0-9._-]+$/i.test(phKey)) {
               targetRouteMap[phKey] = targetSpec;
               if (/^model_/i.test(phKey)) {
                 targetRouteMap[phKey.toUpperCase()] = targetSpec;

@@ -13,6 +13,8 @@ import {
 import {
   isLegacyDeprecatedModel,
   isGcpOnlyModel,
+  isArgonGatedLabelOrId,
+  extractOrchestratorTarget,
   stripModelVariantSuffix,
   isModelEntryRestrictedOrSunset,
   resolveFamilyForCloudSlug,
@@ -400,13 +402,13 @@ export function parseCloudCodeModelsAndQuota(
       continue;
     }
     if (!isGcpChannel && isGcpOnlyModel(baseLabel)) continue;
-    if (!isGcpChannel && !m.quotaInfo && !allowedModelIds.has(modelId) && !(hasArgonAccess && /orchestrator|\bargon\b/i.test(baseLabel))) {
+    const isArgonModel = isArgonGatedLabelOrId(baseLabel) || isArgonGatedLabelOrId(modelId);
+    const isOrchModel = Boolean(extractOrchestratorTarget(baseLabel) || /^orchestrator\b/i.test(baseLabel));
+    if (!isGcpChannel && isArgonModel && !hasArgonAccess) {
       continue;
     }
-    if (!isGcpChannel) {
-      if (!hasArgonAccess && /\bargon\b|orchestrator/i.test(baseLabel)) {
-        continue;
-      }
+    if (!isGcpChannel && !m.quotaInfo && !allowedModelIds.has(modelId) && !(isOrchModel || (hasArgonAccess && isArgonModel))) {
+      continue;
     }
     const remainingPct = isGcpChannel
       ? 100
