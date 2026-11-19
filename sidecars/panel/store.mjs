@@ -575,15 +575,22 @@ function migrateLegacyProfilesIfNeeded(cfg) {
   } catch (e) {}
 }
 
+let lastInternalRelayWriteAt = 0;
+export function isInternalRelayWriteSettled(cooldownMs = 800) {
+  return Date.now() - lastInternalRelayWriteAt > cooldownMs;
+}
+
 export function writeRelayConfig(cfg) {
   try {
     const dir = path.dirname(RELAY_CONFIG_FILE);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
+    let existingDiskRaw = "";
     // 跨进程原子合并锁：防止主窗口与多开窗口后台并发快照互相冲掉对方最新切换的通道或刚刚探测出的配额快照
     try {
       if (fs.existsSync(RELAY_CONFIG_FILE)) {
         const diskRaw = fs.readFileSync(RELAY_CONFIG_FILE, "utf-8");
+        existingDiskRaw = diskRaw;
         if (diskRaw && diskRaw.trim()) {
           const diskCfg = JSON.parse(diskRaw);
           if (diskCfg && typeof diskCfg === "object") {
@@ -766,6 +773,11 @@ export function writeRelayConfig(cfg) {
     } catch {}
 
     const serialized = JSON.stringify(cfg, null, 2);
+    if (existingDiskRaw && existingDiskRaw === serialized) {
+      lastValidCache = serialized;
+      return true;
+    }
+    lastInternalRelayWriteAt = Date.now();
     const tmpPath = `${RELAY_CONFIG_FILE}.${process.pid}.${Date.now()}.tmp`;
     try {
       fs.writeFileSync(tmpPath, serialized, "utf-8");

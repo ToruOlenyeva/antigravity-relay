@@ -208,8 +208,11 @@ export function addOrUpdateGcpChannelCard(email, projectId, opts = {}) {
   return cfg.accounts[gcpKey];
 }
 
+const cachedLsRpcByInst = new Map();
+
 export async function fetchLiveSystemSnapshot(forceWinCred = false, opts = {}) {
   const skipPersonalProbe = Boolean(opts?.skipPersonalProbe);
+  const isLight = Boolean(opts?.light);
   const cfg = readRelayConfig();
   normalizeAccountChannels(cfg);
   const ctx = resolveCurrentInstanceContext();
@@ -220,20 +223,42 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false, opts = {}) {
   let quotaSummaryResp = null;
 
   if (ls) {
-    try {
-      [userStatusResp, quotaSummaryResp] = await Promise.all([
-        callLsRpc(ls, "GetUserStatus", {}),
-        callLsRpc(ls, "RetrieveUserQuotaSummary", {}).catch(() => null)
-      ]);
-    } catch {
-      ls = discoverLanguageServer(true);
-      if (ls) {
-        try {
-          [userStatusResp, quotaSummaryResp] = await Promise.all([
-            callLsRpc(ls, "GetUserStatus", {}),
-            callLsRpc(ls, "RetrieveUserQuotaSummary", {}).catch(() => null)
-          ]);
-        } catch {}
+    const instCacheKey = ctx.instanceId || "main";
+    const rpcCached = cachedLsRpcByInst.get(instCacheKey);
+    if (
+      isLight &&
+      !forceWinCred &&
+      rpcCached &&
+      rpcCached.pid === (ls.pid || 0) &&
+      rpcCached.userStatusResp &&
+      (Date.now() - rpcCached.at < 30000)
+    ) {
+      userStatusResp = rpcCached.userStatusResp;
+      quotaSummaryResp = rpcCached.quotaSummaryResp;
+    } else {
+      try {
+        [userStatusResp, quotaSummaryResp] = await Promise.all([
+          callLsRpc(ls, "GetUserStatus", {}),
+          callLsRpc(ls, "RetrieveUserQuotaSummary", {}).catch(() => null)
+        ]);
+      } catch {
+        ls = discoverLanguageServer(true);
+        if (ls) {
+          try {
+            [userStatusResp, quotaSummaryResp] = await Promise.all([
+              callLsRpc(ls, "GetUserStatus", {}),
+              callLsRpc(ls, "RetrieveUserQuotaSummary", {}).catch(() => null)
+            ]);
+          } catch {}
+        }
+      }
+      if (userStatusResp) {
+        cachedLsRpcByInst.set(instCacheKey, {
+          at: Date.now(),
+          pid: ls.pid || 0,
+          userStatusResp,
+          quotaSummaryResp
+        });
       }
     }
   }
@@ -576,6 +601,18 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false, opts = {}) {
   }
 
   if (ls) {
+    const prevInstRpc = instMeta.lsRpcTarget;
+    const sameInstRpc = Boolean(
+      prevInstRpc &&
+      prevInstRpc.pid === (ls.pid || 0) &&
+      prevInstRpc.hostname === ls.hostname &&
+      prevInstRpc.port === ls.port &&
+      (prevInstRpc.protocol || "http") === (ls.protocol || "http") &&
+      (prevInstRpc.altPort || 0) === (ls.altPort || 0) &&
+      (prevInstRpc.altProtocol || "https") === (ls.altProtocol || "https") &&
+      prevInstRpc.csrf === ls.csrf &&
+      prevInstRpc.updatedAt
+    );
     const rpcTargetObj = {
       pid: ls.pid || 0,
       hostname: ls.hostname,
@@ -584,11 +621,23 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false, opts = {}) {
       altPort: ls.altPort || 0,
       altProtocol: ls.altProtocol || "https",
       csrf: ls.csrf,
-      updatedAt: Date.now()
+      updatedAt: sameInstRpc ? prevInstRpc.updatedAt : Date.now()
     };
     instMeta.lsRpcTarget = rpcTargetObj;
     if (!ctx.isIsolatedInstance) {
-      cfg.__meta__.lsRpcTarget = rpcTargetObj;
+      const prevTopRpc = cfg.__meta__.lsRpcTarget;
+      const sameTopRpc = Boolean(
+        prevTopRpc &&
+        prevTopRpc.pid === rpcTargetObj.pid &&
+        prevTopRpc.hostname === rpcTargetObj.hostname &&
+        prevTopRpc.port === rpcTargetObj.port &&
+        (prevTopRpc.protocol || "http") === rpcTargetObj.protocol &&
+        (prevTopRpc.altPort || 0) === rpcTargetObj.altPort &&
+        (prevTopRpc.altProtocol || "https") === rpcTargetObj.altProtocol &&
+        prevTopRpc.csrf === rpcTargetObj.csrf &&
+        prevTopRpc.updatedAt
+      );
+      cfg.__meta__.lsRpcTarget = sameTopRpc ? prevTopRpc : { ...rpcTargetObj };
     }
 
     const hasPersonalRouting = hasActivePersonalRoutingConfig(cfg);
@@ -809,7 +858,6 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false, opts = {}) {
       modelId: m.modelId,
       variantIds: [...(m.variantIds || [m.label])]
     }));
-    writeRelayConfig(cfg);
   }
   if (
     activeGcpProject &&
@@ -877,6 +925,21 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false, opts = {}) {
     : detectedChannelId;
 
   if (activeGcpProject && detectedChannelId && cfg.accounts[detectedChannelId]) {
+    const prevQ = cfg.accounts[detectedChannelId].cachedQuota;
+    const nextGcpModels = availableModels.length > 0
+      ? availableModels
+      : (prevQ?.availableModels || []);
+    const sameGcpQuota = Boolean(
+      prevQ &&
+      prevQ.updatedAt &&
+      prevQ.tierCode === liveTierInfo.tierCode &&
+      prevQ.tierName === liveTierInfo.tierName &&
+      prevQ.hasArgonAccess === hasLiveArgonAccess &&
+      prevQ.isPaidProOrUltra === isLivePaidProOrUltra &&
+      prevQ.isGcpUnlimited === true &&
+      prevQ.probedVia === "language_server_rpc" &&
+      JSON.stringify(prevQ.availableModels || []) === JSON.stringify(nextGcpModels)
+    );
     cfg.accounts[detectedChannelId].cachedQuota = {
       tierCode: liveTierInfo.tierCode,
       tierName: liveTierInfo.tierName,
@@ -884,11 +947,9 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false, opts = {}) {
       isPaidProOrUltra: isLivePaidProOrUltra,
       isGcpUnlimited: true,
       quotaGroups: [],
-      availableModels: availableModels.length > 0
-        ? availableModels
-        : (cfg.accounts[detectedChannelId].cachedQuota?.availableModels || []),
+      availableModels: nextGcpModels,
       probedVia: "language_server_rpc",
-      updatedAt: Date.now()
+      updatedAt: sameGcpQuota ? prevQ.updatedAt : Date.now()
     };
   }
   const activePool = getActivePersonalQuotaPool(cfg);
@@ -1001,8 +1062,11 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false, opts = {}) {
         quotaGroups = Array.isArray(detCached.quotaGroups) ? detCached.quotaGroups : [];
       } else {
         // 本地 language_server RPC 已有最新实时分组额度时保留实时值并回写内存快照
+        const groupsChanged = !detCached.updatedAt || JSON.stringify(detCached.quotaGroups || []) !== JSON.stringify(quotaGroups);
         detCached.quotaGroups = quotaGroups;
-        detCached.updatedAt = Date.now();
+        if (groupsChanged) {
+          detCached.updatedAt = Date.now();
+        }
       }
       if (lsModeMatches && availableModels.length > 0) {
         const mergedWithCached = Array.isArray(detCached.availableModels) && detCached.availableModels.length > 0

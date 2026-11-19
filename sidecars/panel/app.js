@@ -822,6 +822,9 @@ function applyIncomingSnapshot(nextSnap, opts = {}) {
   if (nextSnap.stateRevision !== undefined) {
     lastKnownStateRevision = Math.max(lastKnownStateRevision, Number(nextSnap.stateRevision || 0));
   }
+  if (nextSnap.configMtimeMs !== undefined && Number(nextSnap.configMtimeMs) > 0) {
+    lastKnownConfigMtimeMs = Math.max(lastKnownConfigMtimeMs, Number(nextSnap.configMtimeMs));
+  }
   lastFullStatusFetchAt = Date.now();
 
   const prevOAuthEvent = nextSnap.lastOAuthEvent;
@@ -1335,7 +1338,7 @@ function scheduleEmbeddedPoll() {
     return;
   }
   if (embeddedPollTimer) return;
-  const delayMs = (state.oauthPending || probingChannelIds.size > 0 || switchingAccountId) ? 750 : 1400;
+  const delayMs = (state.oauthPending || probingChannelIds.size > 0 || switchingAccountId) ? 750 : 2500;
   embeddedPollTimer = setTimeout(async () => {
     embeddedPollTimer = null;
     if (!isPluginCustomScheme || !isPanelActuallyVisible()) return;
@@ -1356,7 +1359,7 @@ function scheduleEmbeddedPoll() {
             (nextRev > 0 && nextRev !== lastKnownStateRevision) ||
             (nextMtime > 0 && nextMtime !== lastKnownConfigMtimeMs) ||
             (nextOAuthId && nextOAuthId !== lastHandledOAuthEventKey) ||
-            (Date.now() - lastFullStatusFetchAt >= 15000);
+            (Date.now() - lastFullStatusFetchAt >= 30000);
           if (needsRefresh) {
             if (nextRev > 0) lastKnownStateRevision = nextRev;
             if (nextMtime > 0) lastKnownConfigMtimeMs = nextMtime;

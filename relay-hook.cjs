@@ -35,6 +35,11 @@ function writeJsonSafe(filePath, obj) {
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   } catch (e) {}
   const serialized = JSON.stringify(obj, null, 2);
+  try {
+    if (fs.existsSync(filePath) && fs.readFileSync(filePath, "utf-8") === serialized) {
+      return;
+    }
+  } catch (e) {}
   const tmp = `${filePath}.${process.pid}.${Date.now()}.tmp`;
   try {
     fs.writeFileSync(tmp, serialized, "utf-8");

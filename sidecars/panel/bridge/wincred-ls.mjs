@@ -867,6 +867,8 @@ let cachedClientVersion = "";
 let cachedClientCl = "";
 let cachedClientVersionAt = 0;
 
+const lsLogParseCache = new Map();
+
 export function parseLsLogInfo(customLogFile = "") {
   const ctx = resolveCurrentInstanceContext();
   const targetLogFile = customLogFile || ctx.lsLogFile || LS_LOG_FILE;
@@ -880,70 +882,180 @@ export function parseLsLogInfo(customLogFile = "") {
   let lsVersion = "";
   let lsCl = "";
   try {
-    if (fs.existsSync(targetLogFile)) {
-      const logText = fs.readFileSync(targetLogFile, "utf8");
-      const pidMatches = [...logText.matchAll(/Starting language server process with pid (\d+)/gi)];
-      let activeSegment = logText;
-      if (pidMatches.length > 0) {
-        const lastPidMatch = pidMatches[pidMatches.length - 1];
-        pid = Number(lastPidMatch[1]);
-        if (typeof lastPidMatch.index === "number") {
-          activeSegment = logText.slice(lastPidMatch.index);
+    if (targetLogFile && fs.existsSync(targetLogFile)) {
+      const st = fs.statSync(targetLogFile);
+      const cached = lsLogParseCache.get(targetLogFile);
+      if (cached && cached.size === st.size && cached.mtimeMs === st.mtimeMs) {
+        ({ pid, httpPort, httpsPort, lastProjectId, lastLocation, lastUserTier, enableBusinessLogin, lsVersion, lsCl } = cached.result);
+      } else if (cached && st.size > cached.size && cached.lastNewlineOffset > 0 && cached.lastNewlineOffset <= st.size) {
+        const readLen = st.size - cached.lastNewlineOffset;
+        const buf = Buffer.allocUnsafe(readLen);
+        const fd = fs.openSync(targetLogFile, "r");
+        try {
+          fs.readSync(fd, buf, 0, readLen, cached.lastNewlineOffset);
+        } finally {
+          fs.closeSync(fd);
         }
-      }
-      const verMatches = [...activeSegment.matchAll(/Language server version:\s*([0-9]+\.[0-9]+\.[0-9]+[^\s\r\n]*)/gi)];
-      if (verMatches.length > 0) {
-        lsVersion = (verMatches[verMatches.length - 1][1] || "").trim();
+        const lastNl = buf.lastIndexOf(0x0a);
+        const nextOffset = lastNl >= 0 ? cached.lastNewlineOffset + lastNl + 1 : cached.lastNewlineOffset;
+        const deltaText = buf.toString("utf8");
+        ({ pid, httpPort, httpsPort, lastProjectId, lastLocation, lastUserTier, enableBusinessLogin, lsVersion, lsCl } = cached.result);
+
+        const pidMatches = [...deltaText.matchAll(/Starting language server process with pid (\d+)/gi)];
+        let activeSegment = deltaText;
+        if (pidMatches.length > 0) {
+          const lastPidMatch = pidMatches[pidMatches.length - 1];
+          pid = Number(lastPidMatch[1]);
+          httpPort = 0;
+          httpsPort = 0;
+          lastProjectId = "";
+          lastLocation = "";
+          lastUserTier = "";
+          enableBusinessLogin = null;
+          lsCl = "";
+          if (typeof lastPidMatch.index === "number") {
+            activeSegment = deltaText.slice(lastPidMatch.index);
+          }
+        }
+        const verMatches = [...activeSegment.matchAll(/Language server version:\s*([0-9]+\.[0-9]+\.[0-9]+[^\s\r\n]*)/gi)];
+        if (verMatches.length > 0) {
+          lsVersion = (verMatches[verMatches.length - 1][1] || "").trim();
+        } else if (pidMatches.length > 0) {
+          const allDeltaVer = [...deltaText.matchAll(/Language server version:\s*([0-9]+\.[0-9]+\.[0-9]+[^\s\r\n]*)/gi)];
+          if (allDeltaVer.length > 0) {
+            lsVersion = (allDeltaVer[allDeltaVer.length - 1][1] || "").trim();
+          }
+        }
+        const clMatches = [...activeSegment.matchAll(/\bcl=(\d{7,15})\b/gi)];
+        if (clMatches.length > 0) {
+          lsCl = (clMatches[clMatches.length - 1][1] || "").trim();
+        }
+        const httpsMatches = [...activeSegment.matchAll(/listening on \w+ port at (\d+) for HTTPS/gi)];
+        if (httpsMatches.length > 0) {
+          httpsPort = Number(httpsMatches[httpsMatches.length - 1][1]);
+        }
+        const httpMatches = [...activeSegment.matchAll(/listening on \w+ port at (\d+) for HTTP\b/gi)];
+        if (httpMatches.length > 0) {
+          httpPort = Number(httpMatches[httpMatches.length - 1][1]);
+        }
+
+        let authScopeSegment = activeSegment;
+        const resetBoundaries = [
+          ...activeSegment.matchAll(/(?:ClearAuthToken|SignOut|Logout|SetEnableBusinessLogin called with enable:\s*false)/gi)
+        ];
+        if (resetBoundaries.length > 0) {
+          const lastReset = resetBoundaries[resetBoundaries.length - 1];
+          lastProjectId = "";
+          lastLocation = "";
+          lastUserTier = "";
+          enableBusinessLogin = null;
+          if (typeof lastReset.index === "number") {
+            authScopeSegment = activeSegment.slice(lastReset.index);
+          }
+        }
+
+        const bizMatches = [...authScopeSegment.matchAll(/SetEnableBusinessLogin called with enable:\s*(true|false)/gi)];
+        if (bizMatches.length > 0) {
+          enableBusinessLogin = bizMatches[bizMatches.length - 1][1].toLowerCase() === "true";
+        }
+        const projMatches = [...authScopeSegment.matchAll(/SetProjectID called with projectID:\s*"([^"]*)"/gi)];
+        if (projMatches.length > 0) {
+          lastProjectId = (projMatches[projMatches.length - 1][1] || "").trim();
+        }
+        if (enableBusinessLogin === false) {
+          lastProjectId = "";
+        }
+        const locMatches = [...authScopeSegment.matchAll(/SetLocation called with location:\s*"([^"]*)"/gi)];
+        if (locMatches.length > 0) {
+          lastLocation = (locMatches[locMatches.length - 1][1] || "").trim();
+        }
+        const tierMatches = [...authScopeSegment.matchAll(/SetUserTier called with userTier:\s*"([^"]*)"/gi)];
+        if (tierMatches.length > 0) {
+          lastUserTier = (tierMatches[tierMatches.length - 1][1] || "").trim();
+        }
+
+        lsLogParseCache.set(targetLogFile, {
+          size: st.size,
+          mtimeMs: st.mtimeMs,
+          lastNewlineOffset: nextOffset,
+          result: { pid, httpPort, httpsPort, lastProjectId, lastLocation, lastUserTier, enableBusinessLogin, lsVersion, lsCl }
+        });
       } else {
-        const allVerMatches = [...logText.matchAll(/Language server version:\s*([0-9]+\.[0-9]+\.[0-9]+[^\s\r\n]*)/gi)];
-        if (allVerMatches.length > 0) {
-          lsVersion = (allVerMatches[allVerMatches.length - 1][1] || "").trim();
+        const buf = fs.readFileSync(targetLogFile);
+        const logText = buf.toString("utf8");
+        const pidMatches = [...logText.matchAll(/Starting language server process with pid (\d+)/gi)];
+        let activeSegment = logText;
+        if (pidMatches.length > 0) {
+          const lastPidMatch = pidMatches[pidMatches.length - 1];
+          pid = Number(lastPidMatch[1]);
+          if (typeof lastPidMatch.index === "number") {
+            activeSegment = logText.slice(lastPidMatch.index);
+          }
         }
-      }
-      const clMatches = [...activeSegment.matchAll(/\bcl=(\d{7,15})\b/gi)];
-      if (clMatches.length > 0) {
-        lsCl = (clMatches[clMatches.length - 1][1] || "").trim();
-      }
-      const httpsMatches = [...activeSegment.matchAll(/listening on \w+ port at (\d+) for HTTPS/gi)];
-      if (httpsMatches.length > 0) {
-        httpsPort = Number(httpsMatches[httpsMatches.length - 1][1]);
-      }
-      const httpMatches = [...activeSegment.matchAll(/listening on \w+ port at (\d+) for HTTP\b/gi)];
-      if (httpMatches.length > 0) {
-        httpPort = Number(httpMatches[httpMatches.length - 1][1]);
-      }
-
-      // 按最新一次退出登录/清除凭据或关闭企业登录边界切片，杜绝同一进程内旧账号的 SetProjectID 跨账号残留
-      let authScopeSegment = activeSegment;
-      const resetBoundaries = [
-        ...activeSegment.matchAll(/(?:ClearAuthToken|SignOut|Logout|SetEnableBusinessLogin called with enable:\s*false)/gi)
-      ];
-      if (resetBoundaries.length > 0) {
-        const lastReset = resetBoundaries[resetBoundaries.length - 1];
-        if (typeof lastReset.index === "number") {
-          authScopeSegment = activeSegment.slice(lastReset.index);
+        const verMatches = [...activeSegment.matchAll(/Language server version:\s*([0-9]+\.[0-9]+\.[0-9]+[^\s\r\n]*)/gi)];
+        if (verMatches.length > 0) {
+          lsVersion = (verMatches[verMatches.length - 1][1] || "").trim();
+        } else {
+          const allVerMatches = [...logText.matchAll(/Language server version:\s*([0-9]+\.[0-9]+\.[0-9]+[^\s\r\n]*)/gi)];
+          if (allVerMatches.length > 0) {
+            lsVersion = (allVerMatches[allVerMatches.length - 1][1] || "").trim();
+          }
         }
-      }
+        const clMatches = [...activeSegment.matchAll(/\bcl=(\d{7,15})\b/gi)];
+        if (clMatches.length > 0) {
+          lsCl = (clMatches[clMatches.length - 1][1] || "").trim();
+        }
+        const httpsMatches = [...activeSegment.matchAll(/listening on \w+ port at (\d+) for HTTPS/gi)];
+        if (httpsMatches.length > 0) {
+          httpsPort = Number(httpsMatches[httpsMatches.length - 1][1]);
+        }
+        const httpMatches = [...activeSegment.matchAll(/listening on \w+ port at (\d+) for HTTP\b/gi)];
+        if (httpMatches.length > 0) {
+          httpPort = Number(httpMatches[httpMatches.length - 1][1]);
+        }
 
-      const bizMatches = [...authScopeSegment.matchAll(/SetEnableBusinessLogin called with enable:\s*(true|false)/gi)];
-      if (bizMatches.length > 0) {
-        enableBusinessLogin = bizMatches[bizMatches.length - 1][1].toLowerCase() === "true";
+        // 按最新一次退出登录/清除凭据或关闭企业登录边界切片，杜绝同一进程内旧账号的 SetProjectID 跨账号残留
+        let authScopeSegment = activeSegment;
+        const resetBoundaries = [
+          ...activeSegment.matchAll(/(?:ClearAuthToken|SignOut|Logout|SetEnableBusinessLogin called with enable:\s*false)/gi)
+        ];
+        if (resetBoundaries.length > 0) {
+          const lastReset = resetBoundaries[resetBoundaries.length - 1];
+          if (typeof lastReset.index === "number") {
+            authScopeSegment = activeSegment.slice(lastReset.index);
+          }
+        }
+
+        const bizMatches = [...authScopeSegment.matchAll(/SetEnableBusinessLogin called with enable:\s*(true|false)/gi)];
+        if (bizMatches.length > 0) {
+          enableBusinessLogin = bizMatches[bizMatches.length - 1][1].toLowerCase() === "true";
+        }
+        const projMatches = [...authScopeSegment.matchAll(/SetProjectID called with projectID:\s*"([^"]*)"/gi)];
+        if (projMatches.length > 0) {
+          lastProjectId = (projMatches[projMatches.length - 1][1] || "").trim();
+        }
+        if (enableBusinessLogin === false) {
+          lastProjectId = "";
+        }
+        const locMatches = [...authScopeSegment.matchAll(/SetLocation called with location:\s*"([^"]*)"/gi)];
+        if (locMatches.length > 0) {
+          lastLocation = (locMatches[locMatches.length - 1][1] || "").trim();
+        }
+        const tierMatches = [...authScopeSegment.matchAll(/SetUserTier called with userTier:\s*"([^"]*)"/gi)];
+        if (tierMatches.length > 0) {
+          lastUserTier = (tierMatches[tierMatches.length - 1][1] || "").trim();
+        }
+
+        const lastNl = buf.lastIndexOf(0x0a);
+        lsLogParseCache.set(targetLogFile, {
+          size: st.size,
+          mtimeMs: st.mtimeMs,
+          lastNewlineOffset: lastNl >= 0 ? lastNl + 1 : 0,
+          result: { pid, httpPort, httpsPort, lastProjectId, lastLocation, lastUserTier, enableBusinessLogin, lsVersion, lsCl }
+        });
       }
-      const projMatches = [...authScopeSegment.matchAll(/SetProjectID called with projectID:\s*"([^"]*)"/gi)];
-      if (projMatches.length > 0) {
-        lastProjectId = (projMatches[projMatches.length - 1][1] || "").trim();
-      }
-      if (enableBusinessLogin === false) {
-        lastProjectId = "";
-      }
-      const locMatches = [...authScopeSegment.matchAll(/SetLocation called with location:\s*"([^"]*)"/gi)];
-      if (locMatches.length > 0) {
-        lastLocation = (locMatches[locMatches.length - 1][1] || "").trim();
-      }
-      const tierMatches = [...authScopeSegment.matchAll(/SetUserTier called with userTier:\s*"([^"]*)"/gi)];
-      if (tierMatches.length > 0) {
-        lastUserTier = (tierMatches[tierMatches.length - 1][1] || "").trim();
-      }
+    } else if (targetLogFile) {
+      lsLogParseCache.delete(targetLogFile);
     }
   } catch {}
   if (lsVersion) {
@@ -1029,7 +1141,7 @@ let cachedLsProcList = null;
 let cachedLsProcListAt = 0;
 
 export function listRunningLanguageServerProcesses(force = false) {
-  if (!force && cachedLsProcList && Date.now() - cachedLsProcListAt < 2000) {
+  if (!force && cachedLsProcList && Date.now() - cachedLsProcListAt < 20000) {
     return cachedLsProcList;
   }
   try {

@@ -11,6 +11,7 @@ import {
   PRELOAD_SDK_PATH,
   readRelayConfig,
   writeRelayConfig,
+  isInternalRelayWriteSettled,
   resolveCurrentInstanceContext,
   getActiveIsolatedSidecarPorts
 } from "./store.mjs";
@@ -187,6 +188,15 @@ function getFrontendAssetsVersion() {
   return String(ver);
 }
 
+function getRelayConfigMtimeMs() {
+  try {
+    if (fs.existsSync(RELAY_CONFIG_FILE)) {
+      return Math.floor(fs.statSync(RELAY_CONFIG_FILE).mtimeMs);
+    }
+  } catch {}
+  return 0;
+}
+
 function broadcastSnapshot(snapshot) {
   if (!snapshot) return;
   snapshot.frontendVersion = getFrontendAssetsVersion();
@@ -207,6 +217,7 @@ function broadcastSnapshot(snapshot) {
     snapshotUpdatedAt = Date.now();
   }
   snapshot.stateRevision = snapshotRevision;
+  snapshot.configMtimeMs = getRelayConfigMtimeMs();
   latestSnapshot = snapshot;
   if (sseClients.size === 0) return;
   const payload = `data: ${JSON.stringify(snapshot)}\n\n`;
@@ -382,12 +393,7 @@ async function requestHandler(req, res) {
   }
 
   if (req.method === "GET" && pathname === "/api/state-version") {
-    let configMtimeMs = 0;
-    try {
-      if (fs.existsSync(RELAY_CONFIG_FILE)) {
-        configMtimeMs = Math.floor(fs.statSync(RELAY_CONFIG_FILE).mtimeMs);
-      }
-    } catch {}
+    const configMtimeMs = getRelayConfigMtimeMs();
     return sendJson(res, 200, {
       revision: snapshotRevision,
       frontendVersion: getFrontendAssetsVersion(),
@@ -461,7 +467,7 @@ async function requestHandler(req, res) {
       if (force) {
         await lsBridge.probeAllChannelsQuotaSnapshot().catch(() => {});
       }
-      const snap = await lsBridge.fetchLiveSystemSnapshot(force, { skipPersonalProbe: force || isLight });
+      const snap = await lsBridge.fetchLiveSystemSnapshot(force, { skipPersonalProbe: force || isLight, light: isLight });
       broadcastSnapshot(snap);
       return sendJson(res, 200, snap);
     } catch (err) {
@@ -1018,6 +1024,27 @@ if (!startupInstanceCtx.isIsolatedInstance) {
   setTimeout(() => bindAdditionalRelayPorts(true), 4000);
   setInterval(() => bindAdditionalRelayPorts(false), 30000).unref();
 }
+
+let relayConfigWatchDebounce = null;
+try {
+  const relayConfigDir = path.dirname(RELAY_CONFIG_FILE);
+  const relayConfigName = path.basename(RELAY_CONFIG_FILE);
+  if (fs.existsSync(relayConfigDir)) {
+    fs.watch(relayConfigDir, { persistent: false }, (_ev, filename) => {
+      if (filename && filename !== relayConfigName) return;
+      if (relayConfigWatchDebounce) clearTimeout(relayConfigWatchDebounce);
+      relayConfigWatchDebounce = setTimeout(() => {
+        relayConfigWatchDebounce = null;
+        if (!isInternalRelayWriteSettled(800)) return;
+        snapshotRevision += 1;
+        snapshotUpdatedAt = Date.now();
+        if (sseClients.size > 0) {
+          globalThis.__agyBroadcastLatestSnapshot?.();
+        }
+      }, 150);
+    });
+  }
+} catch {}
 
 // 启动即预热一次实时状态快照与全通道余额探测，同步更新 agy-relay-config.json 与 SSE 缓存
 lsBridge.fetchLiveSystemSnapshot(false)

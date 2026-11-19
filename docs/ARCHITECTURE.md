@@ -130,13 +130,14 @@ antigravity-relay/
 
 ### 4.1 获取实时系统快照与配额状态
 - <b>路径</b>：`GET /api/status`
-- <b>查询参数</b>：`force=1`（可选，强制穿透缓存拉取全通道最新云端配额）、`light=1`（可选，状态版本号触发轻量刷新时跳过冗余个人额度云端探测）。
-- <b>返回格式</b>：包含 `lsOnline`、`activeAccount`、`availableModels`、`quotaGroups`、`accounts`、`routing`、`stateRevision` 及 `oauthPending` 的完整快照 JSON。
+- <b>查询参数</b>：`force=1`（可选，强制穿透缓存拉取全通道最新云端配额）、`light=1`（可选，版本探针触发轻量刷新时跳过冗余个人额度云端探测，并复用 `30s` 内宿主 RPC 内存快照）。
+- <b>返回格式</b>：包含 `lsOnline`、`activeAccount`、`availableModels`、`quotaGroups`、`accounts`、`routing`、`stateRevision`、`configMtimeMs` 及 `oauthPending` 的完整快照 JSON。
 
 ### 4.2 实时状态广播流（SSE）、嵌套轻量版本校验与僵尸自清理
 - <b>独立端事件流</b>：`GET /api/events`（`text/event-stream; charset=utf-8`）在 `http://127.0.0.1:8089` 独立窗口中维持长连接并 `0ms` 推送快照；若请求进入宿主注入的动态端口（`plugin://` 网关背后），后端自动限定并发 `<= 2` 路并在 `20s` 后平滑断流防泄漏。
-- <b>嵌套面板版本探针</b>：`GET /api/state-version` 返回 `revision`、`frontendVersion`、`configMtimeMs`、`oauthPending` 与 `lastOAuthEventId`。`plugin://` 协议下的内置面板在 `isPanelActuallyVisible()` 为真时改用按需轻量版本轮询，彻底避免 Electron `customScheme` `fetchWithoutFollowing` 持有长 SSE 耗尽 Chromium 同源 6 连接池导致新建项目转圈卡死；后台隐藏标签零请求零占用。
+- <b>嵌套面板版本探针</b>：`GET /api/state-version` 返回 `revision`、`frontendVersion`、`configMtimeMs`、`oauthPending` 与 `lastOAuthEventId`。`plugin://` 协议下的内置面板在 `isPanelActuallyVisible()` 为真时改用按需轻量版本轮询（常规 `2.5s` 静默校验、`30s` 周期兜底，交互进行态 `750ms`），收到快照后立即同步回填 `lastKnownConfigMtimeMs` 防自激循环，彻底避免 Electron `customScheme` `fetchWithoutFollowing` 持有长 SSE 耗尽 Chromium 同源 6 连接池导致新建项目转圈卡死；后台隐藏标签零请求零占用。
 - <b>父级 LS 存活看门狗</b>：`main.mjs` 每 `5s` 通过 TCP 探测 `ANTIGRAVITY_LS_ADDRESS`（Windows 下宿主经 `cmd.exe` 包装启动时 `process.ppid` 无法反映 `language_server.exe` 退出）；宿主退出后连续 `2` 次探活失败即自动退出并配合 `/api/restart-sidecar?onlyStandalone=1` 主动让出 `8089` 与历史会话端口。
+- <b>只读零空写盘、写盘冷却监听与增量日志解析</b>：`store.mjs`（及 `relay-hook.cjs`）写盘前执行字节内容相等短路（`existingDiskRaw === serialized` 直接跳过），`ls-bridge.mjs` 仅在字段实质变化时刷新 `updatedAt`；`main.mjs` 挂载带 `800ms` 内部写盘冷却锁（`isInternalRelayWriteSettled`）的 `fs.watch` 外部变更监听；`wincred-ls.mjs` 的 `parseLsLogInfo` 按 `size + mtimeMs` 缓存与字节游标增量读取 `language_server.log`（非强制进程列表缓存 `20s`），避免空写盘惊动宿主插件目录监听或反复全量重读大日志。
 
 ### 4.3 通道、多开与诊断管理接口
 - <b>收录当前已登录账号</b>：`POST /api/save-current-account`
