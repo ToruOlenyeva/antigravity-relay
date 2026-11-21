@@ -444,38 +444,45 @@ export function prepareAntigravityRestartPlan(ctx = null, opts = {}) {
     '        db.exec("CREATE TABLE IF NOT EXISTS ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)");',
     '        if (cfg.prevSnapshotPath && cfg.prevSnapshotPath !== cfg.targetSnapshotPath) {',
     '          try {',
-    '            const rows = db.prepare("SELECT key, value FROM ItemTable WHERE key LIKE \'antigravityUnifiedStateSync.%\' OR key LIKE \'jetskiStateSync.%\'").all();',
-    '            const snapItems = {};',
-    '            for (const r of rows) {',
-    '              if (!r || !r.key || r.key === "antigravityUnifiedStateSync.oauthToken" || r.key === "antigravityUnifiedStateSync.userStatus" || r.key === "antigravityUnifiedStateSync.enterprisePreferences") continue;',
-    '              snapItems[String(r.key)] = String(r.value ?? "");',
-    '            }',
-    '            if (Object.keys(snapItems).length > 0) {',
-    '              fs.mkdirSync(path.dirname(cfg.prevSnapshotPath), { recursive: true });',
-    '              fs.writeFileSync(cfg.prevSnapshotPath, JSON.stringify({ updatedAt: Date.now(), items: snapItems }, null, 2), "utf8");',
+    '            const authRow = db.prepare("SELECT value FROM ItemTable WHERE key = ?").get("antigravityAuthStatus");',
+    '            let dbEmail = "";',
+    '            try {',
+    '              dbEmail = authRow?.value ? String(JSON.parse(String(authRow.value))?.email || "").trim().toLowerCase() : "";',
+    '            } catch {}',
+    '            const expectedPrevEmail = String(cfg.prevEmail || "").trim().toLowerCase();',
+    '            if (dbEmail && (!expectedPrevEmail || dbEmail === expectedPrevEmail)) {',
+    '              const rows = db.prepare("SELECT key, value FROM ItemTable WHERE key LIKE \'antigravityUnifiedStateSync.%\' OR key LIKE \'jetskiStateSync.%\'").all();',
+    '              const snapItems = {};',
+    '              for (const r of rows) {',
+    '                if (!r || !r.key || r.key === "antigravityUnifiedStateSync.oauthToken" || r.key === "antigravityUnifiedStateSync.userStatus" || r.key === "antigravityUnifiedStateSync.enterprisePreferences") continue;',
+    '                snapItems[String(r.key)] = String(r.value ?? "");',
+    '              }',
+    '              if (Object.keys(snapItems).length > 0) {',
+    '                fs.mkdirSync(path.dirname(cfg.prevSnapshotPath), { recursive: true });',
+    '                fs.writeFileSync(cfg.prevSnapshotPath, JSON.stringify({ channelId: cfg.prevChannelId || "", email: dbEmail, updatedAt: Date.now(), items: snapItems }, null, 2), "utf8");',
+    '              }',
     '            }',
     '          } catch {}',
     '        }',
     '        db.prepare("DELETE FROM ItemTable WHERE key LIKE \'antigravityUnifiedStateSync.%\' OR key LIKE \'jetskiStateSync.%\' OR key IN (\'antigravityAuthStatus\', \'google.geminicodeassist\')").run();',
     '        const upsert = db.prepare("INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)");',
-    '        let restoredUserStatus = false;',
     '        if (cfg.targetSnapshotPath && fs.existsSync(cfg.targetSnapshotPath)) {',
     '          try {',
     '            const snap = JSON.parse(fs.readFileSync(cfg.targetSnapshotPath, "utf8"));',
-    '            if (snap && snap.items && typeof snap.items === "object") {',
+    '            const snapChannelOk = !snap?.channelId || !cfg.targetChannelId || snap.channelId === cfg.targetChannelId;',
+    '            const snapEmailOk = !snap?.email || !p.email || snap.email.toLowerCase() === p.email.toLowerCase();',
+    '            if (snap && snapChannelOk && snapEmailOk && snap.items && typeof snap.items === "object") {',
     '              for (const [k, v] of Object.entries(snap.items)) {',
-    '                if (k === "antigravityUnifiedStateSync.oauthToken") continue;',
-    '                if (!p.isGcp && k === "antigravityUnifiedStateSync.enterprisePreferences") continue;',
+    '                if (k === "antigravityUnifiedStateSync.oauthToken" || k === "antigravityUnifiedStateSync.userStatus" || k === "antigravityUnifiedStateSync.enterprisePreferences") continue;',
     '                if (typeof v === "string") {',
     '                  upsert.run(k, v);',
-    '                  if (k === "antigravityUnifiedStateSync.userStatus" && v) restoredUserStatus = true;',
     '                }',
     '              }',
     '            }',
     '          } catch {}',
     '        }',
     '        if (p.oauthTokenB64) upsert.run("antigravityUnifiedStateSync.oauthToken", p.oauthTokenB64);',
-    '        if (!restoredUserStatus && p.userStatusB64) upsert.run("antigravityUnifiedStateSync.userStatus", p.userStatusB64);',
+    '        if (p.userStatusB64) upsert.run("antigravityUnifiedStateSync.userStatus", p.userStatusB64);',
     '        if (p.isGcp && p.enterprisePrefsB64) {',
     '          upsert.run("antigravityUnifiedStateSync.enterprisePreferences", p.enterprisePrefsB64);',
     '        } else {',
@@ -559,6 +566,9 @@ export function prepareAntigravityRestartPlan(ctx = null, opts = {}) {
     protoScrubPath,
     stateVscdbPath,
     vscdbPayload,
+    prevChannelId,
+    prevEmail: prevChannelId ? prevChannelId.split("#")[0].trim() : "",
+    targetChannelId,
     prevSnapshotPath,
     targetSnapshotPath,
     lsLogPath: String(activeCtx?.lsLogFile || ""),
@@ -1430,14 +1440,11 @@ export async function launchIsolatedAntigravityInstance(accountId) {
     if (fs.existsSync(srcWinState) && !fs.existsSync(dstWinState)) {
       fs.copyFileSync(srcWinState, dstWinState);
     }
-    const srcStateVscdb = path.join(mainAppDataDir, "User", "globalStorage", "state.vscdb");
-    const dstStateVscdb = path.join(instanceGlobalStorageDir, "state.vscdb");
-    if (fs.existsSync(srcStateVscdb) && !fs.existsSync(dstStateVscdb)) {
-      fs.copyFileSync(srcStateVscdb, dstStateVscdb);
-    }
-    const isoLsLogPath = path.join(instanceLogsDir, "google.antigravity", "language_server.log");
-    if (fs.existsSync(isoLsLogPath)) {
-      try { fs.writeFileSync(isoLsLogPath, "", "utf8"); } catch {}
+    for (const logRel of ["language_server.log", path.join("google.antigravity", "language_server.log")]) {
+      const isoLsLogPath = path.join(instanceLogsDir, logRel);
+      if (fs.existsSync(isoLsLogPath)) {
+        try { fs.writeFileSync(isoLsLogPath, "", "utf8"); } catch {}
+      }
     }
     syncInstanceAppStorage(
       instanceUserDataDir,
@@ -1448,7 +1455,7 @@ export async function launchIsolatedAntigravityInstance(accountId) {
       targetBillingMode,
       targetLocation
     );
-    syncInstanceStateVscdb(instanceUserDataDir, tokenToWrite, target.email, targetProject, "");
+    syncInstanceStateVscdb(instanceUserDataDir, tokenToWrite, target.email, targetProject, "", { createIfMissing: true });
   } catch {}
 
   const launchedAt = Date.now();

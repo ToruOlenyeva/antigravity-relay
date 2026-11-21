@@ -13,6 +13,7 @@ import {
   writeRelayConfig,
   isInternalRelayWriteSettled,
   resolveCurrentInstanceContext,
+  getInstanceMeta,
   getActiveIsolatedSidecarPorts
 } from "./store.mjs";
 
@@ -667,7 +668,7 @@ async function requestHandler(req, res) {
   if (req.method === "POST" && pathname === "/api/add-gcp-channel") {
     try {
       const { email, projectId, gcpBillingMode, gcpLocation } = await readJsonBody(req);
-      const card = lsBridge.addOrUpdateGcpChannelCard(email, projectId, {
+      const card = await lsBridge.addOrUpdateGcpChannelCard(email, projectId, {
         gcpBillingMode,
         gcpLocation
       });
@@ -731,6 +732,7 @@ async function requestHandler(req, res) {
         acc.projectName = nextPid;
         acc.gcpBillingMode = nextMode;
         acc.gcpLocation = nextLoc;
+        acc.gcpConfigUpdatedAt = Date.now();
         acc.tierName = nextMode === "gemini_enterprise" ? "Gemini Enterprise" : "Agent Platform";
         if (acc.storedToken) {
           acc.storedToken.auth_method = "gcp";
@@ -747,14 +749,28 @@ async function requestHandler(req, res) {
           cfg.accounts[newKey] = acc;
           delete cfg.accounts[accountId];
         }
+        if (acc.storedToken) {
+          if (!cfg.__meta__.channelTokensById || typeof cfg.__meta__.channelTokensById !== "object") {
+            cfg.__meta__.channelTokensById = {};
+          }
+          cfg.__meta__.channelTokensById[newKey] = JSON.parse(JSON.stringify(acc.storedToken));
+          if (!cfg.__meta__.gcpOAuthTokensByEmail || typeof cfg.__meta__.gcpOAuthTokensByEmail !== "object") {
+            cfg.__meta__.gcpOAuthTokensByEmail = {};
+          }
+          cfg.__meta__.gcpOAuthTokensByEmail[acc.email] = JSON.parse(JSON.stringify(acc.storedToken));
+        }
       }
       if (alias !== undefined && String(alias).trim()) {
         acc.alias = String(alias).trim();
       }
       writeRelayConfig(cfg);
 
-      // 若修改的恰好是当前活跃的 GCP 通道，立即同步应用新的项目 ID / 计费模式 / 区域
-      const isCurrentActive = acc.email === cfg.__meta__?.activeEmail && oldPid && oldPid === cfg.__meta__?.lastAppliedGcpProject;
+      // 若修改的恰好是当前实例活跃的 GCP 通道，立即同步应用新的项目 ID / 计费模式 / 区域
+      const curCtx = resolveCurrentInstanceContext();
+      const curInstMeta = getInstanceMeta(cfg, curCtx);
+      const curActiveEmail = String(curInstMeta?.activeEmail || (!curCtx.isIsolatedInstance ? cfg.__meta__?.activeEmail : "") || "").trim();
+      const curActivePid = String(curInstMeta?.lastAppliedGcpProject || (!curCtx.isIsolatedInstance ? cfg.__meta__?.lastAppliedGcpProject : "") || "").trim();
+      const isCurrentActive = acc.email === curActiveEmail && oldPid && oldPid === curActivePid;
       if (isCurrentActive && nextPid) {
         await lsBridge.switchBillingProjectInstant(nextPid, {
           gcpBillingMode: nextMode,

@@ -622,6 +622,20 @@ function selectAutoPollChannel(accounts, m, activeChannelId, thresholdPct = 5) {
   return candidates[0];
 }
 
+function parseRouteAccountRef(spec) {
+  if (!spec || typeof spec !== "string") return null;
+  const trimmed = spec.trim();
+  const match = trimmed.match(/^(?:account|channel):(.+)$/);
+  if (!match) return null;
+  const rawRef = match[1].trim();
+  if (!rawRef) return null;
+  const hashIdx = rawRef.indexOf("#");
+  const poolAtIdx = hashIdx >= 0 ? rawRef.indexOf("@", hashIdx) : -1;
+  const accId = poolAtIdx >= 0 ? rawRef.slice(0, poolAtIdx) : rawRef;
+  const explicitPool = poolAtIdx >= 0 ? rawRef.slice(poolAtIdx + 1) : "";
+  return { accId, explicitPool };
+}
+
 function formatModelQuotaSubText(m, selectedRoute) {
   const t = I18N[currentLang];
   const accounts = state.accounts || [];
@@ -673,10 +687,12 @@ function formatModelQuotaSubText(m, selectedRoute) {
     return t.gcpRouteSubUnsupported;
   };
 
-  if (selectedRoute && selectedRoute.startsWith("account:")) {
-    const rawRef = selectedRoute.slice(8);
-    const [accId, explicitPool] = rawRef.split("@");
-    const targetAcc = accounts.find((a) => a.id === accId);
+  const parsedRouteRef = parseRouteAccountRef(selectedRoute);
+  if (parsedRouteRef) {
+    const { accId, explicitPool } = parsedRouteRef;
+    const targetAcc = accounts.find(
+      (a) => a.id === accId || (!accId.includes("#") && a.id === `${accId}#personal`)
+    );
     if (targetAcc) {
       const isGcp = targetAcc.channelType === "gcp" || Boolean(targetAcc.gcpProjectId);
       if (isGcp) {
@@ -736,8 +752,11 @@ function renderRoutingList() {
     if (isGcpScope && selectedRoute === "auto_poll") {
       selectedRoute = "follow_current";
     }
-    if (selectedRoute.startsWith("account:")) {
-      const targetAcc = (state.accounts || []).find((a) => a.id === selectedRoute.slice(8));
+    const parsedSelRef = parseRouteAccountRef(selectedRoute);
+    if (parsedSelRef) {
+      const targetAcc = (state.accounts || []).find(
+        (a) => a.id === parsedSelRef.accId || (!parsedSelRef.accId.includes("#") && a.id === `${parsedSelRef.accId}#personal`)
+      );
       const targetAccIsGcp = targetAcc ? (targetAcc.channelType === "gcp" || Boolean(targetAcc.gcpProjectId)) : false;
       if (!targetAcc || targetAccIsGcp !== isGcpScope || (!isGcpScope && !findModelInChannel(targetAcc, m))) {
         selectedRoute = "follow_current";
@@ -994,12 +1013,18 @@ async function updateAccountGcpConfig(accountId, gcpProjectId, gcpBillingMode, g
       })
     });
     const data = await res.json();
+    if (!data.success && data.error) {
+      showToast(data.error, true);
+      return;
+    }
     if (data.snapshot) {
       state = data.snapshot;
       renderAll();
     }
     showToast(I18N[currentLang].toastGcpUpdated);
-  } catch (e) {}
+  } catch (e) {
+    showToast(e?.message || "Update GCP config failed", true);
+  }
 }
 
 async function captureCurrentAccount() {

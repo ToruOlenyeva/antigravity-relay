@@ -179,11 +179,12 @@ function sendValidateRpc({ hostname, port, protocol, csrf }, payload) {
   });
 }
 
-async function callValidateProjectRpc(lsTarget, projectId) {
+async function callValidateProjectRpc(lsTarget, projectId, location = "") {
   if (!lsTarget || !lsTarget.port || !lsTarget.csrf) return false;
+  const cleanLoc = projectId ? (["global", "us", "eu"].includes(location) ? location : (location === "" ? "" : "global")) : "";
   const payload = Buffer.from(JSON.stringify({
     projectId: projectId || "",
-    location: projectId ? "global" : ""
+    location: cleanLoc
   }), "utf-8");
   const primaryProto = lsTarget.protocol || "http";
   const ok = await sendValidateRpc({
@@ -215,10 +216,10 @@ function isTemporarilyBlockedForHook(acc, nowMs = Date.now()) {
   return errAt > 0 && (nowMs - errAt) < 600000 && /#3501|valid license|\b401\b|\b403\b/i.test(errMsg);
 }
 
-function resolveBestAvailableChannelSpec(baseModelName, relayCfg) {
+function resolveBestAvailableChannelSpec(baseModelName, relayCfg, activeMeta = null) {
   const accounts = Object.values(relayCfg?.accounts || {});
   if (accounts.length === 0) return null;
-  const activeEmail = (relayCfg?.__meta__?.activeEmail || "").trim();
+  const activeEmail = (activeMeta?.activeEmail || relayCfg?.__meta__?.activeEmail || "").trim();
   const activeChannelId = activeEmail ? `${activeEmail}#personal` : "";
   const preferredPool = "daily";
   const poolOrder = ["daily"];
@@ -384,34 +385,55 @@ function normalizeBaseModelFamily(rawModelStr) {
   return s.replace(/\s*\((Low|Medium|High|XHigh|Max|Extra)\)\s*$/i, "").replace(/-(low|medium|high|xhigh|max|extra)$/i, "").trim();
 }
 
+function parseHookAccountRef(spec) {
+  if (!spec || typeof spec !== "string") return null;
+  const trimmed = spec.trim();
+  if (!trimmed.startsWith("account:") && !trimmed.startsWith("channel:")) return null;
+  const rawRef = trimmed.replace(/^(account|channel):/, "").trim();
+  if (!rawRef) return null;
+  const hashIdx = rawRef.indexOf("#");
+  const poolAtIdx = hashIdx >= 0 ? rawRef.indexOf("@", hashIdx) : -1;
+  const accId = poolAtIdx >= 0 ? rawRef.slice(0, poolAtIdx) : rawRef;
+  const explicitPool = poolAtIdx >= 0 ? rawRef.slice(poolAtIdx + 1) : "";
+  return { accId, explicitPool };
+}
+
 async function applyGcpTargetRoute(targetSpec, relayCfg, baseModelName = "", rawModelName = "", instMeta = null) {
   const activeMeta = instMeta || resolveHookInstanceMeta(relayCfg);
   if (!activeMeta?.lastAppliedGcpProject) return false;
   if (!relayCfg.__meta__) relayCfg.__meta__ = {};
-  relayCfg.__meta__.lastRoutedModel = rawModelName || baseModelName || "";
+  const isIsoInst = Boolean(process.env.AGY_RELAY_INSTANCE_ID || (activeMeta.instanceId && activeMeta.instanceId !== "main"));
+  const modelVal = rawModelName || baseModelName || "";
+  activeMeta.lastRoutedModel = modelVal;
+  if (!isIsoInst) relayCfg.__meta__.lastRoutedModel = modelVal;
 
   if (!targetSpec || targetSpec === "follow_current") {
-    relayCfg.__meta__.lastRoutedChannelId = activeMeta.activeChannelId || "";
+    activeMeta.lastRoutedChannelId = activeMeta.activeChannelId || "";
+    if (!isIsoInst) relayCfg.__meta__.lastRoutedChannelId = activeMeta.activeChannelId || "";
     writeJsonSafe(relayConfigPath, relayCfg);
     return false;
   }
 
-  if (targetSpec.startsWith("account:") || targetSpec.startsWith("channel:")) {
-    const accId = targetSpec.replace(/^(account|channel):/, "").trim();
+  const parsedGcpRef = parseHookAccountRef(targetSpec);
+  if (parsedGcpRef) {
+    const accId = parsedGcpRef.accId;
     const acc = relayCfg?.accounts?.[accId];
     const targetPid = String(acc?.gcpProjectId || "").trim();
     // GCP Vertex AI 使用当前登录 OAuth 凭据直连，严禁跨不同邮箱调用 ValidateProject 篡改 Project ID（否则必报 403 PERMISSION_DENIED）
     if (!acc || !targetPid || (activeMeta.activeEmail && acc.email !== activeMeta.activeEmail)) {
-      relayCfg.__meta__.lastRoutedChannelId = activeMeta.activeChannelId || "";
+      activeMeta.lastRoutedChannelId = activeMeta.activeChannelId || "";
+      if (!isIsoInst) relayCfg.__meta__.lastRoutedChannelId = activeMeta.activeChannelId || "";
       writeJsonSafe(relayConfigPath, relayCfg);
       return false;
     }
-    const lsTarget = activeMeta?.lsRpcTarget || relayCfg?.__meta__?.lsRpcTarget;
+    const lsTarget = activeMeta?.lsRpcTarget || (!isIsoInst ? relayCfg?.__meta__?.lsRpcTarget : null);
     if (lsTarget && targetPid !== activeMeta.lastAppliedGcpProject) {
-      await callValidateProjectRpc(lsTarget, targetPid);
+      const targetLoc = acc.gcpBillingMode === "gemini_enterprise" ? "" : (acc.gcpLocation || "global");
+      await callValidateProjectRpc(lsTarget, targetPid, targetLoc);
       activeMeta.lastAppliedGcpProject = targetPid;
     }
-    relayCfg.__meta__.lastRoutedChannelId = acc.id;
+    activeMeta.lastRoutedChannelId = acc.id;
+    if (!isIsoInst) relayCfg.__meta__.lastRoutedChannelId = acc.id;
     writeJsonSafe(relayConfigPath, relayCfg);
     return true;
   }
@@ -427,49 +449,66 @@ async function applyTargetRoute(targetSpec, relayCfg, baseModelName = "", rawMod
   }
 
   if (!relayCfg.__meta__) relayCfg.__meta__ = {};
-  relayCfg.__meta__.lastRoutedModel = rawModelName || baseModelName || "";
+  const isIsoInst = Boolean(process.env.AGY_RELAY_INSTANCE_ID || (activeMeta?.instanceId && activeMeta.instanceId !== "main"));
+  const modelVal = rawModelName || baseModelName || "";
+  if (activeMeta) activeMeta.lastRoutedModel = modelVal;
+  if (!isIsoInst) relayCfg.__meta__.lastRoutedModel = modelVal;
 
   const ensurePersonalProxyMounted = async () => {
-    const lsTarget = activeMeta?.lsRpcTarget || relayCfg?.__meta__?.lsRpcTarget;
+    const lsTarget = activeMeta?.lsRpcTarget || (!isIsoInst ? relayCfg?.__meta__?.lsRpcTarget : null);
     if (lsTarget) {
       await ensureLocalCloudCodeProxyMounted(lsTarget, relayCfg, activeMeta);
     }
   };
 
   if (!targetSpec || targetSpec === "follow_current") {
-    const preferredPool = String(relayCfg?.routing?.personalQuotaPool || "prod").toLowerCase() === "daily" ? "daily" : "prod";
+    const preferredPool = String(relayCfg?.routing?.personalQuotaPool || "daily").toLowerCase() === "prod" ? "prod" : "daily";
     await ensurePersonalProxyMounted();
-    relayCfg.__meta__.lastRoutedChannelId = activeMeta?.activeChannelId || "";
-    relayCfg.__meta__.lastRoutedPool = preferredPool;
+    if (activeMeta) {
+      activeMeta.lastRoutedChannelId = activeMeta.activeChannelId || "";
+      activeMeta.lastRoutedPool = preferredPool;
+    }
+    if (!isIsoInst) {
+      relayCfg.__meta__.lastRoutedChannelId = activeMeta?.activeChannelId || "";
+      relayCfg.__meta__.lastRoutedPool = preferredPool;
+    }
     writeJsonSafe(relayConfigPath, relayCfg);
     return false;
   }
 
   let resolvedSpec = targetSpec;
   if (resolvedSpec === "auto_poll") {
-    resolvedSpec = resolveBestAvailableChannelSpec(baseModelName, relayCfg) || "follow_current";
+    resolvedSpec = resolveBestAvailableChannelSpec(baseModelName, relayCfg, activeMeta) || "follow_current";
     if (resolvedSpec === "follow_current") {
       await ensurePersonalProxyMounted();
-      relayCfg.__meta__.lastRoutedChannelId = activeMeta?.activeChannelId || "";
+      if (activeMeta) activeMeta.lastRoutedChannelId = activeMeta.activeChannelId || "";
+      if (!isIsoInst) relayCfg.__meta__.lastRoutedChannelId = activeMeta?.activeChannelId || "";
       writeJsonSafe(relayConfigPath, relayCfg);
       return false;
     }
   }
 
-  if (resolvedSpec.startsWith("account:") || resolvedSpec.startsWith("channel:")) {
-    const rawRef = resolvedSpec.replace(/^(account|channel):/, "").trim();
-    const [accId, explicitPool] = rawRef.split("@");
-    const acc = relayCfg?.accounts?.[accId];
+  const parsedRef = parseHookAccountRef(resolvedSpec);
+  if (parsedRef) {
+    const { accId, explicitPool } = parsedRef;
+    const acc = relayCfg?.accounts?.[accId] || (!accId.includes("#") ? relayCfg?.accounts?.[`${accId}#personal`] : null);
     if (!acc || acc.channelType === "gcp" || acc.gcpProjectId) {
       writeJsonSafe(relayConfigPath, relayCfg);
       return false;
     }
-    const lsTarget = activeMeta?.lsRpcTarget || relayCfg?.__meta__?.lsRpcTarget;
+    const lsTarget = activeMeta?.lsRpcTarget || (!isIsoInst ? relayCfg?.__meta__?.lsRpcTarget : null);
     if (lsTarget) {
       await ensureLocalCloudCodeProxyMounted(lsTarget, relayCfg, activeMeta);
     }
-    relayCfg.__meta__.lastRoutedChannelId = acc.id;
-    relayCfg.__meta__.lastRoutedPool = explicitPool || String(relayCfg?.routing?.personalQuotaPool || "prod");
+    const routedPool = explicitPool || String(relayCfg?.routing?.personalQuotaPool || "daily");
+    if (activeMeta) {
+      activeMeta.lastRoutedChannelId = acc.id;
+      activeMeta.lastRoutedPool = routedPool;
+    }
+    if (!isIsoInst) {
+      relayCfg.__meta__.lastRoutedChannelId = acc.id;
+      relayCfg.__meta__.lastRoutedPool = routedPool;
+    }
     writeJsonSafe(relayConfigPath, relayCfg);
     return true;
   }

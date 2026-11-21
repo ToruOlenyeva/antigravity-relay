@@ -26,6 +26,7 @@ const {
   writeWinCredToken,
   writeInstanceTokenFile,
   readInstanceToken,
+  readInstanceGcpRegionFromConfig,
   writeInstanceCredentialAndAwaitSync,
   syncInstanceAppStorage,
   syncInstanceStateVscdb,
@@ -112,7 +113,7 @@ export {
   addOrUpdatePersonalChannelCard
 };
 
-export function addOrUpdateGcpChannelCard(email, projectId, opts = {}) {
+export async function addOrUpdateGcpChannelCard(email, projectId, opts = {}) {
   const cleanEmail = (email || "").trim();
   const rawPidStr = (projectId || "").trim();
   const options = typeof opts === "string" ? { projectName: opts } : (opts || {});
@@ -149,6 +150,15 @@ export function addOrUpdateGcpChannelCard(email, projectId, opts = {}) {
   const rawLoc = options.gcpLocation || locFromStr || existing?.gcpLocation || "global";
   const gcpLocation = ["global", "us", "eu"].includes(rawLoc) ? rawLoc : "global";
   const tierName = gcpBillingMode === "gemini_enterprise" ? "Gemini Enterprise" : "Agent Platform";
+  const nextStoredToken = baseToken
+    ? buildCleanChannelToken(
+        baseToken,
+        cleanPid,
+        gcpBillingMode === "agent_platform" ? gcpLocation : "",
+        false,
+        gcpBillingMode
+      )
+    : (existing?.storedToken || null);
 
   cfg.accounts[gcpKey] = {
     ...existing,
@@ -160,17 +170,10 @@ export function addOrUpdateGcpChannelCard(email, projectId, opts = {}) {
     gcpProjectId: cleanPid,
     gcpBillingMode,
     gcpLocation,
+    gcpConfigUpdatedAt: Date.now(),
     projectName: projectName || existing?.projectName || cleanPid,
     savedAt: existing?.savedAt || new Date().toISOString(),
-    storedToken: baseToken
-      ? buildCleanChannelToken(
-          baseToken,
-          cleanPid,
-          gcpBillingMode === "agent_platform" ? gcpLocation : "",
-          false,
-          gcpBillingMode
-        )
-      : (existing?.storedToken || null),
+    storedToken: nextStoredToken,
     cachedQuota: gcpBillingMode === "agent_platform"
       ? {
           isGcpUnlimited: true,
@@ -186,6 +189,17 @@ export function addOrUpdateGcpChannelCard(email, projectId, opts = {}) {
         })
   };
 
+  if (nextStoredToken) {
+    if (!cfg.__meta__.channelTokensById || typeof cfg.__meta__.channelTokensById !== "object") {
+      cfg.__meta__.channelTokensById = {};
+    }
+    cfg.__meta__.channelTokensById[gcpKey] = JSON.parse(JSON.stringify(nextStoredToken));
+    if (!cfg.__meta__.gcpOAuthTokensByEmail || typeof cfg.__meta__.gcpOAuthTokensByEmail !== "object") {
+      cfg.__meta__.gcpOAuthTokensByEmail = {};
+    }
+    cfg.__meta__.gcpOAuthTokensByEmail[cleanEmail] = JSON.parse(JSON.stringify(nextStoredToken));
+  }
+
   if (oldKey && cfg.accounts[oldKey]) {
     delete cfg.accounts[oldKey];
     if (cfg.routing?.models) {
@@ -199,10 +213,12 @@ export function addOrUpdateGcpChannelCard(email, projectId, opts = {}) {
 
   writeRelayConfig(cfg);
 
-  const activeEmail = (cfg.__meta__?.activeEmail || "").trim();
-  const activePid = (cfg.__meta__?.lastAppliedGcpProject || "").trim();
+  const ctx = resolveCurrentInstanceContext();
+  const instMeta = getInstanceMeta(cfg, ctx);
+  const activeEmail = String(instMeta?.activeEmail || (!ctx.isIsolatedInstance ? cfg.__meta__?.activeEmail : "") || "").trim();
+  const activePid = String(instMeta?.lastAppliedGcpProject || (!ctx.isIsolatedInstance ? cfg.__meta__?.lastAppliedGcpProject : "") || "").trim();
   if (activeEmail === cleanEmail && (activePid === cleanPid || (oldPidFromStr && activePid === oldPidFromStr))) {
-    switchBillingProjectInstant(cleanPid, { gcpBillingMode, gcpLocation }).catch(() => {});
+    await switchBillingProjectInstant(cleanPid, { gcpBillingMode, gcpLocation }).catch(() => {});
   }
 
   return cfg.accounts[gcpKey];
@@ -297,18 +313,40 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false, opts = {}) {
   let activeGcpProject = "";
 
   if (ctx.isIsolatedInstance) {
-    // 多开独立窗口：绝不使用已被还原回主窗口的全局 WinCred，严格以当前窗口专属描述符与 instMeta 中最新切换者为准
+    // 多开独立窗口：绝不使用已被还原回主窗口的全局 WinCred，但仍需对照实时 GetUserStatus 核验是否串号
     const descId = String(ctx.descriptor?.activeChannelId || "").trim();
     const descAcc = descId ? cfg.accounts?.[descId] : null;
     const descTs = Math.max(Number(ctx.descriptor?.switchedAt || 0), Number(ctx.descriptor?.launchedAt || 0));
     const metaTs = Math.max(Number(instMeta.switchedAt || 0), Number(instMeta.seededLaunchAt || 0));
     const effectiveIsoAcc = (descAcc && descTs >= metaTs) ? descAcc : (instPinnedAcc || descAcc);
-    if (effectiveIsoAcc) {
+    const liveLsMismatchesIso = Boolean(
+      lsEmail &&
+      effectiveIsoAcc &&
+      !recentlySwitched &&
+      lsEmail.toLowerCase() !== effectiveIsoAcc.email.toLowerCase()
+    );
+    if (liveLsMismatchesIso) {
+      activeEmail = lsEmail;
+      isLiveGcp = (tierIndicatesConsumer || credIsExplicitConsumer)
+        ? false
+        : Boolean(tierIndicatesGcp || credIsGcpMethod || logPid || logInfo.enableBusinessLogin);
+      if (isLiveGcp) {
+        const logPidOwnedByLs = Boolean(logPid && cfg.accounts?.[`${activeEmail}#gcp:${logPid}`]);
+        activeGcpProject =
+          (credMatchesLsEmail && credPid) ||
+          (logPidOwnedByLs ? logPid : "") ||
+          findFirstGcpProjectForEmail(cfg, activeEmail) ||
+          (tierIndicatesGcp ? logPid : "");
+        if (!activeGcpProject) isLiveGcp = false;
+      } else {
+        activeGcpProject = "";
+      }
+    } else if (effectiveIsoAcc) {
       activeEmail = effectiveIsoAcc.email;
       isLiveGcp = effectiveIsoAcc.channelType === "gcp" || Boolean(effectiveIsoAcc.gcpProjectId);
       activeGcpProject = isLiveGcp ? (effectiveIsoAcc.gcpProjectId || logPid) : "";
     } else {
-      activeEmail = ctx.descriptor?.email || lsEmail || instMeta.activeEmail || "";
+      activeEmail = lsEmail || ctx.descriptor?.email || instMeta.activeEmail || "";
       isLiveGcp = Boolean(ctx.descriptor?.gcpProjectId || instMeta.lastAppliedGcpProject);
       activeGcpProject = isLiveGcp
         ? (ctx.descriptor?.gcpProjectId || instMeta.lastAppliedGcpProject || logPid || findFirstGcpProjectForEmail(cfg, activeEmail))
@@ -423,11 +461,24 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false, opts = {}) {
     instMeta.lastCleanPersonalSyncEmail = "";
   }
 
+  const activeGcpCard = isLiveGcp && activeEmail && activeGcpProject
+    ? cfg.accounts?.[`${activeEmail}#gcp:${activeGcpProject}`]
+    : null;
+  const cfgRegionInfo = isLiveGcp ? readInstanceGcpRegionFromConfig(ctx) : { gcpRegion: "", mtimeMs: 0 };
+  const validCfgRegion = ["global", "us", "eu"].includes(cfgRegionInfo.gcpRegion) ? cfgRegionInfo.gcpRegion : "";
+  const validCardLoc = ["global", "us", "eu"].includes(activeGcpCard?.gcpLocation) ? activeGcpCard.gcpLocation : "";
+  const validCredLoc = ["global", "us", "eu"].includes(cred?.region) ? cred.region : "";
+  const validLogLoc = ["global", "us", "eu"].includes(logInfo.lastLocation) ? logInfo.lastLocation : "";
+  const cardSavedAt = Number(activeGcpCard?.gcpConfigUpdatedAt || 0);
+  const nativeConfigIsNewer = Boolean(validCfgRegion && cfgRegionInfo.mtimeMs > cardSavedAt + 1500);
+
   const activeGcpBillingMode = isLiveGcp
     ? (/enterprise/i.test(rawTierName) || logInfo.lastUserTier === "enterprise" ? "gemini_enterprise" : "agent_platform")
     : "";
   const activeGcpLocation = isLiveGcp
-    ? (logInfo.lastLocation || cred?.region || "global")
+    ? (nativeConfigIsNewer
+        ? validCfgRegion
+        : (validCardLoc || validCfgRegion || validCredLoc || validLogLoc || "global"))
     : "";
   const activeTierName = isLiveGcp
     ? (activeGcpBillingMode === "gemini_enterprise" ? "Gemini Enterprise" : "Agent Platform")
@@ -559,7 +610,12 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false, opts = {}) {
       // 严禁后台轮询把原生登录误判后凭空新建未收录的 GCP 卡片；仅当该 GCP 卡片已被用户显式添加收录时才更新凭据
       if (!deletedSet.has(gcpKey) && existingGcp) {
         const resolvedMode = activeGcpBillingMode || existingGcp?.gcpBillingMode || "agent_platform";
-        const resolvedLoc = activeGcpLocation || existingGcp?.gcpLocation || "global";
+        const resolvedLoc = nativeConfigIsNewer
+          ? validCfgRegion
+          : (validCardLoc || activeGcpLocation || existingGcp?.gcpLocation || "global");
+        const nextConfigUpdatedAt = (nativeConfigIsNewer && existingGcp?.gcpLocation !== validCfgRegion)
+          ? cfgRegionInfo.mtimeMs
+          : Number(existingGcp?.gcpConfigUpdatedAt || 0);
         const rawGcpBase = isLiveCredMatch
           ? cred
           : (existingGcp?.storedToken?.token?.refresh_token ? existingGcp.storedToken : matchingCred);
@@ -582,6 +638,7 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false, opts = {}) {
           gcpProjectId: activeGcpProject,
           gcpBillingMode: resolvedMode,
           gcpLocation: resolvedLoc,
+          ...(nextConfigUpdatedAt > 0 ? { gcpConfigUpdatedAt: nextConfigUpdatedAt } : {}),
           projectName: existingGcp?.projectName || activeGcpProject,
           savedAt: existingGcp?.savedAt || new Date().toISOString(),
           storedToken: cleanedGcpTok
@@ -1265,8 +1322,16 @@ export async function switchBillingProjectInstant(projectId, opts = {}) {
 
   const instMeta = getInstanceMeta(cfg, ctx);
   const prevChannelId = String(instMeta.activeChannelId || (!ctx.isIsolatedInstance ? cfg.__meta__?.activeChannelId : "") || "").trim();
-  const cred = readWinCredToken(true) || readWinCredToken(false);
-  const activeEmail = (cred?.id_token_email || cfg.__meta__?.activeEmail || "").trim();
+  const liveCred = readInstanceToken(ctx, true);
+  const activeEmail = String(
+    instMeta?.activeEmail ||
+    liveCred?.id_token_email ||
+    (!ctx.isIsolatedInstance ? cfg.__meta__?.activeEmail : "") ||
+    ""
+  ).trim();
+  const cred = (liveCred && (!activeEmail || liveCred.id_token_email === activeEmail))
+    ? liveCred
+    : (findStoredTokenForEmail(cfg, activeEmail, Boolean(cleanId)) || liveCred);
   const existingGcp = cleanId && activeEmail ? cfg.accounts[`${activeEmail}#gcp:${cleanId}`] : null;
   const gcpBillingMode = cleanId
     ? (opts.gcpBillingMode || existingGcp?.gcpBillingMode || "agent_platform")
@@ -1296,11 +1361,13 @@ export async function switchBillingProjectInstant(projectId, opts = {}) {
   }
 
   instMeta.lastAppliedGcpProject = cleanId;
+  instMeta.lastAppliedGcpLocation = location;
   if (activeEmail) {
     instMeta.activeChannelId = cleanId ? `${activeEmail}#gcp:${cleanId}` : `${activeEmail}#personal`;
   }
   if (!ctx.isIsolatedInstance) {
     cfg.__meta__.lastAppliedGcpProject = cleanId;
+    cfg.__meta__.lastAppliedGcpLocation = location;
     if (activeEmail) {
       cfg.__meta__.activeChannelId = cleanId ? `${activeEmail}#gcp:${cleanId}` : `${activeEmail}#personal`;
     }
@@ -1313,6 +1380,9 @@ export async function switchBillingProjectInstant(projectId, opts = {}) {
     const gcpKey = `${activeEmail}#gcp:${cleanId}`;
     const existing = cfg.accounts[gcpKey];
     const baseToken = findStoredTokenForEmail(cfg, activeEmail, true) || cred;
+    const syncedStoredTok = baseToken
+      ? buildCleanChannelToken(baseToken, cleanId, location, false, gcpBillingMode)
+      : (existing?.storedToken || null);
     cfg.accounts[gcpKey] = {
       ...existing,
       id: gcpKey,
@@ -1323,16 +1393,29 @@ export async function switchBillingProjectInstant(projectId, opts = {}) {
       gcpProjectId: cleanId,
       gcpBillingMode,
       gcpLocation,
+      gcpConfigUpdatedAt: Date.now(),
       projectName: existing?.projectName || cleanId,
       savedAt: existing?.savedAt || new Date().toISOString(),
-      storedToken: baseToken
-        ? buildCleanChannelToken(baseToken, cleanId, location, false, gcpBillingMode)
-        : existing?.storedToken || null
+      storedToken: syncedStoredTok
     };
+    if (syncedStoredTok) {
+      if (!cfg.__meta__.channelTokensById || typeof cfg.__meta__.channelTokensById !== "object") {
+        cfg.__meta__.channelTokensById = {};
+      }
+      cfg.__meta__.channelTokensById[gcpKey] = JSON.parse(JSON.stringify(syncedStoredTok));
+      if (!cfg.__meta__.gcpOAuthTokensByEmail || typeof cfg.__meta__.gcpOAuthTokensByEmail !== "object") {
+        cfg.__meta__.gcpOAuthTokensByEmail = {};
+      }
+      cfg.__meta__.gcpOAuthTokensByEmail[activeEmail] = JSON.parse(JSON.stringify(syncedStoredTok));
+    }
   }
   writeRelayConfig(cfg);
 
   if (ls) {
+    // 1:1 对齐客户端原生设置接口，实时写入内存 UserConfig.userSettings.gcpRegion 并广播持久化
+    await callLsRpc(ls, "JetboxWriteState", {
+      userConfig: { userSettings: { gcpRegion: location || "" } }
+    }).catch(() => {});
     if (cleanId) {
       try {
         await callLsRpc(ls, "ValidateProject", { projectId: cleanId, location });
@@ -1476,11 +1559,12 @@ export async function switchActiveGoogleAccount(accountId, opts = {}) {
 
   instMeta.cloudCodeProxyMode = desiredProxyMode;
   instMeta.cloudCodeProxyUrl = targetUrl;
+  instMeta.lastRoutedChannelId = target.id;
   if (!ctx.isIsolatedInstance) {
     cfg.__meta__.cloudCodeProxyMode = instMeta.cloudCodeProxyMode;
     cfg.__meta__.cloudCodeProxyUrl = instMeta.cloudCodeProxyUrl;
+    cfg.__meta__.lastRoutedChannelId = target.id;
   }
-  cfg.__meta__.lastRoutedChannelId = target.id;
   cfg.__meta__.convLastChannelMap = {};
   writeRelayConfig(cfg);
 
