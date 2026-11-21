@@ -351,18 +351,41 @@ export function writeInstanceTokenFile(userDataDir, storedTokenObj) {
 
 export function readInstanceToken(ctx = null, force = false) {
   const activeCtx = ctx || resolveCurrentInstanceContext();
-  if (activeCtx?.isIsolatedInstance && activeCtx?.userDataDir) {
-    try {
-      const tokenFile = getInstanceTokenFilePath(activeCtx.userDataDir);
-      if (tokenFile && fs.existsSync(tokenFile)) {
-        const raw = fs.readFileSync(tokenFile, "utf8").trim();
-        if (raw) {
-          return JSON.parse(raw);
+  if (activeCtx?.isIsolatedInstance) {
+    if (activeCtx?.userDataDir) {
+      try {
+        const tokenFile = getInstanceTokenFilePath(activeCtx.userDataDir);
+        if (tokenFile && fs.existsSync(tokenFile)) {
+          const raw = fs.readFileSync(tokenFile, "utf8").trim();
+          if (raw) {
+            return JSON.parse(raw);
+          }
         }
-      }
-    } catch {}
+      } catch {}
+    }
+    return null;
   }
   return readWinCredToken(force);
+}
+
+export function readInstanceGcpRegionFromConfig(ctx = null) {
+  const activeCtx = ctx || resolveCurrentInstanceContext();
+  const targetHome =
+    activeCtx?.isIsolatedInstance && activeCtx?.userDataDir
+      ? ensureInstanceIsolatedHome(activeCtx.userDataDir)
+      : HOME_DIR;
+  const geminiCfgPath = path.join(targetHome, ".gemini", "config", "config.json");
+  try {
+    if (!fs.existsSync(geminiCfgPath)) return { gcpRegion: "", mtimeMs: 0 };
+    const stat = fs.statSync(geminiCfgPath);
+    const parsed = JSON.parse(fs.readFileSync(geminiCfgPath, "utf8"));
+    let raw = String(parsed?.userSettings?.gcpRegion || "").trim().toLowerCase();
+    if (raw === "europe") raw = "eu";
+    if (!["global", "us", "eu"].includes(raw)) raw = "";
+    return { gcpRegion: raw, mtimeMs: Number(stat.mtimeMs || 0) };
+  } catch {
+    return { gcpRegion: "", mtimeMs: 0 };
+  }
 }
 
 export async function awaitLsLogTokenApplied(logFilePath, startOffset = -1, maxWaitMs = 5600) {
@@ -627,11 +650,42 @@ export function getChannelEnvSnapshotPath(channelId) {
   return path.join(CHANNEL_ENVS_DIR, `${safe}.json`);
 }
 
-export function syncInstanceStateVscdb(userDataDir, tokenObj, email = "", gcpProjectId = "", prevChannelIdHint = "") {
+export function extractEmailFromUserStatusB64(b64) {
+  const raw = String(b64 || "").trim();
+  if (!raw) return "";
+  try {
+    const buf = Buffer.from(raw, "base64");
+    const emailRe = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
+    const outerStr = buf.toString("utf8");
+    const direct = emailRe.exec(outerStr);
+    if (direct) return direct[0];
+    const b64Chunks = outerStr.match(/[A-Za-z0-9+/]{12,}={0,2}/g) || [];
+    for (const chunk of b64Chunks) {
+      if (chunk === "userStatusSentinelKey") continue;
+      try {
+        const innerStr = Buffer.from(chunk, "base64").toString("utf8");
+        const m = emailRe.exec(innerStr);
+        if (m) return m[0];
+      } catch {}
+    }
+  } catch {}
+  return "";
+}
+
+const EXCLUDED_SNAPSHOT_SYNC_KEYS = new Set([
+  "antigravityUnifiedStateSync.oauthToken",
+  "antigravityUnifiedStateSync.userStatus",
+  "antigravityUnifiedStateSync.enterprisePreferences"
+]);
+
+export function syncInstanceStateVscdb(userDataDir, tokenObj, email = "", gcpProjectId = "", prevChannelIdHint = "", opts = {}) {
   if (!userDataDir || !tokenObj) return false;
   try {
     const dbPath = path.join(userDataDir, "User", "globalStorage", "state.vscdb");
-    if (!fs.existsSync(dbPath)) return false;
+    if (!fs.existsSync(dbPath)) {
+      if (!opts?.createIfMissing) return false;
+      fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+    }
     const payload = buildStateVscdbSyncPayload(tokenObj, email, gcpProjectId);
     const targetChannelId = String(
       payload.email ? (payload.gcpProjectId ? `${payload.email}#gcp:${payload.gcpProjectId}` : `${payload.email}#personal`) : ""
@@ -646,11 +700,12 @@ export function syncInstanceStateVscdb(userDataDir, tokenObj, email = "", gcpPro
       try { db.exec("PRAGMA busy_timeout = 5000;"); } catch {}
       db.exec("CREATE TABLE IF NOT EXISTS ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)");
 
-      // 1. 归档旧通道在 state.vscdb 中的专属会话状态（含隐私许可同意快照）
+      // 1. 归档旧通道在 state.vscdb 中的专属非身份偏好快照（严格核验归属并剔除三类身份态键）
       try {
         const authRow = db.prepare("SELECT value FROM ItemTable WHERE key = ?").get("antigravityAuthStatus");
         const gcaRow = db.prepare("SELECT value FROM ItemTable WHERE key = ?").get("google.geminicodeassist");
         const entRow = db.prepare("SELECT value FROM ItemTable WHERE key = ?").get("antigravityUnifiedStateSync.enterprisePreferences");
+        const usRow = db.prepare("SELECT value FROM ItemTable WHERE key = ?").get("antigravityUnifiedStateSync.userStatus");
         let prevEmail = "";
         let prevPid = "";
         if (authRow?.value) {
@@ -661,27 +716,41 @@ export function syncInstanceStateVscdb(userDataDir, tokenObj, email = "", gcpPro
           const parsedGca = JSON.parse(String(gcaRow.value));
           prevPid = String(parsedGca?.["geminicodeassist.project"] || "").trim();
         }
-        const prevIsGcp = Boolean(prevPid || entRow?.value || (prevChannelIdHint && prevChannelIdHint.includes("#gcp:")));
-        const dbPrevChannelId = prevEmail
-          ? (prevIsGcp && prevPid ? `${prevEmail}#gcp:${prevPid}` : (!prevIsGcp ? `${prevEmail}#personal` : ""))
+        const usEmail = extractEmailFromUserStatusB64(usRow?.value);
+        const verifiedDbEmail = prevEmail || usEmail;
+        const hintEmail = prevChannelIdHint ? prevChannelIdHint.split("#")[0].trim() : "";
+        const hintMatchesDb =
+          Boolean(prevChannelIdHint) &&
+          (!verifiedDbEmail || verifiedDbEmail.toLowerCase() === hintEmail.toLowerCase()) &&
+          (!usEmail || usEmail.toLowerCase() === hintEmail.toLowerCase());
+
+        const prevIsGcp = hintMatchesDb
+          ? Boolean(prevChannelIdHint.includes("#gcp:") || prevPid || entRow?.value)
+          : Boolean(prevPid || entRow?.value);
+        const dbPrevChannelId = verifiedDbEmail
+          ? (prevIsGcp && prevPid ? `${verifiedDbEmail}#gcp:${prevPid}` : (!prevIsGcp ? `${verifiedDbEmail}#personal` : ""))
           : "";
-        const prevChannelId = (prevChannelIdHint && prevChannelIdHint !== targetChannelId)
+        const prevChannelId = (hintMatchesDb && prevChannelIdHint !== targetChannelId)
           ? prevChannelIdHint
           : dbPrevChannelId;
-        if (prevChannelId && prevChannelId !== targetChannelId) {
+        const canArchivePrev =
+          Boolean(prevChannelId) &&
+          prevChannelId !== targetChannelId &&
+          (!prevEmail || !usEmail || prevEmail.toLowerCase() === usEmail.toLowerCase());
+
+        if (canArchivePrev) {
           const prevSnapPath = getChannelEnvSnapshotPath(prevChannelId);
           const syncRows = db
             .prepare("SELECT key, value FROM ItemTable WHERE key LIKE 'antigravityUnifiedStateSync.%' OR key LIKE 'jetskiStateSync.%'")
             .all();
           const savedItems = {};
           for (const r of syncRows) {
-            if (!r?.key || r.key === "antigravityUnifiedStateSync.oauthToken") continue;
-            if (!prevIsGcp && r.key === "antigravityUnifiedStateSync.enterprisePreferences") continue;
+            if (!r?.key || EXCLUDED_SNAPSHOT_SYNC_KEYS.has(r.key)) continue;
             savedItems[r.key] = String(r.value ?? "");
           }
           if (prevSnapPath && Object.keys(savedItems).length > 0) {
-            const snapEmail = prevChannelId.split("#")[0] || prevEmail || "";
-            const snapPid = prevChannelId.includes("#gcp:") ? prevChannelId.split("#gcp:")[1] : prevPid;
+            const snapEmail = prevChannelId.split("#")[0] || verifiedDbEmail || "";
+            const snapPid = prevChannelId.includes("#gcp:") ? prevChannelId.split("#gcp:")[1] : "";
             fs.writeFileSync(
               prevSnapPath,
               JSON.stringify({ channelId: prevChannelId, email: snapEmail, gcpProjectId: snapPid, updatedAt: Date.now(), items: savedItems }, null, 2),
@@ -698,32 +767,28 @@ export function syncInstanceStateVscdb(userDataDir, tokenObj, email = "", gcpPro
 
       const upsert = db.prepare("INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)");
 
-      // 3. 若目标通道已有独立环境快照（如该账号此前已点过隐私许可同意），恢复其专属非凭据快照
-      let restoredUserStatus = false;
+      // 3. 若目标通道已有独立环境快照（不含身份态键），恢复其专属非凭据快照
       if (targetChannelId) {
         const targetSnapPath = getChannelEnvSnapshotPath(targetChannelId);
         if (targetSnapPath && fs.existsSync(targetSnapPath)) {
           try {
             const snapObj = JSON.parse(fs.readFileSync(targetSnapPath, "utf8"));
-            if (snapObj && (!snapObj.channelId || snapObj.channelId === targetChannelId) && snapObj.items && typeof snapObj.items === "object") {
+            const emailMatches = !snapObj?.email || !payload.email || String(snapObj.email).toLowerCase() === payload.email.toLowerCase();
+            if (snapObj && snapObj.channelId === targetChannelId && emailMatches && snapObj.items && typeof snapObj.items === "object") {
               for (const [k, v] of Object.entries(snapObj.items)) {
-                if (k === "antigravityUnifiedStateSync.oauthToken") continue;
-                if (!payload.isGcp && k === "antigravityUnifiedStateSync.enterprisePreferences") continue;
+                if (EXCLUDED_SNAPSHOT_SYNC_KEYS.has(k)) continue;
                 upsert.run(k, String(v));
-                if (k === "antigravityUnifiedStateSync.userStatus" && v) {
-                  restoredUserStatus = true;
-                }
               }
             }
           } catch {}
         }
       }
 
-      // 4. 写入目标通道全新的纯净凭据与项目状态（绝不合并旧账号字段）
+      // 4. 每次必写入目标通道全新纯净凭据、userStatus 与企业项目状态（绝不保留或还原旧账号身份）
       if (payload.oauthTokenB64) {
         upsert.run("antigravityUnifiedStateSync.oauthToken", payload.oauthTokenB64);
       }
-      if (!restoredUserStatus && payload.userStatusB64) {
+      if (payload.userStatusB64) {
         upsert.run("antigravityUnifiedStateSync.userStatus", payload.userStatusB64);
       }
       if (payload.isGcp && payload.enterprisePrefsB64) {
@@ -753,14 +818,27 @@ export function syncInstanceStateVscdb(userDataDir, tokenObj, email = "", gcpPro
 }
 
 export function sanitizeAllIsolatedInstancesAppStorage() {
+  if (process.env.AGY_RELAY_SKIP_STARTUP_SANITIZE === "1") return;
   try {
     if (!fs.existsSync(INSTANCES_ROOT_DIR)) return;
     const cfg = readRelayConfig();
+    const runningProcs = listRunningLanguageServerProcesses(true);
+    const runningPidSet = new Set(runningProcs.map((p) => p.pid));
     const dirs = fs.readdirSync(INSTANCES_ROOT_DIR, { withFileTypes: true });
     for (const d of dirs) {
       if (!d.isDirectory()) continue;
       const instDir = path.join(INSTANCES_ROOT_DIR, d.name);
       const desc = readInstanceDescriptor(instDir);
+      const lsLogPrimary = parseLsLogInfo(path.join(instDir, "logs", "language_server.log"));
+      const lsLogAlt = parseLsLogInfo(path.join(instDir, "logs", "google.antigravity", "language_server.log"));
+      const normInstDir = instDir.toLowerCase();
+      const isRunning =
+        (desc?.lsPid && runningPidSet.has(Number(desc.lsPid))) ||
+        (lsLogPrimary?.pid && runningPidSet.has(Number(lsLogPrimary.pid))) ||
+        (lsLogAlt?.pid && runningPidSet.has(Number(lsLogAlt.pid))) ||
+        runningProcs.some((p) => p.commandLine.toLowerCase().includes(normInstDir));
+      if (isRunning) continue;
+
       if (desc && desc.email) {
         const chId = desc.activeChannelId || (desc.gcpProjectId ? `${desc.email}#gcp:${desc.gcpProjectId}` : `${desc.email}#personal`);
         const accObj = cfg?.accounts?.[chId];
@@ -783,7 +861,7 @@ export function sanitizeAllIsolatedInstancesAppStorage() {
             accObj?.gcpBillingMode || "agent_platform"
           );
           writeInstanceTokenFile(instDir, cleanTok);
-          syncInstanceStateVscdb(instDir, cleanTok, desc.email, desc.gcpProjectId || "");
+          syncInstanceStateVscdb(instDir, cleanTok, desc.email, desc.gcpProjectId || "", "", { createIfMissing: true });
         } else {
           ensureInstanceIsolatedHome(instDir);
         }
@@ -791,7 +869,6 @@ export function sanitizeAllIsolatedInstancesAppStorage() {
     }
   } catch {}
 }
-sanitizeAllIsolatedInstancesAppStorage();
 
 export function normalizeIsoExpiry(rawExpiry) {
   if (!rawExpiry) {
@@ -1178,6 +1255,10 @@ export function listRunningLanguageServerProcesses(force = false) {
   }
 }
 
+if (process.env.AGY_RELAY_SKIP_STARTUP_SANITIZE !== "1") {
+  sanitizeAllIsolatedInstancesAppStorage();
+}
+
 export function inspectActiveFieldInstances(cfg = null, currentCtx = null) {
   const config = cfg || readRelayConfig();
   const ctx = currentCtx || resolveCurrentInstanceContext();
@@ -1358,6 +1439,34 @@ export function inspectActiveFieldInstances(cfg = null, currentCtx = null) {
   };
 }
 
+export function collectOtherInstancePidSet(ctx = null) {
+  const activeCtx = ctx || resolveCurrentInstanceContext();
+  const pidSet = new Set();
+  const currentNormDir = activeCtx?.userDataDir ? path.resolve(activeCtx.userDataDir).toLowerCase() : "";
+  try {
+    if (fs.existsSync(INSTANCES_ROOT_DIR)) {
+      for (const d of fs.readdirSync(INSTANCES_ROOT_DIR, { withFileTypes: true })) {
+        if (!d.isDirectory()) continue;
+        const instDir = path.join(INSTANCES_ROOT_DIR, d.name);
+        if (currentNormDir && path.resolve(instDir).toLowerCase() === currentNormDir) continue;
+        const desc = readInstanceDescriptor(instDir);
+        if (Number(desc?.lsPid || 0) > 0) pidSet.add(Number(desc.lsPid));
+        const p1 = parseLsLogInfo(path.join(instDir, "logs", "language_server.log")).pid;
+        if (p1 > 0) pidSet.add(p1);
+        const p2 = parseLsLogInfo(path.join(instDir, "logs", "google.antigravity", "language_server.log")).pid;
+        if (p2 > 0) pidSet.add(p2);
+      }
+    }
+  } catch {}
+  if (activeCtx?.isIsolatedInstance) {
+    try {
+      const mainInfo = parseLsLogInfo(LS_LOG_FILE);
+      if (mainInfo.pid > 0) pidSet.add(mainInfo.pid);
+    } catch {}
+  }
+  return pidSet;
+}
+
 export function discoverLanguageServer(force = false) {
   const ctx = resolveCurrentInstanceContext(force);
   if (
@@ -1377,16 +1486,16 @@ export function discoverLanguageServer(force = false) {
   if (!force && envCsrf && (logInfo.httpPort > 0 || logInfo.httpsPort > 0 || envAddr)) {
     const [hostname, portStr] = envAddr ? envAddr.split(":") : ["127.0.0.1", "0"];
     const envPort = Number(portStr || 0);
-    const primaryPort = logInfo.httpPort || envPort || logInfo.httpsPort;
-    const primaryProto = primaryPort === logInfo.httpsPort && !logInfo.httpPort && !envPort ? "https" : "http";
+    const primaryPort = envPort || logInfo.httpPort || logInfo.httpsPort;
+    const primaryProto = !envPort && primaryPort === logInfo.httpsPort && !logInfo.httpPort ? "https" : "http";
     if (primaryPort > 0) {
       cachedLsInfo = {
-        pid: logInfo.pid || 0,
+        pid: logInfo.pid || Number(process.ppid || 0),
         hostname: hostname || "127.0.0.1",
         port: primaryPort,
         protocol: primaryProto,
-        altPort: logInfo.httpsPort || logInfo.httpPort || 0,
-        altProtocol: logInfo.httpsPort ? "https" : "http",
+        altPort: logInfo.httpsPort && logInfo.httpsPort !== primaryPort ? logInfo.httpsPort : (logInfo.httpPort || 0),
+        altProtocol: logInfo.httpsPort && logInfo.httpsPort !== primaryPort ? "https" : "http",
         csrf: envCsrf,
         instanceId: ctx.instanceId
       };
@@ -1396,23 +1505,31 @@ export function discoverLanguageServer(force = false) {
     }
   }
 
+  const otherInstancePidSet = collectOtherInstancePidSet(ctx);
   let cimPid = 0;
   let cimCsrf = "";
   const procList = listRunningLanguageServerProcesses();
   if (procList.length > 0) {
+    const filteredProcList = procList.filter((p) => !otherInstancePidSet.has(p.pid));
     let matchedProc = null;
-    if (logInfo.pid > 0) {
+    if (logInfo.pid > 0 && !otherInstancePidSet.has(logInfo.pid)) {
       matchedProc = procList.find((p) => p.pid === logInfo.pid) || null;
     }
-    if (!matchedProc && process.ppid > 0) {
+    if (!matchedProc && process.ppid > 0 && !otherInstancePidSet.has(Number(process.ppid))) {
       matchedProc = procList.find((p) => p.pid === Number(process.ppid)) || null;
     }
     if (!matchedProc && ctx.userDataDir) {
       const normDir = ctx.userDataDir.toLowerCase();
-      matchedProc = procList.find((p) => p.commandLine.toLowerCase().includes(normDir)) || null;
+      matchedProc = filteredProcList.find((p) => p.commandLine.toLowerCase().includes(normDir)) || null;
     }
     if (!matchedProc && !ctx.isIsolatedInstance) {
-      matchedProc = procList[0];
+      const normInstancesRoot = INSTANCES_ROOT_DIR.toLowerCase();
+      matchedProc =
+        filteredProcList.find(
+          (p) =>
+            !p.commandLine.toLowerCase().includes(normInstancesRoot) &&
+            !p.commandLine.toLowerCase().includes("antigravity-instances")
+        ) || null;
     }
     if (matchedProc) {
       cimPid = matchedProc.pid;
@@ -1428,10 +1545,11 @@ export function discoverLanguageServer(force = false) {
   } catch {}
 
   const finalCsrf = cimCsrf || envCsrf || savedTarget?.csrf || "";
-  const finalPid = logInfo.pid || cimPid || 0;
+  const safeLogPid = logInfo.pid > 0 && !otherInstancePidSet.has(logInfo.pid) ? logInfo.pid : 0;
+  const finalPid = cimPid || safeLogPid || 0;
   const envPort = envAddr ? Number(envAddr.split(":")[1] || 0) : 0;
-  const primaryPort = logInfo.httpPort || logInfo.httpsPort || envPort || Number(savedTarget?.port || 0);
-  const primaryProto = primaryPort === logInfo.httpsPort && primaryPort !== logInfo.httpPort
+  const primaryPort = envPort || logInfo.httpPort || logInfo.httpsPort || Number(savedTarget?.port || 0);
+  const primaryProto = !envPort && primaryPort === logInfo.httpsPort && primaryPort !== logInfo.httpPort
     ? "https"
     : (savedTarget?.protocol || "http");
 
