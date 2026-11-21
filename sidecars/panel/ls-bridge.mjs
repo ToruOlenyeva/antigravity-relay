@@ -59,7 +59,8 @@ import {
   getActivePersonalQuotaPool,
   getDetectedClientVersion,
   learnModelsFromLsClientConfigs,
-  mergeNativeCatalogIntoPersonalModels
+  mergeNativeCatalogIntoPersonalModels,
+  isOrchestratorModelLabelOrId
 } from "./bridge/quota-probe.mjs";
 import {
   hasActivePersonalRoutingConfig,
@@ -855,6 +856,9 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false, opts = {}) {
     if (isLegacyDeprecatedModel(baseLabel) || isLegacyDeprecatedModel(rawLabel) || isLegacyDeprecatedModel(modelId)) {
       continue;
     }
+    if (isOrchestratorModelLabelOrId(baseLabel) || isOrchestratorModelLabelOrId(rawLabel) || isOrchestratorModelLabelOrId(modelId)) {
+      continue;
+    }
     if (!activeGcpProject) {
       if (isGcpOnlyModel(baseLabel) || isGcpOnlyModel(rawLabel)) {
         continue;
@@ -921,7 +925,9 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false, opts = {}) {
     activeGcpBillingMode === "agent_platform" &&
     (availableModels.length === 0 || !availableModels.some((m) => isGcpOnlyModel(m.label || m.modelId || "")))
   ) {
-    const gcpTpl = cfg.__meta__?.liveTierModels?.gcp || [];
+    const gcpTpl = (cfg.__meta__?.liveTierModels?.gcp || []).filter(
+      (m) => m && !isOrchestratorModelLabelOrId(m.label || m.modelId || "")
+    );
     if (gcpTpl.length > 0) {
       availableModels = gcpTpl.map((m) => ({
         label: m.label,

@@ -19,7 +19,8 @@ export function isLegacyDeprecatedModel(labelOrId) {
 
 export function stripModelVariantSuffix(rawLabel) {
   return String(rawLabel || "")
-    .replace(/\s*\((Low|Medium|High|XHigh|Extra|Max)\)\s*$/i, "")
+    .replace(/\s*\((Low|Medium|High|XHigh|Extra\s*High|Extra|Max)\)\s*$/i, "")
+    .replace(/\s+(Low|Medium|High|XHigh|Extra\s*High|Max)\s*$/i, "")
     .trim();
 }
 
@@ -122,6 +123,71 @@ export function extractOrchestratorTarget(labelOrId) {
       .replace(/[-_]+/g, " ")
       .trim();
     return raw === "pro" ? "argon" : raw;
+  }
+  return "";
+}
+
+/**
+ * 判断展示名、slug 或占位符是否属于旧版 Orchestrator 独立伪模型条目（含 M537/M667/M668）。
+ * @param {string} labelOrId 模型显示名、slug 或占位符
+ * @returns {boolean}
+ */
+export function isOrchestratorModelLabelOrId(labelOrId) {
+  return /^orchestrator\b|orchestrator[-_]|^model_placeholder_m(537|667|668)$/i.test(
+    String(labelOrId || "").trim()
+  );
+}
+
+/**
+ * 将历史或组合式 Orchestrator 标识透明解析为真实底层模型家族名，确保旧路由与代理透传零中断。
+ * @param {string} labelOrId Orchestrator 模型显示名、slug 或占位符
+ * @param {object|null} cfg 可选配置对象
+ * @returns {string}
+ */
+export function resolveUnderlyingModelFamilyForOrchestrator(labelOrId, cfg = null) {
+  const raw = String(labelOrId || "").trim();
+  if (!raw) return "";
+  const stripped = stripModelVariantSuffix(raw);
+  const spacedMatch = /^orchestrator\s+([^(].+)$/i.exec(stripped);
+  if (spacedMatch) {
+    const inner = stripModelVariantSuffix(spacedMatch[1]);
+    if (inner && !isOrchestratorModelLabelOrId(inner)) return inner;
+  }
+  if (/^model_placeholder_m537$/i.test(stripped)) return "Gemini 4 Neon";
+  if (/^model_placeholder_m668$|orchestrator.*g1-pro|^orchestrator-argon$/i.test(stripped)) {
+    return "Gemini 4 Argon";
+  }
+  const target = extractOrchestratorTarget(stripped);
+  if (!target) return "";
+  if (/^neon$/i.test(target)) return "Gemini 4 Neon";
+  if (/^argon$/i.test(target)) return "Gemini 4 Argon";
+  if (/^hydrogen$/i.test(target)) return "Gemini 4 Hydrogen";
+  if (/^carbon$/i.test(target)) return "Gemini 4 Carbon";
+  if (/^(?:gemini\s*3\.8\s*)?flash$/i.test(target)) return "Gemini 3.8 Flash";
+  if (/^(?:claude\s*)?opus[\s._-]*5[._-]*5$/i.test(target)) return "Claude Opus 5.5";
+  if (/^(?:claude\s*)?sonnet[\s._-]*5[._-]*5$/i.test(target)) return "Claude Sonnet 5.5";
+
+  const dynReg = cfg?.__meta__?.dynamicModelRegistry || globalThis.__agyDynamicModelRegistryRef || {};
+  const catalog = Array.isArray(dynReg.clientCatalog) ? dynReg.clientCatalog : [];
+  for (const item of catalog) {
+    if (item?.label && !isOrchestratorModelLabelOrId(item.label) && matchesModelTargetTokens(item.label, target)) {
+      return stripModelVariantSuffix(item.label);
+    }
+  }
+  for (const acc of Object.values(cfg?.accounts || {})) {
+    const lists = [
+      acc?.cachedQuota?.availableModels,
+      acc?.cachedQuotaByPool?.daily?.availableModels,
+      acc?.cachedQuotaByPool?.prod?.availableModels
+    ];
+    for (const list of lists) {
+      for (const m of (list || [])) {
+        const lbl = stripModelVariantSuffix(m?.label || m?.modelId || "");
+        if (lbl && !isOrchestratorModelLabelOrId(lbl) && matchesModelTargetTokens(lbl, target)) {
+          return lbl;
+        }
+      }
+    }
   }
   return "";
 }
@@ -350,17 +416,24 @@ export function ensureDynamicModelRegistry(cfg) {
       delete reg.placeholderToFamily[k];
       continue;
     }
-    if (isGuessedOrchestratorSlug(k) && k.toLowerCase() !== "orchestrator-argon") {
-      delete reg.placeholderToFamily[k];
+    if (isGuessedOrchestratorSlug(k)) {
+      const underlying = resolveUnderlyingModelFamilyForOrchestrator(fam || k, cfg);
+      if (underlying) {
+        reg.placeholderToFamily[k] = underlying;
+      } else {
+        delete reg.placeholderToFamily[k];
+      }
       continue;
     }
-    if (/orchestrator/i.test(k) && !/^model_(placeholder|openai)_/i.test(k) && !/g1-pro/i.test(k)) {
-      const kTarget = extractOrchestratorTarget(k);
-      const famTarget = extractOrchestratorTarget(fam);
-      if (kTarget && famTarget && kTarget !== famTarget) {
+    if (isOrchestratorModelLabelOrId(fam) || isOrchestratorModelLabelOrId(k)) {
+      const underlying = resolveUnderlyingModelFamilyForOrchestrator(fam, cfg)
+        || resolveUnderlyingModelFamilyForOrchestrator(k, cfg);
+      if (underlying) {
+        reg.placeholderToFamily[k] = underlying;
+      } else {
         delete reg.placeholderToFamily[k];
-        continue;
       }
+      continue;
     }
     const cleanFam = stripModelVariantSuffix(fam);
     if (cleanFam && cleanFam !== fam) {
@@ -368,7 +441,7 @@ export function ensureDynamicModelRegistry(cfg) {
     }
   }
   for (const [lbl, slug] of Object.entries(reg.labelToSlug)) {
-    if (isLegacyDeprecatedModel(lbl) || isLegacyDeprecatedModel(slug)) {
+    if (isLegacyDeprecatedModel(lbl) || isLegacyDeprecatedModel(slug) || isOrchestratorModelLabelOrId(lbl)) {
       delete reg.labelToSlug[lbl];
       continue;
     }
@@ -399,6 +472,9 @@ export function ensureDynamicModelRegistry(cfg) {
       }
     }
   }
+  reg.clientCatalog = reg.clientCatalog.filter(
+    (catItem) => catItem?.label && !isLegacyDeprecatedModel(catItem.label) && !isOrchestratorModelLabelOrId(catItem.label)
+  );
   for (const catItem of reg.clientCatalog) {
     if (!catItem) continue;
     catItem.requiresArgon = isArgonGatedLabelOrId(catItem.label);
@@ -415,16 +491,30 @@ export function ensureDynamicModelRegistry(cfg) {
     }
   }
 
-  // 修正并固化 Orchestrator (Argon) 占位符与云端模型 ID 映射，避免误推导为 orchestrator-argon
+  // 历史 Orchestrator 占位符与旧 slug 保持向后兼容，但家族统一映射到底层真实模型
   if (!reg.placeholderToSlug["model_placeholder_m668"] || reg.placeholderToSlug["model_placeholder_m668"] === "orchestrator-argon") {
     reg.placeholderToSlug["model_placeholder_m668"] = "gemini-pro-orchestrator-g1-pro";
   }
-  if (!reg.labelToSlug["orchestrator (argon)"] || reg.labelToSlug["orchestrator (argon)"] === "orchestrator-argon") {
-    reg.labelToSlug["orchestrator (argon)"] = "gemini-pro-orchestrator-g1-pro";
+  reg.placeholderToFamily["model_placeholder_m668"] = "Gemini 4 Argon";
+  reg.placeholderToFamily["gemini-pro-orchestrator-g1-pro"] = "Gemini 4 Argon";
+  reg.placeholderToFamily["orchestrator-argon"] = "Gemini 4 Argon";
+  reg.placeholderToFamily["model_placeholder_m537"] = "Gemini 4 Neon";
+  reg.placeholderToFamily["gemini-pro-orchestrator-neon"] = "Gemini 4 Neon";
+
+  for (const routeBucket of [cfg?.routing?.models, cfg?.routing?.gcpModels]) {
+    if (routeBucket && typeof routeBucket === "object") {
+      for (const routeKey of Object.keys(routeBucket)) {
+        if (isOrchestratorModelLabelOrId(routeKey)) {
+          delete routeBucket[routeKey];
+        }
+      }
+    }
   }
-  reg.placeholderToFamily["model_placeholder_m668"] = "Orchestrator (Argon)";
-  reg.placeholderToFamily["gemini-pro-orchestrator-g1-pro"] = "Orchestrator (Argon)";
-  reg.placeholderToFamily["orchestrator-argon"] = "Orchestrator (Argon)";
+  if (Array.isArray(cfg?.__meta__?.liveTierModels?.gcp)) {
+    cfg.__meta__.liveTierModels.gcp = cfg.__meta__.liveTierModels.gcp.filter(
+      (m) => m && !isOrchestratorModelLabelOrId(m.label || m.modelId || "")
+    );
+  }
 
   globalThis.__agyDynamicModelRegistryRef = reg;
   return reg;
@@ -441,6 +531,18 @@ export function learnModelsFromCloudCodeResponse(cfg, rawModelsResp) {
     const rawLabel = String(m.displayName || m.label || "").trim();
     const baseFamily = resolveFamilyForCloudSlug(modelKey, m, reg);
     if (!baseFamily || isLegacyDeprecatedModel(baseFamily) || (rawLabel && isLegacyDeprecatedModel(rawLabel))) continue;
+    if (
+      isOrchestratorModelLabelOrId(modelKey) ||
+      isOrchestratorModelLabelOrId(rawLabel) ||
+      isOrchestratorModelLabelOrId(baseFamily)
+    ) {
+      const underlying = resolveUnderlyingModelFamilyForOrchestrator(rawLabel || baseFamily || modelKey, cfg);
+      if (underlying && reg.placeholderToFamily[lowerKey] !== underlying) {
+        reg.placeholderToFamily[lowerKey] = underlying;
+        changed = true;
+      }
+      continue;
+    }
 
     if (rawLabel && rawLabel.toLowerCase() !== lowerKey) {
       const lowerLabel = rawLabel.toLowerCase();
@@ -450,7 +552,7 @@ export function learnModelsFromCloudCodeResponse(cfg, rawModelsResp) {
       }
     }
     const baseLower = baseFamily.toLowerCase();
-    if (!stripModelVariantSuffix(modelKey).includes(modelKey) || !/\((Low|Medium|High|XHigh|Extra|Max)\)$/i.test(rawLabel)) {
+    if (!stripModelVariantSuffix(modelKey).includes(modelKey) || !/\((Low|Medium|High|XHigh|Extra\s*High|Extra|Max)\)$/i.test(rawLabel)) {
       if (!reg.labelToSlug[baseLower] || isGuessedOrchestratorSlug(reg.labelToSlug[baseLower])) {
         reg.labelToSlug[baseLower] = modelKey;
         changed = true;
@@ -500,6 +602,29 @@ export function learnModelsFromLsClientConfigs(cfg, clientModelConfigs, opts = {
       !isLegacyDeprecatedModel(rawNativeSlug) &&
       !isGuessedOrchestratorSlug(rawNativeSlug)
     ) ? rawNativeSlug : "";
+
+    if (
+      isOrchestratorModelLabelOrId(baseFamily) ||
+      isOrchestratorModelLabelOrId(rawLabel) ||
+      isOrchestratorModelLabelOrId(modelId)
+    ) {
+      const underlying = resolveUnderlyingModelFamilyForOrchestrator(rawLabel || modelId, cfg);
+      if (validNativeSlug && reg.placeholderToSlug[lowerId] !== validNativeSlug) {
+        reg.placeholderToSlug[lowerId] = validNativeSlug;
+        changed = true;
+      }
+      if (underlying) {
+        if (reg.placeholderToFamily[lowerId] !== underlying) {
+          reg.placeholderToFamily[lowerId] = underlying;
+          changed = true;
+        }
+        if (validNativeSlug && reg.placeholderToFamily[validNativeSlug.toLowerCase()] !== underlying) {
+          reg.placeholderToFamily[validNativeSlug.toLowerCase()] = underlying;
+          changed = true;
+        }
+      }
+      continue;
+    }
     const existingLabelSlug = isGuessedOrchestratorSlug(reg.labelToSlug[lowerLabel]) ? "" : reg.labelToSlug[lowerLabel];
     const existingPhSlug = isGuessedOrchestratorSlug(reg.placeholderToSlug[lowerId]) ? "" : reg.placeholderToSlug[lowerId];
     const derivedSlug = deriveCloudCodeSlugFromLabel(rawLabel);
@@ -822,6 +947,8 @@ export function mergeNativeCatalogIntoPersonalModels(
       !baseLabel ||
       isLegacyDeprecatedModel(baseLabel) ||
       isLegacyDeprecatedModel(rawLabel) ||
+      isOrchestratorModelLabelOrId(baseLabel) ||
+      isOrchestratorModelLabelOrId(rawLabel) ||
       isGcpOnlyModel(baseLabel) ||
       isGcpOnlyModel(rawLabel)
     ) {
@@ -834,9 +961,6 @@ export function mergeNativeCatalogIntoPersonalModels(
     const regSlug = reg.labelToSlug?.[baseLabel.toLowerCase()];
     if (regSlug && !isGuessedOrchestratorSlug(regSlug)) {
       extraVars.push(regSlug);
-    }
-    if (/^orchestrator\s*\(argon\)$/i.test(baseLabel)) {
-      extraVars.push("Orchestrator (Argon)", "MODEL_PLACEHOLDER_M668", "gemini-pro-orchestrator-g1-pro");
     }
     const cleanVars = Array.from(new Set([baseLabel, rawLabel, ...existingVars, ...extraVars])).filter(
       (v) => v && !isGuessedOrchestratorSlug(v) && !isLegacyDeprecatedModel(v) && !isGcpOnlyModel(v)
@@ -879,35 +1003,6 @@ export function mergeNativeCatalogIntoPersonalModels(
     addOrMergeModel(m);
   }
 
-  // 动态同步原生目录中的全部 Orchestrator (<目标>) 编排模型：只要当前账号实测具备对应底层模型家族（且通过 Argon 门控），自动补全
-  const accountBaseLabels = Array.from(mergedMap.keys()).filter((lbl) => !extractOrchestratorTarget(lbl));
-  for (const catItem of catalog) {
-    const orchTarget = extractOrchestratorTarget(catItem?.label || "");
-    if (!orchTarget) continue;
-    if (isArgonGatedLabelOrId(catItem.label) && !hasArgonAccess) continue;
-    const hasUnderlying = accountBaseLabels.some((lbl) => matchesModelTargetTokens(lbl, orchTarget));
-    if (hasUnderlying) {
-      addOrMergeModel({
-        label: catItem.label,
-        modelId: catItem.label,
-        variantIds: catItem.variantIds || [catItem.label],
-        unlimited: false
-      });
-    }
-  }
-  if (catalog.length === 0 && hasArgonAccess && accountBaseLabels.some((lbl) => /\bargon\b/i.test(lbl))) {
-    addOrMergeModel({
-      label: "Orchestrator (Argon)",
-      modelId: "Orchestrator (Argon)",
-      variantIds: [
-        "Orchestrator (Argon)",
-        "MODEL_PLACEHOLDER_M668",
-        "gemini-pro-orchestrator-g1-pro"
-      ],
-      unlimited: false
-    });
-  }
-
   // 若原生目录已知顺序，优先按原生 UI 顺序排列已命中的模型
   const ordered = [];
   const emitted = new Set();
@@ -922,18 +1017,6 @@ export function mergeNativeCatalogIntoPersonalModels(
     if (!emitted.has(key)) {
       ordered.push(val);
       emitted.add(key);
-    }
-  }
-
-  // 确保 Orchestrator (Argon) 紧随 Gemini 4 Hydrogen / Gemini 4 Argon 之后（若未在 clientCatalog 确定位置）
-  if (catalog.length === 0) {
-    const orchIdx = ordered.findIndex((m) => /^orchestrator\s*\(argon\)$/i.test(m.label));
-    if (orchIdx >= 0) {
-      const [orchItem] = ordered.splice(orchIdx, 1);
-      const hydIdx = ordered.findIndex((m) => /^gemini\s*4\s*hydrogen$/i.test(m.label));
-      const argIdx = ordered.findIndex((m) => /^gemini\s*4\s*argon$/i.test(m.label));
-      const targetIdx = hydIdx >= 0 ? hydIdx + 1 : (argIdx >= 0 ? argIdx + 1 : ordered.length);
-      ordered.splice(targetIdx, 0, orchItem);
     }
   }
 
@@ -1106,6 +1189,9 @@ export function sanitizeCachedQuotaModels(
     if (!rawLabel) continue;
     const baseLabel = stripModelVariantSuffix(rawLabel);
     if (isLegacyDeprecatedModel(baseLabel) || isLegacyDeprecatedModel(rawLabel)) {
+      continue;
+    }
+    if (isOrchestratorModelLabelOrId(baseLabel) || isOrchestratorModelLabelOrId(rawLabel)) {
       continue;
     }
     if (!isGcp && (isGcpOnlyModel(baseLabel) || isGcpOnlyModel(rawLabel))) {

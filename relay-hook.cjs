@@ -372,17 +372,28 @@ function normalizeBaseModelFamily(rawModelStr) {
   const s = String(rawModelStr || "").trim();
   if (!s) return "";
   const lower = s.toLowerCase();
-  if (/argon|m417|m418|m419/i.test(lower)) return "Gemini 4 Argon";
-  if (/3[._-]8[._-]flash|m420|m421|m422|m318|m319|m320/i.test(lower)) return "Gemini 3.8 Flash";
-  if (/3[._-]7[._-]flash|m55|m62|m63|m298|m299|m300/i.test(lower)) return "Gemini 3.7 Flash";
-  if (/3[._-]6[._-]flash|m51|m60|m61|m71|m72|m73/i.test(lower)) return "Gemini 3.6 Flash";
-  if (/3[._-]1[._-]pro|m36|m37/i.test(lower)) return "Gemini 3.1 Pro";
+  if (/neon|m537/i.test(lower)) return "Gemini 4 Neon";
+  if (/argon|orchestrator.*g1-pro|m417|m418|m419|m668/i.test(lower)) return "Gemini 4 Argon";
+  if (/hydrogen/i.test(lower)) return "Gemini 4 Hydrogen";
+  if (/carbon/i.test(lower)) return "Gemini 4 Carbon";
+  if (/3[._-\s]*8[._-\s]*flash|m420|m421|m422|m318|m319|m320/i.test(lower)) return "Gemini 3.8 Flash";
+  if (/3[._-\s]*7[._-\s]*flash|m55|m62|m63|m298|m299|m300/i.test(lower)) return "Gemini 3.7 Flash";
+  if (/3[._-\s]*6[._-\s]*flash|m51|m60|m61|m71|m72|m73/i.test(lower)) return "Gemini 3.6 Flash";
+  if (/3[._-\s]*1[._-\s]*pro|m36|m37/i.test(lower)) return "Gemini 3.1 Pro";
   if (/opus[._-\s]*5[._-]5|m409|m410|m411|m412|m400|m401|m402|m406/i.test(lower)) return "Claude Opus 5.5";
   if (/sonnet[._-\s]*5[._-]5|m413|m414|m415|m416|m403|m404|m405|m407/i.test(lower)) return "Claude Sonnet 5.5";
   if (/sonnet[._-\s]*4[._-]6/i.test(lower)) return "Claude Sonnet 4.6 (Thinking)";
   if (/opus[._-\s]*4[._-]6/i.test(lower)) return "Claude Opus 4.6 (Thinking)";
   if (/gpt[._-\s]*oss/i.test(lower)) return "GPT-OSS 120B";
-  return s.replace(/\s*\((Low|Medium|High|XHigh|Max|Extra)\)\s*$/i, "").replace(/-(low|medium|high|xhigh|max|extra)$/i, "").trim();
+  const unwrapped = s
+    .replace(/^orchestrator\s*\(([^)]+)\)\s*$/i, "$1")
+    .replace(/^orchestrator\s+/i, "")
+    .trim();
+  return unwrapped
+    .replace(/\s*\((Low|Medium|High|XHigh|Extra\s*High|Max|Extra)\)\s*$/i, "")
+    .replace(/\s+(Low|Medium|High|XHigh|Extra\s*High|Max)\s*$/i, "")
+    .replace(/-(low|medium|high|xhigh|extra[-_]?high|max|extra)$/i, "")
+    .trim();
 }
 
 function parseHookAccountRef(spec) {
@@ -595,6 +606,7 @@ if (require.main === module) {
 
 module.exports = {
   callValidateProjectRpc,
+  normalizeBaseModelFamily,
   scrubAndReloadCascadeIfNeeded: (cascadeId, lsTarget) => scrubAndReloadCascadeIfNeeded(cascadeId, lsTarget, convDir),
   scrubAllConversationDbsSync: () => scrubAllConversationDbsSync(convDir)
 };

@@ -15,7 +15,9 @@ import {
   stripModelVariantSuffix,
   deriveCloudCodeSlugFromLabel,
   findQuotaGroupForModel,
-  isGuessedOrchestratorSlug
+  isGuessedOrchestratorSlug,
+  isOrchestratorModelLabelOrId,
+  resolveUnderlyingModelFamilyForOrchestrator
 } from "./quota-probe.mjs";
 
 const GCP_SIG_BIN_MAGIC = Buffer.from([0x01, 0x8f, 0x3d, 0x6b, 0x5f]);
@@ -80,21 +82,33 @@ export function resolveBaseModelFamilyFromId(rawModelStr, cfg) {
   const s = String(rawModelStr || "").trim();
   if (!s) return "";
   const lower = s.toLowerCase();
+  const unwrapOrch = (val) => {
+    const clean = stripModelVariantSuffix(val);
+    if (!clean) return "";
+    if (isOrchestratorModelLabelOrId(clean)) {
+      return resolveUnderlyingModelFamilyForOrchestrator(clean, cfg) || clean;
+    }
+    return clean;
+  };
+  if (isOrchestratorModelLabelOrId(s)) {
+    const directOrch = resolveUnderlyingModelFamilyForOrchestrator(s, cfg);
+    if (directOrch) return directOrch;
+  }
 
   // 1. 优先从动态自学习注册表（随客户端版本自动更新）解析模型家族
   const dynReg = cfg?.__meta__?.dynamicModelRegistry;
   if (dynReg?.placeholderToFamily?.[lower]) {
-    return stripModelVariantSuffix(dynReg.placeholderToFamily[lower]);
+    return unwrapOrch(dynReg.placeholderToFamily[lower]);
   }
   const strippedLower = stripModelVariantSuffix(s).toLowerCase();
   if (dynReg?.placeholderToFamily?.[strippedLower]) {
-    return stripModelVariantSuffix(dynReg.placeholderToFamily[strippedLower]);
+    return unwrapOrch(dynReg.placeholderToFamily[strippedLower]);
   }
   if (dynReg?.labelToSlug) {
     for (const [lbl, slug] of Object.entries(dynReg.labelToSlug)) {
       if (lbl === lower || String(slug || "").toLowerCase() === lower) {
         const fam = dynReg.placeholderToFamily?.[String(slug || "").toLowerCase()];
-        if (fam) return stripModelVariantSuffix(fam);
+        if (fam) return unwrapOrch(fam);
       }
     }
   }
@@ -108,8 +122,8 @@ export function resolveBaseModelFamilyFromId(rawModelStr, cfg) {
   ]);
   for (const list of [...liveLists, ...accLists]) {
     for (const m of (list || [])) {
-      const mLabel = stripModelVariantSuffix(m.modelId || m.label || "");
-      if (!mLabel) continue;
+      const mLabel = unwrapOrch(m.modelId || m.label || "");
+      if (!mLabel || isOrchestratorModelLabelOrId(mLabel)) continue;
       if (mLabel.toLowerCase() === lower || mLabel.toLowerCase() === strippedLower) return mLabel;
       if (Array.isArray(m.variantIds) && m.variantIds.some((v) => String(v).toLowerCase() === lower)) {
         return mLabel;
@@ -117,7 +131,7 @@ export function resolveBaseModelFamilyFromId(rawModelStr, cfg) {
     }
   }
 
-  return stripModelVariantSuffix(s);
+  return unwrapOrch(s);
 }
 
 export function normalizeConsumerModelId(rawModelStr, cfg = null) {

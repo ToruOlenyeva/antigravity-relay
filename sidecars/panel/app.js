@@ -207,13 +207,67 @@ function renderAll() {
   renderRoutingList();
 }
 
+let isOtherRoutingModelsExpanded = false;
+
+function stripModelVariantSuffixUi(rawLabel) {
+  return String(rawLabel || "")
+    .replace(/\s*\((Low|Medium|High|XHigh|Extra\s*High|Extra|Max)\)\s*$/i, "")
+    .replace(/\s+(Low|Medium|High|XHigh|Extra\s*High|Max)\s*$/i, "")
+    .trim();
+}
+
+function isOrchestratorUiModel(rawLabelOrId) {
+  return /^orchestrator\b|orchestrator[-_]|^model_placeholder_m(537|667|668)$/i.test(
+    String(rawLabelOrId || "").trim()
+  );
+}
+
+function getActiveAccountModelKeySet(isGcpScope = false) {
+  const keys = new Set();
+  const collect = (list) => {
+    for (const m of (Array.isArray(list) ? list : [])) {
+      if (!m) continue;
+      const raw = String(m.label || m.modelId || "").trim();
+      if (!raw || isOrchestratorUiModel(raw)) continue;
+      const base = stripModelVariantSuffixUi(raw);
+      if (base && !isOrchestratorUiModel(base)) {
+        keys.add(base.toLowerCase());
+      }
+    }
+  };
+  if (isGcpScope) {
+    if (state.activeAccount?.gcpProjectId && Array.isArray(state.availableModels) && state.availableModels.length > 0) {
+      collect(state.availableModels);
+      return keys;
+    }
+    const activeGcpAcc = (state.accounts || []).find(
+      (a) => (a.channelType === "gcp" || Boolean(a.gcpProjectId)) &&
+        (a.id === state.activeChannelId ||
+          (state.activeAccount?.email && a.email === state.activeAccount.email && a.gcpProjectId === state.activeAccount.gcpProjectId))
+    );
+    collect(activeGcpAcc?.cachedQuota?.availableModels);
+    return keys;
+  }
+  if (!state.activeAccount?.gcpProjectId && Array.isArray(state.availableModels) && state.availableModels.length > 0) {
+    collect(state.availableModels);
+    return keys;
+  }
+  const activePersonalAcc = (state.accounts || []).find(
+    (a) => !(a.channelType === "gcp" || Boolean(a.gcpProjectId)) &&
+      (a.id === state.activeChannelId || (state.activeAccount?.email && a.email === state.activeAccount.email))
+  );
+  collect(activePersonalAcc?.cachedQuotaByPool?.daily?.availableModels || activePersonalAcc?.cachedQuota?.availableModels);
+  return keys;
+}
+
 function getPoolModelsForScope(isGcpScope = false) {
   const modelMap = new Map();
   const addModelEntry = (m, isFromGcp) => {
     if (!m) return;
     const rawLabel = String(m.label || m.modelId || "").trim();
-    if (!rawLabel) return;
-    const baseLabel = rawLabel.replace(/\s*\((Low|Medium|High|XHigh|Extra|Max)\)\s*$/i, "").trim();
+    if (!rawLabel || isOrchestratorUiModel(rawLabel)) return;
+    const baseLabel = stripModelVariantSuffixUi(rawLabel);
+    if (!baseLabel || isOrchestratorUiModel(baseLabel)) return;
     const vars = Array.isArray(m.variantIds) ? m.variantIds : [baseLabel, rawLabel];
     if (!modelMap.has(baseLabel)) {
       modelMap.set(baseLabel, {
@@ -747,7 +801,7 @@ function renderRoutingList() {
     : (state.routing?.models || {});
   const routeScope = isGcpScope ? "gcp" : "personal";
 
-  for (const m of models) {
+  const buildRoutingRow = (m) => {
     let selectedRoute = routeMap[m.modelId] || "follow_current";
     if (isGcpScope && selectedRoute === "auto_poll") {
       selectedRoute = "follow_current";
@@ -795,7 +849,52 @@ function renderRoutingList() {
 
     row.appendChild(info);
     row.appendChild(dropdown);
-    container.appendChild(row);
+    return row;
+  };
+
+  const activeKeys = getActiveAccountModelKeySet(isGcpScope);
+  const primaryModels = activeKeys.size > 0
+    ? models.filter((m) => activeKeys.has(String(m.modelId || "").toLowerCase()))
+    : models;
+  const otherAccountModels = activeKeys.size > 0
+    ? models.filter((m) => !activeKeys.has(String(m.modelId || "").toLowerCase()))
+    : [];
+
+  for (const m of primaryModels) {
+    container.appendChild(buildRoutingRow(m));
+  }
+
+  if (otherAccountModels.length > 0) {
+    const details = document.createElement("details");
+    details.className = "routing-other-group";
+    details.open = Boolean(isOtherRoutingModelsExpanded);
+    details.addEventListener("toggle", () => {
+      isOtherRoutingModelsExpanded = details.open;
+    });
+
+    const summary = document.createElement("summary");
+    summary.className = "routing-other-toggle";
+
+    const titleEl = document.createElement("span");
+    titleEl.className = "routing-other-title";
+    titleEl.textContent = `${t.otherAccountModelsTitle || "其他账号独有模型"} (${otherAccountModels.length})`;
+
+    const hintEl = document.createElement("span");
+    hintEl.className = "routing-other-hint";
+    hintEl.textContent = t.otherAccountModelsHint || "";
+
+    summary.appendChild(titleEl);
+    summary.appendChild(hintEl);
+
+    const listEl = document.createElement("div");
+    listEl.className = "routing-other-list";
+    for (const m of otherAccountModels) {
+      listEl.appendChild(buildRoutingRow(m));
+    }
+
+    details.appendChild(summary);
+    details.appendChild(listEl);
+    container.appendChild(details);
   }
 }
 

@@ -711,7 +711,9 @@ function renderQuotaGroups() {
     header.appendChild(pill);
     gcpCard.appendChild(header);
 
-    const gcpModels = viewedAcc?.cachedQuota?.availableModels || (isViewingActive ? state.availableModels : []) || [];
+    const isOrchUiModel = (m) => /^orchestrator\b|orchestrator[-_]|^model_placeholder_m(537|667|668)$/i.test(String(m?.label || m?.modelId || "").trim());
+    const rawGcpModels = viewedAcc?.cachedQuota?.availableModels || (isViewingActive ? state.availableModels : []) || [];
+    const gcpModels = rawGcpModels.filter((m) => m && !isOrchUiModel(m));
     if (gcpModels.length > 0) {
       const modelsLabel = document.createElement("div");
       modelsLabel.className = "gcp-models-label";
@@ -733,9 +735,11 @@ function renderQuotaGroups() {
     return;
   }
 
-  const personalModels = Array.isArray(poolSnapshot?.availableModels) && poolSnapshot.availableModels.length > 0
+  const isOrchUiModel = (m) => /^orchestrator\b|orchestrator[-_]|^model_placeholder_m(537|667|668)$/i.test(String(m?.label || m?.modelId || "").trim());
+  const rawPersonalModels = Array.isArray(poolSnapshot?.availableModels) && poolSnapshot.availableModels.length > 0
     ? poolSnapshot.availableModels
     : (isViewingActive && Array.isArray(state.availableModels) ? state.availableModels : []);
+  const personalModels = rawPersonalModels.filter((m) => m && !isOrchUiModel(m));
 
   if (groups.length === 0 && !isGcpChannel) {
     const hasAuthExp = Boolean(viewedAcc?.authExpired);

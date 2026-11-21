@@ -1231,3 +1231,85 @@ button.secondary.small.active-toggle {
   gap: 5px;
   flex-wrap: wrap;
 }
+
+/* 模型路由：其他账号独有模型可折叠分组 */
+.routing-other-group {
+  margin-top: 4px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 7px;
+  background: var(--bg-base);
+}
+
+.routing-other-toggle {
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  cursor: pointer;
+  user-select: none;
+  color: var(--text-muted);
+  font-size: 11px;
+  border-radius: 7px;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.routing-other-toggle::-webkit-details-marker {
+  display: none;
+}
+
+.routing-other-toggle:hover {
+  background: var(--card-hover-bg);
+  color: var(--text-main);
+}
+
+.routing-other-toggle::before {
+  content: "";
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  background-color: currentColor;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' d='M4 6l4 4 4-4'/%3E%3C/svg%3E") no-repeat center / contain;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' d='M4 6l4 4 4-4'/%3E%3C/svg%3E") no-repeat center / contain;
+  rotate: -90deg;
+}
+
+.routing-other-group[open] > .routing-other-toggle::before {
+  rotate: 0deg;
+}
+
+.routing-other-group[open] > .routing-other-toggle {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+  color: var(--text-main);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .routing-other-toggle::before {
+    transition: rotate 0.18s ease;
+  }
+}
+
+.routing-other-title {
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.routing-other-hint {
+  font-size: 10px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  text-align: right;
+}
+
+.routing-other-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 7px 8px 8px;
+  border-top: 1px solid var(--border-subtle);
+  overflow: visible;
+}
