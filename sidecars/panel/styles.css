@@ -481,6 +481,16 @@ button.danger:hover {
   border: 1px solid rgba(16, 185, 129, 0.34);
 }
 
+.channel-type-badge.pro-lite {
+  background: rgba(6, 182, 212, 0.14);
+  color: #22d3ee;
+  border: 1px solid rgba(6, 182, 212, 0.36);
+}
+
+:root[data-theme="light"] .channel-type-badge.pro-lite {
+  color: #0e7490;
+}
+
 .channel-type-badge.ultra {
   background: rgba(139, 92, 246, 0.16);
   color: #a78bfa;
@@ -603,6 +613,100 @@ button.danger:hover {
 }
 
 /* 模型与子智能体路由列表 */
+.routing-fallback-bar {
+  margin-bottom: 6px;
+}
+
+.routing-fallback-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 9px;
+  background: var(--bg-base);
+  border: 1px solid var(--border-subtle);
+  border-radius: 7px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.routing-fallback-label:hover {
+  border-color: var(--border-hover);
+  background: var(--card-hover-bg);
+}
+
+.routing-fallback-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+}
+
+.routing-fallback-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.routing-fallback-hint {
+  font-size: 10px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.routing-fallback-switch {
+  accent-color: var(--primary);
+  margin: 0;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.routing-fallback-switch:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+.routing-fallback-switch.switch-fallback {
+  appearance: none;
+  -webkit-appearance: none;
+  position: relative;
+  width: 32px;
+  height: 18px;
+  border-radius: 999px;
+  background: var(--border-hover);
+  border: 1px solid transparent;
+}
+
+.routing-fallback-switch.switch-fallback::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+}
+
+.routing-fallback-switch.switch-fallback:checked {
+  background: var(--primary);
+}
+
+.routing-fallback-switch.switch-fallback:checked::after {
+  transform: translateX(14px);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .routing-fallback-switch.switch-fallback,
+  .routing-fallback-switch.switch-fallback::after {
+    transition: background-color 0.16s ease, transform 0.16s ease;
+  }
+}
+
 .routing-list {
   display: flex;
   flex-direction: column;

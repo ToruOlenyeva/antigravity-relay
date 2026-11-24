@@ -46,6 +46,7 @@ import {
   isArgonGatedLabelOrId,
   isModelEntryRestrictedOrSunset,
   detectPersonalAccountTier,
+  syncPersonalSubTiers,
   buildProModelsFromQuotaGroups,
   isValidOfficialQuotaGroup,
   normalizeAccountChannels,
@@ -823,14 +824,19 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false, opts = {}) {
     : "";
   const cachedHasArgon = liveChannelKey ? cfg.accounts?.[liveChannelKey]?.cachedQuota?.hasArgonAccess : undefined;
   const cachedTierCode = liveChannelKey ? (cfg.accounts?.[liveChannelKey]?.tierCode || cfg.accounts?.[liveChannelKey]?.cachedQuota?.tierCode || "") : "";
+  const cachedPaidProRestricted = liveChannelKey
+    ? (cfg.accounts?.[liveChannelKey]?.paidProRestricted ?? cfg.accounts?.[liveChannelKey]?.cachedQuota?.paidProRestricted)
+    : undefined;
+  const hasLiveModelsForTier = Boolean(lsModeMatches && effectiveClientModels.length > 0);
   const liveTierInfo = activeGcpProject
-    ? { tierCode: "GCP", tierName: activeTierName, hasArgonAccess: true, isPaidProOrUltra: false }
+    ? { tierCode: "GCP", tierName: activeTierName, tierSubCode: "", paidProRestricted: false, hasArgonAccess: true, isPaidProOrUltra: false }
     : detectPersonalAccountTier(
         effectiveClientModels,
         lsModeMatches ? rawTierName : (cfg.accounts?.[liveChannelKey]?.tierName || ""),
         lsModeMatches ? activeTierId : "",
-        (lsModeMatches && effectiveClientModels.length > 0) ? undefined : cachedHasArgon,
-        (lsModeMatches && (rawTierName || activeTierId)) ? "" : cachedTierCode
+        hasLiveModelsForTier ? undefined : cachedHasArgon,
+        (lsModeMatches && (rawTierName || activeTierId)) ? "" : cachedTierCode,
+        hasLiveModelsForTier ? undefined : cachedPaidProRestricted
       );
   const hasLiveArgonAccess = liveTierInfo.hasArgonAccess;
   const isLivePaidProOrUltra = liveTierInfo.isPaidProOrUltra;
@@ -840,6 +846,15 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false, opts = {}) {
       cfg.accounts[liveChannelKey].tierName = liveTierInfo.tierName;
       cfg.accounts[liveChannelKey].tierConfirmed = true;
       cfg.accounts[liveChannelKey].tierRaw = `${activeTierId} ${rawTierName}`.trim();
+      if (liveTierInfo.tierCode === "Pro") {
+        if (typeof liveTierInfo.paidProRestricted === "boolean") {
+          cfg.accounts[liveChannelKey].paidProRestricted = liveTierInfo.paidProRestricted;
+        }
+        cfg.accounts[liveChannelKey].tierSubCode = liveTierInfo.tierSubCode || "pro";
+      } else {
+        delete cfg.accounts[liveChannelKey].tierSubCode;
+        delete cfg.accounts[liveChannelKey].paidProRestricted;
+      }
     } else if (!cfg.accounts[liveChannelKey].tierConfirmed && !cfg.accounts[liveChannelKey].cachedQuota?.probedVia) {
       cfg.accounts[liveChannelKey].tierCode = "Unknown";
       cfg.accounts[liveChannelKey].tierName = "Unknown";
@@ -1062,6 +1077,10 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false, opts = {}) {
         }
         if (freshAcc.tierCode) cfg.accounts[detectedChannelId].tierCode = freshAcc.tierCode;
         if (freshAcc.tierName) cfg.accounts[detectedChannelId].tierName = freshAcc.tierName;
+        if (freshAcc.tierSubCode) cfg.accounts[detectedChannelId].tierSubCode = freshAcc.tierSubCode;
+        if (typeof freshAcc.paidProRestricted === "boolean") {
+          cfg.accounts[detectedChannelId].paidProRestricted = freshAcc.paidProRestricted;
+        }
         if (freshAcc.tierConfirmed) cfg.accounts[detectedChannelId].tierConfirmed = true;
         if (freshAcc.tierRaw) cfg.accounts[detectedChannelId].tierRaw = freshAcc.tierRaw;
         if (freshAcc.lastProbeError) {
@@ -1204,6 +1223,10 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false, opts = {}) {
         }
         if (freshActive.tierCode) cfg.accounts[activeChannelId].tierCode = freshActive.tierCode;
         if (freshActive.tierName) cfg.accounts[activeChannelId].tierName = freshActive.tierName;
+        if (freshActive.tierSubCode) cfg.accounts[activeChannelId].tierSubCode = freshActive.tierSubCode;
+        if (typeof freshActive.paidProRestricted === "boolean") {
+          cfg.accounts[activeChannelId].paidProRestricted = freshActive.paidProRestricted;
+        }
         if (freshActive.tierConfirmed) cfg.accounts[activeChannelId].tierConfirmed = true;
         if (freshActive.tierRaw) cfg.accounts[activeChannelId].tierRaw = freshActive.tierRaw;
         if (freshActive.lastProbeError) {
@@ -1218,12 +1241,17 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false, opts = {}) {
       }
     }
   }
+  syncPersonalSubTiers(cfg);
   const activeAccObj = activeChannelId ? cfg.accounts[activeChannelId] : null;
   const displayAccount = activeAccObj
     ? {
         email: activeAccObj.email,
         name: activeName,
         tierCode: activeAccObj.tierCode || activeAccObj.cachedQuota?.tierCode || liveTierInfo.tierCode,
+        tierSubCode: activeAccObj.tierSubCode || activeAccObj.cachedQuota?.tierSubCode || "",
+        paidProRestricted: typeof activeAccObj.paidProRestricted === "boolean"
+          ? activeAccObj.paidProRestricted
+          : activeAccObj.cachedQuota?.paidProRestricted,
         tierName: activeAccObj.tierName || activeTierName,
         tierId: activeTierId,
         gcpProjectId: activeAccObj.gcpProjectId || "",
@@ -1235,6 +1263,8 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false, opts = {}) {
         email: activeEmail,
         name: activeName,
         tierCode: liveTierInfo.tierCode,
+        tierSubCode: liveTierInfo.tierSubCode || "",
+        paidProRestricted: liveTierInfo.paidProRestricted,
         tierName: activeTierName,
         tierId: activeTierId,
         gcpProjectId: activeGcpProject,

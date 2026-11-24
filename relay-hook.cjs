@@ -216,7 +216,37 @@ function isTemporarilyBlockedForHook(acc, nowMs = Date.now()) {
   return errAt > 0 && (nowMs - errAt) < 600000 && /#3501|valid license|\b401\b|\b403\b/i.test(errMsg);
 }
 
-function resolveBestAvailableChannelSpec(baseModelName, relayCfg, activeMeta = null) {
+const PERSONAL_TIER_KEYS_HOOK = ["free", "plus", "pro_lite", "pro", "ultra"];
+
+function parseTierRouteSpecForHook(spec) {
+  const s = String(spec || "").trim().toLowerCase();
+  if (!s.startsWith("tier:")) return "";
+  const key = s.slice(5).trim();
+  return PERSONAL_TIER_KEYS_HOOK.includes(key) ? key : "";
+}
+
+function getPersonalAccountTierKeyForHook(acc) {
+  if (!acc || acc.channelType === "gcp" || acc.gcpProjectId) return "";
+  const rawCode = String(acc.tierCode || acc.cachedQuota?.tierCode || acc.cachedQuotaByPool?.daily?.tierCode || "").trim();
+  const tName = String(acc.tierName || acc.cachedQuota?.tierName || "").trim();
+  if (/^ultra$/i.test(rawCode) || /\bultra\b/i.test(tName)) return "ultra";
+  if (/^pro$/i.test(rawCode) || /\bpro\b/i.test(tName)) {
+    const subCode = String(
+      acc.tierSubCode || acc.cachedQuota?.tierSubCode || acc.cachedQuotaByPool?.daily?.tierSubCode || ""
+    ).trim().toLowerCase();
+    const isRestricted =
+      subCode === "pro_lite" ||
+      acc.paidProRestricted === true ||
+      acc.cachedQuota?.paidProRestricted === true ||
+      acc.cachedQuotaByPool?.daily?.paidProRestricted === true;
+    return isRestricted ? "pro_lite" : "pro";
+  }
+  if (/^plus$/i.test(rawCode) || /\bplus\b/i.test(tName)) return "plus";
+  if (/^free$/i.test(rawCode) || /\bfree\b|standard|starter/i.test(tName)) return "free";
+  return "";
+}
+
+function resolveBestAvailableChannelSpec(baseModelName, relayCfg, activeMeta = null, opts = null) {
   const accounts = Object.values(relayCfg?.accounts || {});
   if (accounts.length === 0) return null;
   const activeEmail = (activeMeta?.activeEmail || relayCfg?.__meta__?.activeEmail || "").trim();
@@ -225,69 +255,79 @@ function resolveBestAvailableChannelSpec(baseModelName, relayCfg, activeMeta = n
   const poolOrder = ["daily"];
   const thresholdPct = Number(relayCfg?.routing?.lowQuotaThresholdPct ?? 5);
   const targetLower = (baseModelName || "").toLowerCase();
+  const preferredTierKey = String(opts?.preferredTierKey || "").trim().toLowerCase();
+  const allowFallback = opts?.allowFallback !== false;
   const nowMs = Date.now();
 
-  const candidates = [];
+  const collectAndRank = (tierFilterKey = "") => {
+    const candidates = [];
+    for (const acc of accounts) {
+      const isGcp = acc.channelType === "gcp" || Boolean(acc.gcpProjectId);
+      if (isGcp || isTemporarilyBlockedForHook(acc, nowMs)) continue;
+      if (tierFilterKey && getPersonalAccountTierKeyForHook(acc) !== tierFilterKey) continue;
+      for (const pool of poolOrder) {
+        const poolQuota = acc?.cachedQuotaByPool?.[pool] || (pool === preferredPool ? acc?.cachedQuota : null);
+        if (!poolQuota || typeof poolQuota !== "object") continue;
+        const models = poolQuota.availableModels || [];
+        const matched = models.find((m) => {
+          const id = (m.modelId || m.label || "").toLowerCase();
+          if (id === targetLower) return true;
+          return Array.isArray(m.variantIds) && m.variantIds.some((v) => String(v).toLowerCase() === targetLower);
+        });
+        if (!matched && targetLower) continue;
+        const dual = extractModelDualQuotaForHook(poolQuota, matched, baseModelName);
+        if (dual.weeklyPct <= 0 || dual.fiveHourPct <= 0) continue;
 
-  for (const acc of accounts) {
-    const isGcp = acc.channelType === "gcp" || Boolean(acc.gcpProjectId);
-    if (isGcp || isTemporarilyBlockedForHook(acc, nowMs)) continue;
-    for (const pool of poolOrder) {
-      const poolQuota = acc?.cachedQuotaByPool?.[pool] || (pool === preferredPool ? acc?.cachedQuota : null);
-      if (!poolQuota || typeof poolQuota !== "object") continue;
-      const models = poolQuota.availableModels || [];
-      const matched = models.find((m) => {
-        const id = (m.modelId || m.label || "").toLowerCase();
-        if (id === targetLower) return true;
-        return Array.isArray(m.variantIds) && m.variantIds.some((v) => String(v).toLowerCase() === targetLower);
-      });
-      if (!matched && targetLower) continue;
-      const dual = extractModelDualQuotaForHook(poolQuota, matched, baseModelName);
-      if (dual.weeklyPct <= 0 || dual.fiveHourPct <= 0) continue;
+        const weeklyLow = dual.weeklyPct <= thresholdPct;
+        const effectiveWeeklyResetMs = dual.weeklyResetMs + (weeklyLow ? WEEK_PENALTY_MS : 0);
+        const fiveHourAboveThreshold = dual.fiveHourPct > thresholdPct;
 
-      const weeklyLow = dual.weeklyPct <= thresholdPct;
-      const effectiveWeeklyResetMs = dual.weeklyResetMs + (weeklyLow ? WEEK_PENALTY_MS : 0);
-      const fiveHourAboveThreshold = dual.fiveHourPct > thresholdPct;
-
-      candidates.push({
-        acc,
-        pool,
-        weeklyPct: dual.weeklyPct,
-        fiveHourPct: dual.fiveHourPct,
-        fiveHourAboveThreshold,
-        effectiveWeeklyResetMs,
-        fiveHourResetMs: dual.fiveHourResetMs,
-        isPreferredPool: pool === preferredPool,
-        isCurrent: acc.id === activeChannelId,
-        sameEmail: acc.email === activeEmail
-      });
+        candidates.push({
+          acc,
+          pool,
+          weeklyPct: dual.weeklyPct,
+          fiveHourPct: dual.fiveHourPct,
+          fiveHourAboveThreshold,
+          effectiveWeeklyResetMs,
+          fiveHourResetMs: dual.fiveHourResetMs,
+          isPreferredPool: pool === preferredPool,
+          isCurrent: acc.id === activeChannelId,
+          sameEmail: acc.email === activeEmail
+        });
+      }
     }
+
+    if (candidates.length === 0) return null;
+
+    candidates.sort((a, b) => {
+      if (a.fiveHourAboveThreshold !== b.fiveHourAboveThreshold) {
+        return a.fiveHourAboveThreshold ? -1 : 1;
+      }
+      if (Math.abs(a.effectiveWeeklyResetMs - b.effectiveWeeklyResetMs) > 120000) {
+        return a.effectiveWeeklyResetMs - b.effectiveWeeklyResetMs;
+      }
+      if (Math.abs(a.fiveHourResetMs - b.fiveHourResetMs) > 60000) {
+        return a.fiveHourResetMs - b.fiveHourResetMs;
+      }
+      if (a.isPreferredPool !== b.isPreferredPool) return a.isPreferredPool ? -1 : 1;
+      if (b.weeklyPct !== a.weeklyPct) return b.weeklyPct - a.weeklyPct;
+      if (b.fiveHourPct !== a.fiveHourPct) return b.fiveHourPct - a.fiveHourPct;
+      if (a.isCurrent !== b.isCurrent) return a.isCurrent ? -1 : 1;
+      if (a.sameEmail !== b.sameEmail) return a.sameEmail ? -1 : 1;
+      return 0;
+    });
+
+    return `account:${candidates[0].acc.id}@${candidates[0].pool}`;
+  };
+
+  if (preferredTierKey) {
+    const matchedTierSpec = collectAndRank(preferredTierKey);
+    if (matchedTierSpec) return matchedTierSpec;
+    if (!allowFallback) return null;
+    return collectAndRank("");
   }
 
-  if (candidates.length === 0) return null;
-
-  candidates.sort((a, b) => {
-    // 1. 5小时限额门控：优先选 5小时限额 > 5% 的账号；达到 5小时限额 (<=5%) 时退居队尾，重置后自动恢复
-    if (a.fiveHourAboveThreshold !== b.fiveHourAboveThreshold) {
-      return a.fiveHourAboveThreshold ? -1 : 1;
-    }
-    // 2. 第一层排序（先周额度）：按周重置时间升序（若周限额 <= 5%，重置时间 +7天 进入队尾）
-    if (Math.abs(a.effectiveWeeklyResetMs - b.effectiveWeeklyResetMs) > 120000) {
-      return a.effectiveWeeklyResetMs - b.effectiveWeeklyResetMs;
-    }
-    // 3. 第二层排序（再 5小时额度）：周重置时间相近时，按 5小时重置时间升序
-    if (Math.abs(a.fiveHourResetMs - b.fiveHourResetMs) > 60000) {
-      return a.fiveHourResetMs - b.fiveHourResetMs;
-    }
-    if (a.isPreferredPool !== b.isPreferredPool) return a.isPreferredPool ? -1 : 1;
-    if (b.weeklyPct !== a.weeklyPct) return b.weeklyPct - a.weeklyPct;
-    if (b.fiveHourPct !== a.fiveHourPct) return b.fiveHourPct - a.fiveHourPct;
-    if (a.isCurrent !== b.isCurrent) return a.isCurrent ? -1 : 1;
-    if (a.sameEmail !== b.sameEmail) return a.sameEmail ? -1 : 1;
-    return 0;
-  });
-
-  return `account:${candidates[0].acc.id}@${candidates[0].pool}`;
+  return collectAndRank("");
 }
 
 function resolveHookInstanceMeta(relayCfg) {
@@ -488,8 +528,15 @@ async function applyTargetRoute(targetSpec, relayCfg, baseModelName = "", rawMod
   }
 
   let resolvedSpec = targetSpec;
-  if (resolvedSpec === "auto_poll") {
-    resolvedSpec = resolveBestAvailableChannelSpec(baseModelName, relayCfg, activeMeta) || "follow_current";
+  const targetTierKey = parseTierRouteSpecForHook(resolvedSpec);
+  if (resolvedSpec === "auto_poll" || targetTierKey) {
+    const allowFallback = relayCfg?.routing?.tierFallbackToAny !== false;
+    resolvedSpec = resolveBestAvailableChannelSpec(
+      baseModelName,
+      relayCfg,
+      activeMeta,
+      targetTierKey ? { preferredTierKey: targetTierKey, allowFallback } : null
+    ) || "follow_current";
     if (resolvedSpec === "follow_current") {
       await ensurePersonalProxyMounted();
       if (activeMeta) activeMeta.lastRoutedChannelId = activeMeta.activeChannelId || "";
@@ -607,6 +654,9 @@ if (require.main === module) {
 module.exports = {
   callValidateProjectRpc,
   normalizeBaseModelFamily,
+  parseTierRouteSpecForHook,
+  getPersonalAccountTierKeyForHook,
+  resolveBestAvailableChannelSpec,
   scrubAndReloadCascadeIfNeeded: (cascadeId, lsTarget) => scrubAndReloadCascadeIfNeeded(cascadeId, lsTarget, convDir),
   scrubAllConversationDbsSync: () => scrubAllConversationDbsSync(convDir)
 };

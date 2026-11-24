@@ -477,6 +477,8 @@ export function parseCloudCodeModelsAndQuota(
     return {
       tierCode: tierInfo.tierCode,
       tierName: tierInfo.tierName,
+      tierSubCode: tierInfo.tierSubCode || "",
+      ...(typeof tierInfo.paidProRestricted === "boolean" ? { paidProRestricted: tierInfo.paidProRestricted } : {}),
       hasArgonAccess,
       isPaidProOrUltra,
       isGcpUnlimited: false,
@@ -497,6 +499,8 @@ export function parseCloudCodeModelsAndQuota(
   return {
     tierCode: tierInfo.tierCode,
     tierName: tierInfo.tierName,
+    tierSubCode: tierInfo.tierSubCode || "",
+    ...(typeof tierInfo.paidProRestricted === "boolean" ? { paidProRestricted: tierInfo.paidProRestricted } : {}),
     hasArgonAccess,
     isPaidProOrUltra,
     isGcpUnlimited: isGcpChannel,

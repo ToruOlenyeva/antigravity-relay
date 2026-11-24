@@ -29,7 +29,9 @@ import {
   stripModelVariantSuffix,
   ensureDynamicModelRegistry,
   resolveFamilyForCloudSlug,
-  parseCloudCodeApiError
+  parseCloudCodeApiError,
+  parseTierRouteSpec,
+  getPersonalAccountTierKey
 } from "./quota-probe.mjs";
 import {
   isGcpThoughtSignature,
@@ -244,6 +246,11 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
   }
 
   const excludedIds = new Set();
+  const targetTierKey = parseTierRouteSpec(routeSpec);
+  const allowTierFallback = cfg.routing?.tierFallbackToAny !== false;
+  const tierSelectOpts = targetTierKey
+    ? { preferredTierKey: targetTierKey, allowFallback: allowTierFallback }
+    : null;
 
   const prepareAttemptPayload = async () => {
     const outHeaders = { ...baseHeaders };
@@ -254,23 +261,26 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
     let strippedSigCount = 0;
     let resolvedToken = "";
     let tokenErrorAcc = null;
+    let tierExhaustedError = null;
 
     if (isGenerateEndpoint && parsedBodyJson) {
       const bodyClone = JSON.parse(JSON.stringify(parsedBodyJson));
-      if (routeSpec === "auto_poll") {
+      if (routeSpec === "auto_poll" || targetTierKey) {
         let lastTokenFailedAcc = null;
         for (let tokTry = 0; tokTry < 6; tokTry++) {
-          const bestCand = selectBestPersonalRouteCandidate(baseFamily, cfg, excludedIds);
+          const bestCand = selectBestPersonalRouteCandidate(baseFamily, cfg, excludedIds, tierSelectOpts);
           let candAcc = null;
           let candPool = defaultPool;
+          const canUseActiveAsLastResort = Boolean(
+            activePersonalAcc &&
+            !excludedIds.has(activePersonalAcc.id) &&
+            !excludedIds.has(`${activePersonalAcc.id}@${defaultPool}`) &&
+            (!targetTierKey || allowTierFallback || getPersonalAccountTierKey(activePersonalAcc) === targetTierKey)
+          );
           if (bestCand) {
             candAcc = bestCand.acc;
             candPool = bestCand.pool;
-          } else if (
-            activePersonalAcc &&
-            !excludedIds.has(activePersonalAcc.id) &&
-            !excludedIds.has(`${activePersonalAcc.id}@${defaultPool}`)
-          ) {
+          } else if (canUseActiveAsLastResort) {
             candAcc = activePersonalAcc;
             candPool = defaultPool;
           } else {
@@ -288,8 +298,12 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
           excludedIds.add(`${candAcc.id}@${candPool}`);
           lastTokenFailedAcc = candAcc;
         }
-        if (!routedTargetAcc && lastTokenFailedAcc) {
-          tokenErrorAcc = lastTokenFailedAcc;
+        if (!routedTargetAcc) {
+          if (lastTokenFailedAcc) {
+            tokenErrorAcc = lastTokenFailedAcc;
+          } else if (targetTierKey && !allowTierFallback) {
+            tierExhaustedError = { tierKey: targetTierKey, baseFamily };
+          }
         }
       } else if (typeof routeSpec === "string" && routeSpec.startsWith("account:")) {
         const rawRef = routeSpec.slice(8).trim();
@@ -375,14 +389,32 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
     }
 
     outHeaders["Content-Length"] = outBodyBuf.length;
-    return { outHeaders, outBodyBuf, routedTargetAcc, targetPool, targetHostname, tokenErrorAcc };
+    return { outHeaders, outBodyBuf, routedTargetAcc, targetPool, targetHostname, tokenErrorAcc, tierExhaustedError };
   };
 
   const reqStartAt = Date.now();
   const isStreamOrGenerate = /^\/v1internal:(streamGenerateContent|generateContent)\b/i.test(reqUrl);
 
   const executeUpstreamAttempt = async (attemptIdx) => {
-    const { outHeaders, outBodyBuf, routedTargetAcc, targetPool, targetHostname, tokenErrorAcc } = await prepareAttemptPayload();
+    const { outHeaders, outBodyBuf, routedTargetAcc, targetPool, targetHostname, tokenErrorAcc, tierExhaustedError } = await prepareAttemptPayload();
+    if (tierExhaustedError) {
+      const errMsg = `Tier '${tierExhaustedError.tierKey}' quota exhausted/unavailable for ${tierExhaustedError.baseFamily || "model"} and tier auto-fallback is disabled.`;
+      recordProxyFailure(cfg, {
+        statusCode: 429,
+        endpoint: reqUrl,
+        rawModel,
+        mappedModel: parsedBodyJson?.model || rawModel,
+        baseFamily,
+        routeSpec,
+        targetChannelId: "",
+        targetEmail: "",
+        targetPool,
+        message: `HTTP 429: ${errMsg}`
+      });
+      res.writeHead(429, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: { code: 429, message: errMsg, status: "RESOURCE_EXHAUSTED" } }));
+      return;
+    }
     if (tokenErrorAcc) {
       const errMsg = tokenErrorAcc.lastTokenRefreshError?.message || "Target channel OAuth token unavailable or expired";
       recordProxyFailure(cfg, {
@@ -448,7 +480,8 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
                 });
                 excludedIds.add(routedTargetAcc.id);
                 excludedIds.add(`${routedTargetAcc.id}@${targetPool}`);
-                const hasFallback = routeSpec === "auto_poll" && Boolean(selectBestPersonalRouteCandidate(baseFamily, cfg, excludedIds));
+                const hasFallback = (routeSpec === "auto_poll" || Boolean(targetTierKey)) &&
+                  Boolean(selectBestPersonalRouteCandidate(baseFamily, cfg, excludedIds, tierSelectOpts));
                 if (hasFallback) {
                   executeUpstreamAttempt(attemptIdx + 1).then(resolve);
                   return;
@@ -473,8 +506,8 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
               routeSpec.startsWith("account:") &&
               routeSpec.indexOf("#") >= 0 &&
               routeSpec.indexOf("@", routeSpec.indexOf("#")) >= 0;
-            const hasNextCandidate = routeSpec === "auto_poll"
-              ? Boolean(selectBestPersonalRouteCandidate(baseFamily, cfg, excludedIds))
+            const hasNextCandidate = (routeSpec === "auto_poll" || Boolean(targetTierKey))
+              ? Boolean(selectBestPersonalRouteCandidate(baseFamily, cfg, excludedIds, tierSelectOpts))
               : (!hasExplicitPoolLock && !excludedIds.has(`${routedTargetAcc.id}@${altPool}`));
             if (hasNextCandidate) {
               upRes.resume();
@@ -536,10 +569,16 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
                     if (!mObj || typeof mObj !== "object" || /disabled$/i.test(mKey)) continue;
                     const mFamily = resolveBaseModelFamilyFromId(mKey, cfg);
                     const rSpec = routeMap[mFamily] || routeMap[mKey] || "follow_current";
+                    const rTierKey = parseTierRouteSpec(rSpec);
                     let tAcc = null;
                     let tPool = curPool;
-                    if (rSpec === "auto_poll") {
-                      const bestCand = selectBestPersonalRouteCandidate(mFamily, cfg);
+                    if (rSpec === "auto_poll" || rTierKey) {
+                      const bestCand = selectBestPersonalRouteCandidate(
+                        mFamily,
+                        cfg,
+                        null,
+                        rTierKey ? { preferredTierKey: rTierKey, allowFallback: allowTierFallback } : null
+                      );
                       if (bestCand) {
                         tAcc = bestCand.acc;
                         tPool = bestCand.pool;

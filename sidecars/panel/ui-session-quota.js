@@ -22,6 +22,29 @@ function translateQuotaGroupName(rawName) {
   return n;
 }
 
+function getPersonalAccountTierKeyUi(ch) {
+  if (!ch) return "";
+  const isGcp = ch.channelType === "gcp" || Boolean(ch.gcpProjectId);
+  if (isGcp) return "";
+  const code = String(ch.tierCode || ch.cachedQuota?.tierCode || ch.cachedQuotaByPool?.daily?.tierCode || "").trim();
+  const tName = String(ch.tierName || ch.cachedQuota?.tierName || "").trim();
+  if (/^ultra$/i.test(code) || /\bultra\b/i.test(tName)) return "ultra";
+  if (/^pro$/i.test(code) || /\bpro\b/i.test(tName)) {
+    const subCode = String(
+      ch.tierSubCode || ch.cachedQuota?.tierSubCode || ch.cachedQuotaByPool?.daily?.tierSubCode || ""
+    ).trim().toLowerCase();
+    const isRestricted =
+      subCode === "pro_lite" ||
+      ch.paidProRestricted === true ||
+      ch.cachedQuota?.paidProRestricted === true ||
+      ch.cachedQuotaByPool?.daily?.paidProRestricted === true;
+    return isRestricted ? "pro_lite" : "pro";
+  }
+  if (/^plus$/i.test(code) || /\bplus\b/i.test(tName)) return "plus";
+  if (/^free$/i.test(code) || /\bfree\b|standard|starter/i.test(tName)) return "free";
+  return "";
+}
+
 function getChannelBadgeInfo(ch) {
   const t = I18N[currentLang];
   if (!ch) return { badgeType: "unknown", badgeText: t.channelUnknownBadge || "未知" };
@@ -29,18 +52,20 @@ function getChannelBadgeInfo(ch) {
   if (isGcp) {
     return { badgeType: "gcp", badgeText: t.channelGcpBadge };
   }
-  const code = String(ch.tierCode || ch.cachedQuota?.tierCode || "").trim();
-  const tName = String(ch.tierName || ch.cachedQuota?.tierName || "").trim();
-  if (/^ultra$/i.test(code) || /ultra/i.test(tName)) {
+  const tierKey = getPersonalAccountTierKeyUi(ch);
+  if (tierKey === "ultra") {
     return { badgeType: "ultra", badgeText: "Ultra" };
   }
-  if (/^pro$/i.test(code) || /\bpro\b/i.test(tName)) {
+  if (tierKey === "pro_lite") {
+    return { badgeType: "pro-lite", badgeText: t.channelProLiteBadge || "Pro Lite" };
+  }
+  if (tierKey === "pro") {
     return { badgeType: "personal", badgeText: t.channelPersonalBadge };
   }
-  if (/^plus$/i.test(code) || /plus/i.test(tName)) {
+  if (tierKey === "plus") {
     return { badgeType: "plus", badgeText: "Plus" };
   }
-  if (/^free$/i.test(code) || /\bfree\b|standard/i.test(tName)) {
+  if (tierKey === "free") {
     return { badgeType: "free", badgeText: "Free" };
   }
   return { badgeType: "unknown", badgeText: t.channelUnknownBadge || "未知" };

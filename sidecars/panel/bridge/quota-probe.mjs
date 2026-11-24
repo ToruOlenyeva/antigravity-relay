@@ -35,6 +35,11 @@ import {
   learnObservedWireSlugForFamily,
   isModelEntryRestrictedOrSunset,
   detectPersonalAccountTier,
+  PERSONAL_TIER_KEYS,
+  parseTierRouteSpec,
+  getPersonalAccountTierKey,
+  detectPaidProRestrictionFromModels,
+  syncPersonalSubTiers,
   buildProModelsFromQuotaGroups,
   isValidOfficialQuotaGroup,
   sanitizeCachedQuotaModels,
@@ -75,6 +80,11 @@ export {
   learnObservedWireSlugForFamily,
   isModelEntryRestrictedOrSunset,
   detectPersonalAccountTier,
+  PERSONAL_TIER_KEYS,
+  parseTierRouteSpec,
+  getPersonalAccountTierKey,
+  detectPaidProRestrictionFromModels,
+  syncPersonalSubTiers,
   buildProModelsFromQuotaGroups,
   isValidOfficialQuotaGroup,
   sanitizeCachedQuotaModels,
@@ -524,6 +534,15 @@ export async function probeChannelQuotaSnapshot(channelId) {
         acc.tierName = confirmedInfo.tierName;
         acc.tierConfirmed = true;
         acc.tierRaw = probeRes.userTier;
+        if (confirmedInfo.tierCode === "Pro") {
+          if (typeof confirmedInfo.paidProRestricted === "boolean") {
+            acc.paidProRestricted = confirmedInfo.paidProRestricted;
+          }
+          acc.tierSubCode = confirmedInfo.tierSubCode || "pro";
+        } else {
+          delete acc.tierSubCode;
+          delete acc.paidProRestricted;
+        }
         if (tierChanged) {
           // 账户真实等级发生变化（例如 Pro 过期降级为 Free）时，立即淘汰旧等级残留快照，绝不保留过期模型
           acc.cachedQuota = null;
@@ -535,6 +554,15 @@ export async function probeChannelQuotaSnapshot(channelId) {
               quotaTarget.tierName = confirmedInfo.tierName;
               quotaTarget.isPaidProOrUltra = confirmedInfo.isPaidProOrUltra;
               quotaTarget.hasArgonAccess = confirmedInfo.hasArgonAccess;
+              if (confirmedInfo.tierCode === "Pro") {
+                if (typeof confirmedInfo.paidProRestricted === "boolean") {
+                  quotaTarget.paidProRestricted = confirmedInfo.paidProRestricted;
+                }
+                quotaTarget.tierSubCode = confirmedInfo.tierSubCode || "pro";
+              } else {
+                delete quotaTarget.tierSubCode;
+                delete quotaTarget.paidProRestricted;
+              }
             }
           }
         }
@@ -586,10 +614,20 @@ export async function probeChannelQuotaSnapshot(channelId) {
           acc.tierName = chosenPrimary.tierName || acc.tierName;
           acc.tierConfirmed = Boolean(probeRes.tierSourceConfirmed || acc.tierConfirmed || chosenPrimary.probedVia);
           if (probeRes.userTier) acc.tierRaw = probeRes.userTier;
+          if (chosenPrimary.tierCode === "Pro") {
+            if (typeof chosenPrimary.paidProRestricted === "boolean") {
+              acc.paidProRestricted = chosenPrimary.paidProRestricted;
+            }
+            acc.tierSubCode = chosenPrimary.tierSubCode || "pro";
+          } else {
+            delete acc.tierSubCode;
+            delete acc.paidProRestricted;
+          }
         } else if (!acc.tierConfirmed) {
           acc.tierCode = "Unknown";
           acc.tierName = "Unknown";
         }
+        syncPersonalSubTiers(cfg);
         persistRefreshedPersonalTokens(cfg, acc, baseToken, false);
         diag.ok = true;
         probeDiagnosticByChannel.set(acc.id, diag);

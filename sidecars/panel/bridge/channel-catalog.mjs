@@ -878,12 +878,87 @@ function detectArgonAccessFromModels(rawModelsListOrMap, tierCode = "Unknown", p
   return false;
 }
 
+export const PERSONAL_TIER_KEYS = ["free", "plus", "pro_lite", "pro", "ultra"];
+
+/**
+ * 解析规范化算力等级路由指令（例如 "tier:pro_lite" -> "pro_lite"）。
+ * @param {string} spec 路由配置值
+ * @returns {string} 匹配到的规范等级键，非等级路由返回空字符串
+ */
+export function parseTierRouteSpec(spec) {
+  const s = String(spec || "").trim().toLowerCase();
+  if (!s.startsWith("tier:")) return "";
+  const key = s.slice(5).trim();
+  return PERSONAL_TIER_KEYS.includes(key) ? key : "";
+}
+
+/**
+ * 读取账号或配额快照的规范化个人等级键（free / plus / pro_lite / pro / ultra）。
+ * @param {object|null} acc 账号对象
+ * @returns {string}
+ */
+export function getPersonalAccountTierKey(acc) {
+  if (!acc || acc.channelType === "gcp" || acc.gcpProjectId) return "";
+  const rawCode = String(acc.tierCode || acc.cachedQuota?.tierCode || acc.cachedQuotaByPool?.daily?.tierCode || "").trim();
+  const tName = String(acc.tierName || acc.cachedQuota?.tierName || "").trim();
+  if (/^ultra$/i.test(rawCode) || /\bultra\b/i.test(tName)) return "ultra";
+  if (/^pro$/i.test(rawCode) || /\bpro\b/i.test(tName)) {
+    const subCode = String(
+      acc.tierSubCode || acc.cachedQuota?.tierSubCode || acc.cachedQuotaByPool?.daily?.tierSubCode || ""
+    ).trim().toLowerCase();
+    const isRestricted =
+      subCode === "pro_lite" ||
+      acc.paidProRestricted === true ||
+      acc.cachedQuota?.paidProRestricted === true ||
+      acc.cachedQuotaByPool?.daily?.paidProRestricted === true;
+    return isRestricted ? "pro_lite" : "pro";
+  }
+  if (/^plus$/i.test(rawCode) || /\bplus\b/i.test(tName)) return "plus";
+  if (/^free$/i.test(rawCode) || /\bfree\b|standard|starter/i.test(tName)) return "free";
+  return "";
+}
+
+/**
+ * 检测原始模型列表中是否存在“仅向 Ultra 和付费 Pro (paid Pro) 开放”的受限条目，
+ * 不依赖任何具体模型名即可识别合作/试用/受限 Pro 账号。
+ * @param {Array|object} rawModelsListOrMap 原始模型数组或字典
+ * @param {string} tierCode 基础等级码
+ * @returns {boolean|undefined} 返回 true/false 表示是否命中受限标记，无数据时返回 undefined
+ */
+export function detectPaidProRestrictionFromModels(rawModelsListOrMap, tierCode = "Unknown") {
+  if (tierCode !== "Pro" || !rawModelsListOrMap) return undefined;
+  const pairs = Array.isArray(rawModelsListOrMap)
+    ? rawModelsListOrMap.map((m) => [String(m?.modelId || m?.modelOrAlias?.model || m?.label || ""), m])
+    : (typeof rawModelsListOrMap === "object" ? Object.entries(rawModelsListOrMap) : []);
+  if (pairs.length === 0) return undefined;
+
+  for (const [k, m] of pairs) {
+    if (!m || typeof m !== "object") continue;
+    const tagTitle = String(m.tagTitle || m.tag || "").trim();
+    const isRestricted = Boolean(
+      m.disabled === true ||
+      m.isUnavailable === true ||
+      m.unavailable === true ||
+      /disabled$/i.test(String(k || "")) ||
+      /^(unavailable|upgrade|disabled)$/i.test(tagTitle)
+    );
+    if (!isRestricted) continue;
+    const desc = String(m.tagDescription || m.description || m.unavailableReason || "").trim();
+    if (!desc) continue;
+    if (/paid\s+pro|付费\s*pro|non[-\s]?trial\s+pro/i.test(desc)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export function detectPersonalAccountTier(
   rawModelsListOrMap,
   rawTierName = "",
   rawTierId = "",
   prevHasArgon = undefined,
-  prevTierCode = ""
+  prevTierCode = "",
+  prevPaidProRestricted = undefined
 ) {
   const combinedTier = `${rawTierName || ""} ${rawTierId || ""}`.trim();
   let tierCode = "";
@@ -911,12 +986,105 @@ export function detectPersonalAccountTier(
   }
 
   const hasArgonAccess = detectArgonAccessFromModels(rawModelsListOrMap, tierCode, prevHasArgon);
+  const detectedRestricted = detectPaidProRestrictionFromModels(rawModelsListOrMap, tierCode);
+  const paidProRestricted = tierCode === "Pro"
+    ? (detectedRestricted !== undefined
+        ? detectedRestricted
+        : (typeof prevPaidProRestricted === "boolean" ? prevPaidProRestricted : undefined))
+    : false;
+  const tierSubCode = tierCode === "Pro"
+    ? (paidProRestricted === true ? "pro_lite" : "pro")
+    : "";
+
   return {
     tierCode,
     tierName,
+    tierSubCode,
+    paidProRestricted,
     hasArgonAccess,
     isPaidProOrUltra: tierCode === "Ultra" || tierCode === "Pro"
   };
+}
+
+/**
+ * 基于“官方付费受限标记优先 + 池内 Pro 能力集相对覆盖率比对兜底”的零硬编码机制，
+ * 统一校准配置池内所有个人 Pro 账号的子等级（pro vs pro_lite）。
+ * @param {object} cfg 配置对象
+ */
+export function syncPersonalSubTiers(cfg) {
+  if (!cfg || !cfg.accounts || typeof cfg.accounts !== "object") return;
+  const collectModelSet = (acc) => {
+    const models = acc?.cachedQuotaByPool?.daily?.availableModels || acc?.cachedQuota?.availableModels || [];
+    const set = new Set();
+    for (const m of models) {
+      const lbl = stripModelVariantSuffix(String(m?.label || m?.modelId || "").trim()).toLowerCase();
+      if (!lbl || isOrchestratorModelLabelOrId(lbl) || isLegacyDeprecatedModel(lbl)) continue;
+      set.add(lbl);
+    }
+    return set;
+  };
+
+  const proEntries = [];
+  for (const acc of Object.values(cfg.accounts)) {
+    if (!acc || acc.channelType === "gcp" || acc.gcpProjectId) continue;
+    if (acc.tierCode !== "Pro") {
+      delete acc.tierSubCode;
+      if (acc.tierCode !== "Unknown") delete acc.paidProRestricted;
+      for (const q of [acc.cachedQuota, acc.cachedQuotaByPool?.daily]) {
+        if (q && typeof q === "object") {
+          delete q.tierSubCode;
+          delete q.paidProRestricted;
+        }
+      }
+      continue;
+    }
+    const modelSet = collectModelSet(acc);
+    const explicitRestricted =
+      acc.paidProRestricted === true ||
+      acc.cachedQuotaByPool?.daily?.paidProRestricted === true ||
+      acc.cachedQuota?.paidProRestricted === true;
+    proEntries.push({ acc, modelSet, explicitRestricted });
+  }
+
+  let refSet = new Set();
+  for (const item of proEntries) {
+    if (!item.explicitRestricted && item.modelSet.size > refSet.size) {
+      refSet = item.modelSet;
+    }
+  }
+  if (refSet.size === 0) {
+    for (const item of proEntries) {
+      if (item.modelSet.size > refSet.size) refSet = item.modelSet;
+    }
+  }
+
+  for (const { acc, modelSet, explicitRestricted } of proEntries) {
+    let isLite = explicitRestricted;
+    if (!isLite && refSet.size >= 4 && modelSet.size > 0) {
+      let covered = 0;
+      for (const k of refSet) {
+        if (modelSet.has(k)) covered++;
+      }
+      const missing = refSet.size - covered;
+      if ((covered / refSet.size) < 0.75 && missing >= 2) {
+        isLite = true;
+      }
+    }
+    const nextSub = isLite ? "pro_lite" : "pro";
+    acc.tierSubCode = nextSub;
+    if (isLite) {
+      acc.paidProRestricted = true;
+    } else if (acc.paidProRestricted === undefined) {
+      acc.paidProRestricted = false;
+    }
+    for (const q of [acc.cachedQuota, acc.cachedQuotaByPool?.daily]) {
+      if (q && typeof q === "object") {
+        q.tierSubCode = nextSub;
+        if (isLite) q.paidProRestricted = true;
+        else if (q.paidProRestricted === undefined) q.paidProRestricted = false;
+      }
+    }
+  }
 }
 
 /**
@@ -1172,14 +1340,18 @@ export function sanitizeCachedQuotaModels(
   if (!cachedQuota || typeof cachedQuota !== "object") return cachedQuota;
   const rawList = Array.isArray(cachedQuota.availableModels) ? cachedQuota.availableModels : [];
   const hasHint = Boolean(preferHint && (hintTierName || hintTierId));
+  const prevSubRestricted = hasHint
+    ? undefined
+    : (typeof cachedQuota.paidProRestricted === "boolean" ? cachedQuota.paidProRestricted : undefined);
   const tierInfo = isGcp
-    ? { tierCode: "GCP", tierName: hintTierName || "Agent Platform", hasArgonAccess: true, isPaidProOrUltra: false }
+    ? { tierCode: "GCP", tierName: hintTierName || "Agent Platform", tierSubCode: "", paidProRestricted: false, hasArgonAccess: true, isPaidProOrUltra: false }
     : detectPersonalAccountTier(
         rawList,
         hasHint ? (hintTierName || "") : (cachedQuota.tierName || hintTierName || ""),
         hasHint ? (hintTierId || "") : (hintTierId || cachedQuota.tierCode || ""),
         hasHint ? undefined : cachedQuota.hasArgonAccess,
-        hasHint ? (hintTierId || "") : (cachedQuota.tierCode || hintTierId || "")
+        hasHint ? (hintTierId || "") : (cachedQuota.tierCode || hintTierId || ""),
+        prevSubRestricted
       );
   const hasArgonAccess = tierInfo.hasArgonAccess;
   const isPaidProOrUltra = tierInfo.isPaidProOrUltra;
@@ -1259,6 +1431,8 @@ export function sanitizeCachedQuotaModels(
     ...cachedQuota,
     tierCode: tierInfo.tierCode,
     tierName: tierInfo.tierName,
+    ...(tierInfo.tierSubCode ? { tierSubCode: tierInfo.tierSubCode } : {}),
+    ...(typeof tierInfo.paidProRestricted === "boolean" ? { paidProRestricted: tierInfo.paidProRestricted } : {}),
     hasArgonAccess,
     isPaidProOrUltra,
     isGcpUnlimited: isGcp ? true : Boolean(cachedQuota.isGcpUnlimited),
@@ -1697,6 +1871,7 @@ export function normalizeAccountChannels(cfg) {
   delete cfg.activeMode;
   delete cfg.activeProjectId;
   cfg.accounts = nextAccounts;
+  syncPersonalSubTiers(cfg);
 }
 
 export function addOrUpdatePersonalChannelCard(email) {

@@ -327,7 +327,44 @@ function getPoolModelsForScope(isGcpScope = false) {
   return Array.from(modelMap.values());
 }
 
-function buildRouteOptionsList(modelObj = null, isGcpScope = false) {
+const PERSONAL_TIER_KEYS_UI = ["free", "plus", "pro_lite", "pro", "ultra"];
+
+function parseTierRouteSpecUi(spec) {
+  const s = String(spec || "").trim().toLowerCase();
+  if (!s.startsWith("tier:")) return "";
+  const key = s.slice(5).trim();
+  return PERSONAL_TIER_KEYS_UI.includes(key) ? key : "";
+}
+
+function getTierBadgeMetaUi(tierKey) {
+  const t = I18N[currentLang];
+  if (tierKey === "ultra") {
+    return { badgeType: "ultra", badgeText: "Ultra", tierLabel: t.tierLabelUltra || "Ultra" };
+  }
+  if (tierKey === "pro_lite") {
+    return {
+      badgeType: "pro-lite",
+      badgeText: t.channelProLiteBadge || "Pro Lite",
+      tierLabel: t.tierLabelProLite || "Pro Lite"
+    };
+  }
+  if (tierKey === "pro") {
+    return {
+      badgeType: "personal",
+      badgeText: t.channelPersonalBadge || "Pro",
+      tierLabel: t.tierLabelPro || "Pro"
+    };
+  }
+  if (tierKey === "plus") {
+    return { badgeType: "plus", badgeText: "Plus", tierLabel: t.tierLabelPlus || "Plus" };
+  }
+  if (tierKey === "free") {
+    return { badgeType: "free", badgeText: "Free", tierLabel: t.tierLabelFree || "Free" };
+  }
+  return { badgeType: "unknown", badgeText: t.channelUnknownBadge || "", tierLabel: tierKey };
+}
+
+function buildRouteOptionsList(modelObj = null, isGcpScope = false, currentSelectedRoute = "") {
   const t = I18N[currentLang];
   if (isGcpScope) {
     // GCP 通道专属路由表：无自动轮询，不混入任何个人账号，仅提供「跟随当前 GCP 通道」与手选其他已收录 GCP 通道
@@ -361,14 +398,43 @@ function buildRouteOptionsList(modelObj = null, isGcpScope = false) {
   ];
 
   const seenValues = new Set(["follow_current", "auto_poll"]);
+  const eligiblePersonalAccounts = [];
+  const tierSet = new Set();
 
   for (const acc of (state.accounts || [])) {
     const isGcp = acc.channelType === "gcp" || Boolean(acc.gcpProjectId);
-    // 个人通道路由表仅列出个人账号（Free / Plus / Pro / Ultra），绝不混入 GCP 通道
+    // 个人通道路由表仅列出个人账号（Free / Plus / Pro Lite / Pro / Ultra），绝不混入 GCP 通道
     if (isGcp) continue;
     if (modelObj && !findModelInChannel(acc, modelObj)) {
       continue;
     }
+    eligiblePersonalAccounts.push(acc);
+    const tKey = typeof getPersonalAccountTierKeyUi === "function" ? getPersonalAccountTierKeyUi(acc) : "";
+    if (tKey) tierSet.add(tKey);
+  }
+
+  const currentTierKey = parseTierRouteSpecUi(currentSelectedRoute);
+  const allowFallback = state.routing?.tierFallbackToAny !== false;
+  if (tierSet.size >= 2 || (currentTierKey && tierSet.has(currentTierKey))) {
+    const prefix = allowFallback
+      ? (t.routeTierPriorityPrefix || "优先轮询 · ")
+      : (t.routeTierStrictPrefix || "仅轮询 · ");
+    for (const tKey of PERSONAL_TIER_KEYS_UI) {
+      if (!tierSet.has(tKey)) continue;
+      const val = `tier:${tKey}`;
+      if (seenValues.has(val)) continue;
+      seenValues.add(val);
+      const meta = getTierBadgeMetaUi(tKey);
+      options.push({
+        value: val,
+        label: `${prefix}${meta.tierLabel}`,
+        badgeType: meta.badgeType,
+        badgeText: meta.badgeText
+      });
+    }
+  }
+
+  for (const acc of eligiblePersonalAccounts) {
     const val = `account:${acc.id}`;
     if (seenValues.has(val)) continue;
     seenValues.add(val);
@@ -385,7 +451,7 @@ function buildRouteOptionsList(modelObj = null, isGcpScope = false) {
 }
 
 function createCustomDropdown(selectedValue, onSelect, modelObj = null, isGcpScope = false) {
-  const options = buildRouteOptionsList(modelObj, isGcpScope);
+  const options = buildRouteOptionsList(modelObj, isGcpScope, selectedValue);
   const activeOpt = options.find((o) => o.value === selectedValue) || options[0];
 
   const wrapper = document.createElement("div");
@@ -617,63 +683,83 @@ function isChannelTemporarilyBlockedUi(acc) {
   return errAt > 0 && (nowMs - errAt) < 600000 && /#3501|valid license|\b401\b|\b403\b/i.test(errMsg);
 }
 
-function selectAutoPollChannel(accounts, m, activeChannelId, thresholdPct = 5) {
+function selectAutoPollChannel(accounts, m, activeChannelId, thresholdPct = 5, opts = null) {
   const preferredPool = "daily";
   const poolOrder = ["daily"];
-  const candidates = [];
-  for (const acc of accounts) {
-    const isGcp = acc.channelType === "gcp" || Boolean(acc.gcpProjectId);
-    if (isGcp || isChannelTemporarilyBlockedUi(acc)) continue;
-    for (const pool of poolOrder) {
-      const poolSnap = acc.cachedQuotaByPool?.[pool] || (pool === preferredPool ? acc.cachedQuota : null);
-      if (!poolSnap) continue;
-      const matched = findModelInQuotaSnapshot(poolSnap, m);
-      if (!matched) continue;
-      const dual = extractModelDualQuotaUi(poolSnap, matched, m);
-      if (dual.weeklyPct <= 0 || dual.fiveHourPct <= 0) continue;
+  const preferredTierKey = String(opts?.preferredTierKey || "").trim().toLowerCase();
+  const allowFallback = opts?.allowFallback !== false;
 
-      const weeklyLow = dual.weeklyPct <= thresholdPct;
-      const effectiveWeeklyResetMs = dual.weeklyResetMs + (weeklyLow ? WEEK_PENALTY_MS : 0);
-      const fiveHourAboveThreshold = dual.fiveHourPct > thresholdPct;
+  const collectAndRank = (tierFilterKey = "") => {
+    const candidates = [];
+    for (const acc of accounts) {
+      const isGcp = acc.channelType === "gcp" || Boolean(acc.gcpProjectId);
+      if (isGcp || isChannelTemporarilyBlockedUi(acc)) continue;
+      if (tierFilterKey) {
+        const accTier = typeof getPersonalAccountTierKeyUi === "function" ? getPersonalAccountTierKeyUi(acc) : "";
+        if (accTier !== tierFilterKey) continue;
+      }
+      for (const pool of poolOrder) {
+        const poolSnap = acc.cachedQuotaByPool?.[pool] || (pool === preferredPool ? acc.cachedQuota : null);
+        if (!poolSnap) continue;
+        const matched = findModelInQuotaSnapshot(poolSnap, m);
+        if (!matched) continue;
+        const dual = extractModelDualQuotaUi(poolSnap, matched, m);
+        if (dual.weeklyPct <= 0 || dual.fiveHourPct <= 0) continue;
 
-      candidates.push({
-        acc,
-        pool,
-        matched,
-        dual,
-        isGcp: false,
-        weeklyPct: dual.weeklyPct,
-        fiveHourPct: dual.fiveHourPct,
-        fiveHourAboveThreshold,
-        effectiveWeeklyResetMs,
-        fiveHourResetMs: dual.fiveHourResetMs,
-        isPreferredPool: pool === preferredPool,
-        isCurrent: acc.id === activeChannelId
-      });
+        const weeklyLow = dual.weeklyPct <= thresholdPct;
+        const effectiveWeeklyResetMs = dual.weeklyResetMs + (weeklyLow ? WEEK_PENALTY_MS : 0);
+        const fiveHourAboveThreshold = dual.fiveHourPct > thresholdPct;
+
+        candidates.push({
+          acc,
+          pool,
+          matched,
+          dual,
+          isGcp: false,
+          weeklyPct: dual.weeklyPct,
+          fiveHourPct: dual.fiveHourPct,
+          fiveHourAboveThreshold,
+          effectiveWeeklyResetMs,
+          fiveHourResetMs: dual.fiveHourResetMs,
+          isPreferredPool: pool === preferredPool,
+          isCurrent: acc.id === activeChannelId
+        });
+      }
     }
+    if (candidates.length === 0) return null;
+
+    candidates.sort((a, b) => {
+      if (a.fiveHourAboveThreshold !== b.fiveHourAboveThreshold) {
+        return a.fiveHourAboveThreshold ? -1 : 1;
+      }
+      // 第一层：先周额度重置时间升序
+      if (Math.abs(a.effectiveWeeklyResetMs - b.effectiveWeeklyResetMs) > 120000) {
+        return a.effectiveWeeklyResetMs - b.effectiveWeeklyResetMs;
+      }
+      // 第二层：再 5 小时额度重置时间升序
+      if (Math.abs(a.fiveHourResetMs - b.fiveHourResetMs) > 60000) {
+        return a.fiveHourResetMs - b.fiveHourResetMs;
+      }
+      if (a.isPreferredPool !== b.isPreferredPool) return a.isPreferredPool ? -1 : 1;
+      if (a.isCurrent !== b.isCurrent) return a.isCurrent ? -1 : 1;
+      if (b.weeklyPct !== a.weeklyPct) return b.weeklyPct - a.weeklyPct;
+      if (b.fiveHourPct !== a.fiveHourPct) return b.fiveHourPct - a.fiveHourPct;
+      return 0;
+    });
+
+    return candidates[0];
+  };
+
+  if (preferredTierKey) {
+    const tierHit = collectAndRank(preferredTierKey);
+    if (tierHit) return { ...tierHit, matchedTier: true, fallbackUsed: false };
+    if (!allowFallback) return null;
+    const fbHit = collectAndRank("");
+    return fbHit ? { ...fbHit, matchedTier: false, fallbackUsed: true } : null;
   }
-  if (candidates.length === 0) return null;
 
-  candidates.sort((a, b) => {
-    if (a.fiveHourAboveThreshold !== b.fiveHourAboveThreshold) {
-      return a.fiveHourAboveThreshold ? -1 : 1;
-    }
-    // 第一层：先周额度重置时间升序
-    if (Math.abs(a.effectiveWeeklyResetMs - b.effectiveWeeklyResetMs) > 120000) {
-      return a.effectiveWeeklyResetMs - b.effectiveWeeklyResetMs;
-    }
-    // 第二层：再 5 小时额度重置时间升序
-    if (Math.abs(a.fiveHourResetMs - b.fiveHourResetMs) > 60000) {
-      return a.fiveHourResetMs - b.fiveHourResetMs;
-    }
-    if (a.isPreferredPool !== b.isPreferredPool) return a.isPreferredPool ? -1 : 1;
-    if (a.isCurrent !== b.isCurrent) return a.isCurrent ? -1 : 1;
-    if (b.weeklyPct !== a.weeklyPct) return b.weeklyPct - a.weeklyPct;
-    if (b.fiveHourPct !== a.fiveHourPct) return b.fiveHourPct - a.fiveHourPct;
-    return 0;
-  });
-
-  return candidates[0];
+  const best = collectAndRank("");
+  return best ? { ...best, matchedTier: true, fallbackUsed: false } : null;
 }
 
 function parseRouteAccountRef(spec) {
@@ -697,28 +783,47 @@ function formatModelQuotaSubText(m, selectedRoute) {
   const thresholdPct = Number(state.routing?.lowQuotaThresholdPct ?? 5);
   const activePool = getActivePersonalPoolUi();
 
-  if (selectedRoute === "auto_poll") {
-    const picked = selectAutoPollChannel(accounts, m, activeChannelId, thresholdPct);
+  const targetTierKey = parseTierRouteSpecUi(selectedRoute);
+  if (selectedRoute === "auto_poll" || targetTierKey) {
+    const allowFallback = state.routing?.tierFallbackToAny !== false;
+    const picked = selectAutoPollChannel(
+      accounts,
+      m,
+      activeChannelId,
+      thresholdPct,
+      targetTierKey ? { preferredTierKey: targetTierKey, allowFallback } : null
+    );
+    const tierMeta = targetTierKey ? getTierBadgeMetaUi(targetTierKey) : null;
+    const prefixText = targetTierKey
+      ? (picked?.fallbackUsed
+          ? `${tierMeta.tierLabel} ${t.tierSubFallbackTag || "已耗尽 · 回退至 "}`
+          : (allowFallback
+              ? `${tierMeta.tierLabel}${t.tierSubPrioritySuffix || " 优先 · "}`
+              : `${t.tierSubStrictPrefix || "仅限 "}${tierMeta.tierLabel} · `))
+      : t.autoPollSubPrefix;
     if (picked) {
       const { acc: bestAcc, matched: bestModel, dual, isGcp } = picked;
       const shortName = isGcp
         ? `${t.channelGcpBadge}·${bestAcc.gcpProjectId.slice(0, 12)}`
         : bestAcc.email.split("@")[0];
       if (isGcp) {
-        return `${t.autoPollSubPrefix}${shortName} · ${t.gcpRouteSubUnlimited}`;
+        return `${prefixText}${shortName} · ${t.gcpRouteSubUnlimited}`;
       }
       const wkCountdown = formatResetCountdown(dual?.weeklyResetTime || bestModel.resetTime);
       if (dual?.hasDistinct5h) {
         const wkLabel = currentLang === "zh" ? "周" : "Wk";
         return wkCountdown
-          ? `${t.autoPollSubPrefix}${shortName} · ${wkLabel} ${dual.weeklyPct}% (${wkCountdown}) · 5h ${dual.fiveHourPct}%`
-          : `${t.autoPollSubPrefix}${shortName} · ${wkLabel} ${dual.weeklyPct}% · 5h ${dual.fiveHourPct}%`;
+          ? `${prefixText}${shortName} · ${wkLabel} ${dual.weeklyPct}% (${wkCountdown}) · 5h ${dual.fiveHourPct}%`
+          : `${prefixText}${shortName} · ${wkLabel} ${dual.weeklyPct}% · 5h ${dual.fiveHourPct}%`;
       }
       return wkCountdown
-        ? `${t.autoPollSubPrefix}${shortName} · ${t.remainingLabel} ${dual ? dual.weeklyPct : bestModel.remainingPct}% · ${t.resetsInPrefix}${wkCountdown}${t.resetsInSuffix}`
-        : `${t.autoPollSubPrefix}${shortName} · ${t.remainingLabel} ${dual ? dual.weeklyPct : bestModel.remainingPct}%`;
+        ? `${prefixText}${shortName} · ${t.remainingLabel} ${dual ? dual.weeklyPct : bestModel.remainingPct}% · ${t.resetsInPrefix}${wkCountdown}${t.resetsInSuffix}`
+        : `${prefixText}${shortName} · ${t.remainingLabel} ${dual ? dual.weeklyPct : bestModel.remainingPct}%`;
     }
-    return `${t.autoPollSubPrefix}${currentLang === "zh" ? "当前无可用额度账号" : "No quota available"}`;
+    if (targetTierKey && !allowFallback) {
+      return `${tierMeta.tierLabel} · ${t.tierSubStrictEmpty || "当前等级无可用额度（自动回退已关闭）"}`;
+    }
+    return `${prefixText}${currentLang === "zh" ? "当前无可用额度账号" : "No quota available"}`;
   }
 
   const formatPersonalAccountModelSub = (targetAcc, explicitPool = "") => {
@@ -800,10 +905,45 @@ function renderRoutingList() {
     ? (state.routing?.gcpModels || {})
     : (state.routing?.models || {});
   const routeScope = isGcpScope ? "gcp" : "personal";
+  const allowTierFallback = state.routing?.tierFallbackToAny !== false;
+
+  const fallbackBarEl = document.getElementById("routingFallbackBar");
+  const fallbackChkEl = document.getElementById("chkTierFallback");
+  const fallbackTitleEl = document.getElementById("tierFallbackTitle");
+  const fallbackHintEl = document.getElementById("tierFallbackHint");
+  if (fallbackBarEl) {
+    const distinctPersonalTiers = new Set();
+    for (const acc of (state.accounts || [])) {
+      const isGcpAcc = acc.channelType === "gcp" || Boolean(acc.gcpProjectId);
+      if (isGcpAcc) continue;
+      const tk = typeof getPersonalAccountTierKeyUi === "function" ? getPersonalAccountTierKeyUi(acc) : "";
+      if (tk) distinctPersonalTiers.add(tk);
+    }
+    const hasSavedTierRoute = !isGcpScope && models.some((m) => Boolean(parseTierRouteSpecUi(routeMap[m.modelId])));
+    const showFallbackBar = !isGcpScope && (distinctPersonalTiers.size >= 2 || hasSavedTierRoute);
+    fallbackBarEl.style.display = showFallbackBar ? "block" : "none";
+    if (showFallbackBar) {
+      if (fallbackChkEl) {
+        fallbackChkEl.checked = allowTierFallback;
+        if (!("switch" in HTMLInputElement.prototype)) {
+          fallbackChkEl.setAttribute("aria-checked", allowTierFallback ? "true" : "false");
+        }
+      }
+      if (fallbackTitleEl) {
+        fallbackTitleEl.textContent = t.tierFallbackSwitchTitle || "等级耗尽自动回退";
+      }
+      if (fallbackHintEl) {
+        fallbackHintEl.textContent = allowTierFallback
+          ? (t.tierFallbackOnHint || "指定等级耗尽或 429 时自动回退到其他可用账号")
+          : (t.tierFallbackOffHint || "严格锁定在所选等级内轮询，绝不消耗其他等级额度");
+      }
+    }
+  }
 
   const buildRoutingRow = (m) => {
     let selectedRoute = routeMap[m.modelId] || "follow_current";
-    if (isGcpScope && selectedRoute === "auto_poll") {
+    const parsedTier = parseTierRouteSpecUi(selectedRoute);
+    if (isGcpScope && (selectedRoute === "auto_poll" || parsedTier)) {
       selectedRoute = "follow_current";
     }
     const parsedSelRef = parseRouteAccountRef(selectedRoute);
@@ -1391,7 +1531,7 @@ async function saveRoutingRule(payload) {
       state = data.snapshot;
       renderAll();
     }
-    showToast(I18N[currentLang].toastRoutingSaved);
+    showToast(payload?.customToast || I18N[currentLang].toastRoutingSaved);
   } catch (e) {}
 }
 
@@ -1602,7 +1742,35 @@ function dataFrontendVer(snap) {
   return snap?.frontendVersion || "";
 }
 
+function initTierFallbackSwitch() {
+  const chk = document.getElementById("chkTierFallback");
+  if (!chk || chk.dataset.boundSwitch) return;
+  chk.dataset.boundSwitch = "1";
+  const supportsNativeSwitch = "switch" in HTMLInputElement.prototype;
+  if (!supportsNativeSwitch) {
+    chk.classList.add("switch-fallback");
+    chk.setAttribute("role", "switch");
+    chk.setAttribute("aria-checked", chk.checked ? "true" : "false");
+  }
+  chk.addEventListener("change", () => {
+    const enabled = Boolean(chk.checked);
+    if (!state.routing || typeof state.routing !== "object") state.routing = {};
+    state.routing.tierFallbackToAny = enabled;
+    if (!supportsNativeSwitch) {
+      chk.setAttribute("aria-checked", enabled ? "true" : "false");
+    }
+    renderRoutingList();
+    const t = I18N[currentLang];
+    saveRoutingRule({
+      tierFallbackToAny: enabled,
+      routeScope: "personal",
+      customToast: enabled ? t.toastTierFallbackSavedOn : t.toastTierFallbackSavedOff
+    });
+  });
+}
+
 applyI18n();
+initTierFallbackSwitch();
 bindPanelVisibilityListeners();
 if (isPanelActuallyVisible()) {
   lastVisibleRefreshAt = Date.now();

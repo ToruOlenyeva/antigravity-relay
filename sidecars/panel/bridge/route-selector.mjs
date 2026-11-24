@@ -17,8 +17,12 @@ import {
   findQuotaGroupForModel,
   isGuessedOrchestratorSlug,
   isOrchestratorModelLabelOrId,
-  resolveUnderlyingModelFamilyForOrchestrator
+  resolveUnderlyingModelFamilyForOrchestrator,
+  getPersonalAccountTierKey,
+  parseTierRouteSpec
 } from "./quota-probe.mjs";
+
+export { parseTierRouteSpec };
 
 const GCP_SIG_BIN_MAGIC = Buffer.from([0x01, 0x8f, 0x3d, 0x6b, 0x5f]);
 
@@ -286,7 +290,7 @@ export function hasActivePersonalRoutingConfig(_cfg) {
   return true;
 }
 
-export function selectBestPersonalRouteCandidate(baseFamily, cfg, excludedIds = null) {
+export function selectBestPersonalRouteCandidate(baseFamily, cfg, excludedIds = null, opts = null) {
   const accounts = Object.values(cfg?.accounts || {});
   const activeEmail = (cfg?.__meta__?.activeEmail || "").trim();
   const activeChannelId = activeEmail ? `${activeEmail}#personal` : "";
@@ -295,6 +299,8 @@ export function selectBestPersonalRouteCandidate(baseFamily, cfg, excludedIds = 
   const thresholdPct = Number(cfg?.routing?.lowQuotaThresholdPct ?? 5);
   const targetLower = (baseFamily || "").toLowerCase();
   const excludeSet = excludedIds instanceof Set ? excludedIds : new Set(Array.isArray(excludedIds) ? excludedIds : []);
+  const preferredTierKey = String(opts?.preferredTierKey || "").trim().toLowerCase();
+  const allowFallback = opts?.allowFallback !== false;
   const nowMs = Date.now();
   const isTemporarilyBlocked = (acc) => {
     const blockedUntil = Number(acc?.routeBlockedUntil || 0);
@@ -303,68 +309,84 @@ export function selectBestPersonalRouteCandidate(baseFamily, cfg, excludedIds = 
     const errMsg = String(acc?.lastProbeError?.message || "");
     return errAt > 0 && (nowMs - errAt) < 600000 && /#3501|valid license|\b401\b|\b403\b/i.test(errMsg);
   };
-  const candidates = [];
 
-  for (const acc of accounts) {
-    const isGcp = acc.channelType === "gcp" || Boolean(acc.gcpProjectId);
-    if (isGcp || acc.authExpired || excludeSet.has(acc.id) || isTemporarilyBlocked(acc)) continue;
+  const collectAndRank = (tierFilterKey = "") => {
+    const candidates = [];
+    for (const acc of accounts) {
+      const isGcp = acc.channelType === "gcp" || Boolean(acc.gcpProjectId);
+      if (isGcp || acc.authExpired || excludeSet.has(acc.id) || isTemporarilyBlocked(acc)) continue;
+      if (tierFilterKey && getPersonalAccountTierKey(acc) !== tierFilterKey) continue;
 
-    for (const poolKey of poolsOrder) {
-      if (excludeSet.has(`${acc.id}@${poolKey}`)) continue;
-      const poolQuota =
-        acc.cachedQuotaByPool?.[poolKey] ||
-        (poolKey === (acc.cachedQuota?.pool || acc.cachedQuota?.quotaPool || preferredPool) ? acc.cachedQuota : null);
-      if (!poolQuota || typeof poolQuota !== "object") continue;
+      for (const poolKey of poolsOrder) {
+        if (excludeSet.has(`${acc.id}@${poolKey}`)) continue;
+        const poolQuota =
+          acc.cachedQuotaByPool?.[poolKey] ||
+          (poolKey === (acc.cachedQuota?.pool || acc.cachedQuota?.quotaPool || preferredPool) ? acc.cachedQuota : null);
+        if (!poolQuota || typeof poolQuota !== "object") continue;
 
-      const models = poolQuota.availableModels || [];
-      const matched = models.find((m) => {
-        const id = (m.modelId || m.label || "").toLowerCase();
-        if (id === targetLower) return true;
-        return Array.isArray(m.variantIds) && m.variantIds.some((v) => String(v).toLowerCase() === targetLower);
-      });
-      if (!matched && targetLower) continue;
+        const models = poolQuota.availableModels || [];
+        const matched = models.find((m) => {
+          const id = (m.modelId || m.label || "").toLowerCase();
+          if (id === targetLower) return true;
+          return Array.isArray(m.variantIds) && m.variantIds.some((v) => String(v).toLowerCase() === targetLower);
+        });
+        if (!matched && targetLower) continue;
 
-      const dual = extractModelDualQuota(poolQuota, matched, baseFamily);
-      if (dual.weeklyPct <= 0 || dual.fiveHourPct <= 0) continue;
+        const dual = extractModelDualQuota(poolQuota, matched, baseFamily);
+        if (dual.weeklyPct <= 0 || dual.fiveHourPct <= 0) continue;
 
-      const weeklyLow = dual.weeklyPct <= thresholdPct;
-      const effectiveWeeklyResetMs = dual.weeklyResetMs + (weeklyLow ? WEEK_PENALTY_MS : 0);
-      const fiveHourAboveThreshold = dual.fiveHourPct > thresholdPct;
+        const weeklyLow = dual.weeklyPct <= thresholdPct;
+        const effectiveWeeklyResetMs = dual.weeklyResetMs + (weeklyLow ? WEEK_PENALTY_MS : 0);
+        const fiveHourAboveThreshold = dual.fiveHourPct > thresholdPct;
 
-      candidates.push({
-        acc,
-        pool: poolKey,
-        upstreamHostname: getCloudCodeHostnameForPool(poolKey, false),
-        matched,
-        weeklyPct: dual.weeklyPct,
-        fiveHourPct: dual.fiveHourPct,
-        fiveHourAboveThreshold,
-        effectiveWeeklyResetMs,
-        fiveHourResetMs: dual.fiveHourResetMs,
-        isCurrentAcc: acc.id === activeChannelId,
-        isPreferredPool: poolKey === preferredPool
-      });
+        candidates.push({
+          acc,
+          pool: poolKey,
+          upstreamHostname: getCloudCodeHostnameForPool(poolKey, false),
+          matched,
+          weeklyPct: dual.weeklyPct,
+          fiveHourPct: dual.fiveHourPct,
+          fiveHourAboveThreshold,
+          effectiveWeeklyResetMs,
+          fiveHourResetMs: dual.fiveHourResetMs,
+          isCurrentAcc: acc.id === activeChannelId,
+          isPreferredPool: poolKey === preferredPool
+        });
+      }
     }
+
+    if (candidates.length === 0) return null;
+    candidates.sort((a, b) => {
+      if (a.fiveHourAboveThreshold !== b.fiveHourAboveThreshold) {
+        return a.fiveHourAboveThreshold ? -1 : 1;
+      }
+      if (Math.abs(a.effectiveWeeklyResetMs - b.effectiveWeeklyResetMs) > 120000) {
+        return a.effectiveWeeklyResetMs - b.effectiveWeeklyResetMs;
+      }
+      if (Math.abs(a.fiveHourResetMs - b.fiveHourResetMs) > 60000) {
+        return a.fiveHourResetMs - b.fiveHourResetMs;
+      }
+      if (a.isPreferredPool !== b.isPreferredPool) return a.isPreferredPool ? -1 : 1;
+      if (a.isCurrentAcc !== b.isCurrentAcc) return a.isCurrentAcc ? -1 : 1;
+      if (b.weeklyPct !== a.weeklyPct) return b.weeklyPct - a.weeklyPct;
+      if (b.fiveHourPct !== a.fiveHourPct) return b.fiveHourPct - a.fiveHourPct;
+      return 0;
+    });
+    return candidates[0];
+  };
+
+  if (preferredTierKey) {
+    const matchedTierCand = collectAndRank(preferredTierKey);
+    if (matchedTierCand) {
+      return { ...matchedTierCand, matchedTier: true, fallbackUsed: false };
+    }
+    if (!allowFallback) return null;
+    const fallbackCand = collectAndRank("");
+    return fallbackCand ? { ...fallbackCand, matchedTier: false, fallbackUsed: true } : null;
   }
 
-  if (candidates.length === 0) return null;
-  candidates.sort((a, b) => {
-    if (a.fiveHourAboveThreshold !== b.fiveHourAboveThreshold) {
-      return a.fiveHourAboveThreshold ? -1 : 1;
-    }
-    if (Math.abs(a.effectiveWeeklyResetMs - b.effectiveWeeklyResetMs) > 120000) {
-      return a.effectiveWeeklyResetMs - b.effectiveWeeklyResetMs;
-    }
-    if (Math.abs(a.fiveHourResetMs - b.fiveHourResetMs) > 60000) {
-      return a.fiveHourResetMs - b.fiveHourResetMs;
-    }
-    if (a.isPreferredPool !== b.isPreferredPool) return a.isPreferredPool ? -1 : 1;
-    if (a.isCurrentAcc !== b.isCurrentAcc) return a.isCurrentAcc ? -1 : 1;
-    if (b.weeklyPct !== a.weeklyPct) return b.weeklyPct - a.weeklyPct;
-    if (b.fiveHourPct !== a.fiveHourPct) return b.fiveHourPct - a.fiveHourPct;
-    return 0;
-  });
-  return candidates[0];
+  const best = collectAndRank("");
+  return best ? { ...best, matchedTier: true, fallbackUsed: false } : null;
 }
 
 export function selectBestPersonalChannelForModel(baseFamily, cfg, excludedIds = null) {
