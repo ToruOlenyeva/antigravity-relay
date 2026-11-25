@@ -46,15 +46,14 @@
     <div class="quota-list" id="quotaGroupsContainer"></div>
   </div>
 
-  <!-- 2. 当前会话统计（独立板块：展示本实例当前项目会话细分、项目汇总按钮切换、会话签名识别与清除签名） -->
+  <!-- 2. 会话思维签名（独立板块：展示本实例当前项目各会话签名来源识别与清除签名抽屉） -->
   <div class="section-card">
     <div class="section-header">
       <div class="telemetry-header-left">
-        <span class="section-title" id="secTelemetryTitle">当前会话统计</span>
+        <span class="section-title" id="secTelemetryTitle">会话思维签名</span>
         <span id="telemetrySigBadgeMount"></span>
       </div>
       <div class="btn-group">
-        <button class="secondary small" id="btnToggleTelemetryScope" onclick="toggleTelemetryScopeMode()">项目汇总</button>
         <button class="secondary small" id="btnScrubSignatures" onclick="toggleScrubSignaturesDrawer()">清除签名</button>
       </div>
     </div>
@@ -62,10 +61,8 @@
     <!-- 手动清除思维签名选择抽屉（提供仅清除当前会话与全项目扫描清除不匹配签名两种模式） -->
     <div class="gcp-drawer" id="scrubSigsDrawer" style="display: none;"></div>
 
-    <!-- 项目内会话细分切换选择器 -->
+    <!-- 项目内会话签名选择下拉框 -->
     <div id="telemetryConvSelectorMount"></div>
-
-    <div id="sessionTelemetryMount"></div>
   </div>
 
   <!-- 3. 通道与账号管理（个人账号通道与 GCP 计费通道分组展示） -->

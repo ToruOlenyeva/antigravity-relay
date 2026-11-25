@@ -98,14 +98,6 @@ function createChannelBadgeNode(badgeType, badgeText, badgeSubText = "") {
   return badge;
 }
 
-function formatCompactTokenCount(num) {
-  const n = Number(num || 0);
-  if (!Number.isFinite(n) || n <= 0) return "0";
-  if (n >= 1000000) return `${(n / 1000000).toFixed(2)}M`;
-  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
-  return String(Math.round(n));
-}
-
 function getSignatureBadgeDisplay(sigStatus, t) {
   const st = sigStatus || { sigType: "none", mismatched: false };
   const sigType = st.sigType || "none";
@@ -133,7 +125,7 @@ function getSignatureBadgeDisplay(sigStatus, t) {
   };
 }
 
-function renderTelemetryConvSelector(tel, viewedItem, isProjectTotalView) {
+function renderTelemetryConvSelector(tel, viewedItem) {
   const mount = document.getElementById("telemetryConvSelectorMount");
   if (!mount) return;
   mount.innerHTML = "";
@@ -141,48 +133,12 @@ function renderTelemetryConvSelector(tel, viewedItem, isProjectTotalView) {
   const convList = Array.isArray(tel.projectConversations) ? tel.projectConversations : [];
   if (convList.length === 0 && !tel.conversationId) return;
 
-  const projName = tel.projectName || tel.projectTotal?.projectName || "";
-
-  if (isProjectTotalView) {
-    const pt = tel.projectTotal || viewedItem || {};
-    const projSigDisp = getSignatureBadgeDisplay(pt.signatureStatus || tel.signatureStatus, t);
-    const projPrefix = projName ? `${projName} · ` : "";
-    const convCount = Math.max(1, convList.length || Number(pt.conversationCount || 1));
-    const tokSuffix = Number(pt.sessionTotalTokens || 0) > 0
-      ? ` · ${formatCompactTokenCount(pt.sessionTotalTokens)} tok`
-      : "";
-
-    const summaryBar = document.createElement("div");
-    summaryBar.className = "telemetry-project-summary-bar";
-
-    const leftWrap = document.createElement("div");
-    leftWrap.className = "active-email-wrap";
-
-    const dot = document.createElement("span");
-    dot.className = "status-dot online";
-    leftWrap.appendChild(dot);
-
-    if (projSigDisp.shortText) {
-      leftWrap.appendChild(createChannelBadgeNode(projSigDisp.pillType || "personal", projSigDisp.shortText));
-    }
-
-    const textEl = document.createElement("span");
-    textEl.className = "dropdown-trigger-text";
-    textEl.textContent = `${t.telemetryProjectTotalOpt || "当前项目全部会话汇总"} (${projPrefix}${convCount} ${t.telemetryConvCountSuffix || "个会话"})${tokSuffix}`;
-    leftWrap.appendChild(textEl);
-
-    summaryBar.appendChild(leftWrap);
-    mount.appendChild(summaryBar);
-    return;
-  }
-
   const options = [];
   for (const c of convList) {
     const sigDisp = getSignatureBadgeDisplay(c.signatureStatus, t);
-    const tokSuffix = Number(c.sessionTotalTokens || 0) > 0 ? ` · ${formatCompactTokenCount(c.sessionTotalTokens)} tok` : "";
     options.push({
       value: c.fullConversationId || c.conversationId,
-      label: `${c.title || c.conversationId}${tokSuffix}`,
+      label: c.title || c.conversationId,
       badgeText: sigDisp.shortText,
       badgeType: sigDisp.pillType,
       isCurrentActive: Boolean(c.isCurrentActive)
@@ -282,25 +238,13 @@ function renderTelemetryConvSelector(tel, viewedItem, isProjectTotalView) {
   mount.appendChild(wrapper);
 }
 
-function toggleTelemetryScopeMode() {
-  isTelemetryProjectTotalMode = !isTelemetryProjectTotalMode;
-  renderSessionTelemetry();
-}
-
 function renderSessionTelemetry() {
-  const mount = document.getElementById("sessionTelemetryMount");
-  if (!mount) return;
-  mount.innerHTML = "";
   const t = I18N[currentLang];
   const tel = state.telemetry || {};
   const convList = Array.isArray(tel.projectConversations) ? tel.projectConversations : [];
 
-  const isProjectTotalView = Boolean(isTelemetryProjectTotalMode && tel.projectTotal);
   let viewedItem = tel;
-
-  if (isProjectTotalView) {
-    viewedItem = tel.projectTotal;
-  } else if (selectedTelemetryConvId && selectedTelemetryConvId !== "__PROJECT_TOTAL__") {
+  if (selectedTelemetryConvId) {
     const matched = convList.find(
       (c) => c.fullConversationId === selectedTelemetryConvId || c.conversationId === selectedTelemetryConvId
     );
@@ -315,17 +259,8 @@ function renderSessionTelemetry() {
   }
 
   const telTitleEl = document.getElementById("secTelemetryTitle");
-  if (telTitleEl) {
-    telTitleEl.textContent = isProjectTotalView
-      ? (t.secTelemetryProjectTitle || t.secTelemetryTitle)
-      : t.secTelemetryTitle;
-  }
-  const scopeBtn = document.getElementById("btnToggleTelemetryScope");
-  if (scopeBtn) {
-    scopeBtn.textContent = isProjectTotalView
-      ? (t.btnSwitchToSessionStats || "会话统计")
-      : (t.btnSwitchToProjectTotal || "项目汇总");
-    scopeBtn.classList.toggle("active-toggle", isProjectTotalView);
+  if (telTitleEl && t.secTelemetryTitle) {
+    telTitleEl.textContent = t.secTelemetryTitle;
   }
 
   // 渲染顶栏当前查看会话的签名来源徽章（GCP 签名 / 个人签名 / 混合冲突 / 无签名）
@@ -339,136 +274,8 @@ function renderSessionTelemetry() {
     sigBadgeMount.appendChild(sigBadgeEl);
   }
 
-  // 渲染项目会话细分切换下拉框
-  renderTelemetryConvSelector(tel, viewedItem, isProjectTotalView);
-
-  const card = document.createElement("div");
-  card.className = "telemetry-card";
-
-  const bar = document.createElement("div");
-  bar.className = "telemetry-bar";
-
-  const lastInTok = Number(viewedItem.lastInputTokens || 0);
-  const lastOutTok = Number(viewedItem.lastOutputTokens || 0);
-  const lastCtxTok = Number(viewedItem.lastContextTokens || (lastInTok + Number(viewedItem.lastCacheTokens || 0)));
-  const cacheTotalTok = Number(viewedItem.sessionCacheTokens || 0);
-  const totalTok = Number(viewedItem.sessionTotalTokens || 0);
-  const cacheHitPct = Number(viewedItem.cacheHitPct || 0);
-  const turnCount = Number(viewedItem.turnCount || 0);
-  const checkpointCount = Number(viewedItem.checkpointCount || 0);
-
-  // 1. 本轮用词 (官方 input_tokens / output_tokens + 当前实时上下文窗口长度)
-  const col1 = document.createElement("div");
-  col1.className = "telemetry-metric";
-  const lbl1 = document.createElement("span");
-  lbl1.className = "telemetry-metric-label";
-  lbl1.textContent = t.telemetryLastTurnLabel;
-  const val1 = document.createElement("span");
-  val1.className = "telemetry-metric-val";
-  if (lastOutTok > 0 || lastInTok > 0) {
-    val1.textContent = `↑${formatCompactTokenCount(lastInTok)} ↓${formatCompactTokenCount(lastOutTok)}`;
-    if (lastCtxTok > 0) {
-      const ctxTag = document.createElement("span");
-      ctxTag.className = "telemetry-sub-tag";
-      ctxTag.textContent = `(${t.telemetryContextPrefix} ${formatCompactTokenCount(lastCtxTok)})`;
-      val1.appendChild(ctxTag);
-    }
-  } else {
-    val1.textContent = "0";
-  }
-  col1.appendChild(lbl1);
-  col1.appendChild(val1);
-
-  // 2. 前缀缓存命中 (官方 cache_read_tokens 累计总量 + 缓存命中率)
-  const col2 = document.createElement("div");
-  col2.className = "telemetry-metric";
-  const lbl2 = document.createElement("span");
-  lbl2.className = "telemetry-metric-label";
-  lbl2.textContent = t.telemetryCacheTotalLabel;
-  const val2 = document.createElement("span");
-  val2.className = "telemetry-metric-val" + (cacheTotalTok > 0 ? " highlight" : "");
-  val2.textContent = `${formatCompactTokenCount(cacheTotalTok)} tok`;
-  if (cacheHitPct > 0) {
-    const pctTag = document.createElement("span");
-    pctTag.className = "telemetry-sub-tag";
-    pctTag.textContent = `(${cacheHitPct}%)`;
-    val2.appendChild(pctTag);
-  }
-  col2.appendChild(lbl2);
-  col2.appendChild(val2);
-
-  // 3. 当前会话累计 / 项目全部会话累计 (官方累计 input + output + 对话轮数 + CHECKPOINT 自动压缩次数)
-  const col3 = document.createElement("div");
-  col3.className = "telemetry-metric";
-  const lbl3 = document.createElement("span");
-  lbl3.className = "telemetry-metric-label";
-  lbl3.textContent = isProjectTotalView
-    ? (t.telemetryProjectTotalLabel || t.telemetrySessionTotalLabel)
-    : t.telemetrySessionTotalLabel;
-  const val3 = document.createElement("span");
-  val3.className = "telemetry-metric-val";
-  val3.textContent = `${formatCompactTokenCount(totalTok)} tok`;
-  if (turnCount > 0 || checkpointCount > 0) {
-    const turnTag = document.createElement("span");
-    turnTag.className = "telemetry-sub-tag";
-    const compressSuffix = checkpointCount > 0
-      ? ` · ${t.telemetryCompressPrefix}${checkpointCount}${t.telemetryCompressUnit}`
-      : "";
-    turnTag.textContent = `(${turnCount}${t.telemetryTurnUnit || "T"}${compressSuffix})`;
-    val3.appendChild(turnTag);
-  }
-  col3.appendChild(lbl3);
-  col3.appendChild(val3);
-
-  bar.appendChild(col1);
-  bar.appendChild(col2);
-  bar.appendChild(col3);
-  card.appendChild(bar);
-
-  // 4. 下半部分：本会话（或当前项目）内按官方可用模型细分列表
-  const byModel = Array.isArray(viewedItem.byModel) ? viewedItem.byModel : [];
-  if (byModel.length > 0) {
-    const modelsList = document.createElement("div");
-    modelsList.className = "telemetry-models-list";
-
-    for (const m of byModel) {
-      const mRow = document.createElement("div");
-      mRow.className = "telemetry-model-row";
-
-      const mLeft = document.createElement("span");
-      mLeft.className = "telemetry-model-name";
-      mLeft.textContent = m.modelName;
-      if (Number(m.turns || 0) > 0) {
-        const mTurn = document.createElement("span");
-        mTurn.className = "telemetry-sub-tag";
-        mTurn.textContent = `(${m.turns}${t.telemetryTurnUnit || "T"})`;
-        mLeft.appendChild(mTurn);
-      }
-
-      const mRight = document.createElement("div");
-      mRight.className = "telemetry-model-stats";
-
-      if (Number(m.cacheTokens || 0) > 0) {
-        const mCache = document.createElement("span");
-        mCache.className = "telemetry-model-cache";
-        mCache.textContent = `${t.telemetryCacheTag} ${formatCompactTokenCount(m.cacheTokens)} (${m.cacheHitPct || 0}%)`;
-        mRight.appendChild(mCache);
-      }
-
-      const mTok = document.createElement("span");
-      mTok.className = "telemetry-model-tokens";
-      mTok.textContent = `↑${formatCompactTokenCount(m.inputTokens)} ↓${formatCompactTokenCount(m.outputTokens)}`;
-      mRight.appendChild(mTok);
-
-      mRow.appendChild(mLeft);
-      mRow.appendChild(mRight);
-      modelsList.appendChild(mRow);
-    }
-
-    card.appendChild(modelsList);
-  }
-
-  mount.appendChild(card);
+  // 渲染项目会话签名切换下拉框
+  renderTelemetryConvSelector(tel, viewedItem);
 }
 
 function renderSessionSelector() {

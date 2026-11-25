@@ -1077,7 +1077,7 @@ button.danger:hover {
   z-index: 1000;
 }
 
-/* 对话算力遥测统计条 (顶栏签名状态徽章 + 项目会话细分选择器 + 三格总览 + 本会话按模型细分列表) */
+/* 会话思维签名板块 (顶栏签名状态徽章 + 项目会话签名选择器) */
 .telemetry-header-left {
   display: flex;
   align-items: center;
@@ -1134,127 +1134,7 @@ button.danger:hover {
 }
 
 .telemetry-conv-dropdown {
-  margin-bottom: 4px;
-}
-
-.telemetry-project-summary-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  min-height: 33px;
-  padding: 0 10px;
-  margin-bottom: 4px;
-  background: var(--bg-input);
-  border: 1px solid var(--border-subtle);
-  border-radius: 6px;
-  font-size: 12px;
-  color: var(--text-main);
-}
-
-button.secondary.small.active-toggle {
-  background: rgba(0, 122, 204, 0.14);
-  border-color: rgba(0, 122, 204, 0.45);
-  color: var(--primary);
-  font-weight: 600;
-}
-
-.telemetry-card {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  margin-top: 2px;
-  padding: 6px 8px;
-  border-radius: 6px;
-  background: var(--bg-base);
-  border: 1px solid var(--border-subtle);
-}
-
-.telemetry-bar {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 6px;
-}
-
-.telemetry-models-list {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  padding-top: 5px;
-  border-top: 1px dashed var(--border-subtle);
-}
-
-.telemetry-model-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 8px;
-  font-size: 10.5px;
-  line-height: 1.3;
-  font-variant-numeric: tabular-nums;
-}
-
-.telemetry-model-name {
-  font-weight: 500;
-  color: var(--text-main);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  flex: 1;
-  min-width: 0;
-}
-
-.telemetry-model-stats {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-shrink: 0;
-  white-space: nowrap;
-}
-
-.telemetry-model-cache {
-  color: var(--success);
-  font-weight: 600;
-}
-
-.telemetry-model-tokens {
-  color: var(--text-muted);
-  font-weight: 500;
-}
-
-.telemetry-metric {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  min-width: 0;
-}
-
-.telemetry-metric-label {
-  font-size: 10px;
-  color: var(--text-muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.telemetry-metric-val {
-  font-size: 11.5px;
-  font-weight: 600;
-  color: var(--text-main);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.telemetry-metric-val.highlight {
-  color: var(--success);
-}
-
-.telemetry-sub-tag {
-  font-size: 9.5px;
-  font-weight: 500;
-  color: var(--text-muted);
-  margin-left: 3px;
+  margin-bottom: 0;
 }
 
 /* 个人通道池与 GCP 计费通道池物理分组区块 */

@@ -173,7 +173,7 @@ function computeRelaySnapshotSignature(snapshot) {
     ? snapshot.quotaGroups.map((g) => `${g.groupKey || g.label || ""}:${g.remainingPercent ?? g.remainingFraction ?? ""}:${g.resetTime || ""}`).join(",")
     : "";
   const tel = snapshot.telemetry || {};
-  const telSig = `${tel.fullConversationId || tel.conversationId || ""}:${tel.totalTokens ?? ""}:${tel.roundCount ?? ""}`;
+  const telSig = `${tel.fullConversationId || tel.conversationId || ""}:${tel.signatureStatus?.sigType || ""}:${tel.signatureStatus?.mismatched ? 1 : 0}:${Array.isArray(tel.projectConversations) ? tel.projectConversations.length : 0}`;
   const oauthSig = `${snapshot.oauthPending ? 1 : 0}:${snapshot.lastOAuthEvent?.eventId || snapshot.lastOAuthEvent?.email || ""}`;
   const routeSig = snapshot.routing ? JSON.stringify(snapshot.routing) : "";
   return `${snapshot.frontendVersion || ""}|${snapshot.lsOnline ? 1 : 0}|${snapshot.personalQuotaPool || ""}|${activeId}|${topGroups}|${accountsSig}|${telSig}|${oauthSig}|${routeSig}`;

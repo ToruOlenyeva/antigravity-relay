@@ -18,9 +18,8 @@ let state = {
 
 // 顶部「账户模型额度」当前选中的查看通道 ID（空字符串表示跟随当前激活通道）
 let selectedQuotaChannelId = "";
-// 第 2 板块「当前会话统计」当前选中的查看会话 ID（空字符串表示跟随当前活跃会话）与「项目汇总 vs 会话统计」切换模式
+// 第 2 板块「会话思维签名」当前选中的查看会话 ID（空字符串表示跟随当前活跃会话）
 let selectedTelemetryConvId = "";
-let isTelemetryProjectTotalMode = false;
 // 当前处于待二次确认删除状态的通道 ID
 let pendingDeleteAccountId = "";
 let pendingDeleteTimer = null;
@@ -554,10 +553,7 @@ function applyGcpInputProject() {
 async function handleManualScrubSignatures(mode = "mismatched") {
   try {
     const tel = state.telemetry || {};
-    const targetConvId =
-      (selectedTelemetryConvId && selectedTelemetryConvId !== "__PROJECT_TOTAL__")
-        ? selectedTelemetryConvId
-        : (tel.fullConversationId || tel.conversationId || "");
+    const targetConvId = selectedTelemetryConvId || tel.fullConversationId || tel.conversationId || "";
     const res = await fetch("/api/scrub-signatures", {
       method: "POST",
       headers: { "Content-Type": "application/json" },

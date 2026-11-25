@@ -43,154 +43,6 @@ import {
   probeChannelQuotaSnapshot
 } from "./quota-probe.mjs";
 
-function estimateTokensFromString(str) {
-  if (!str) return 0;
-  const s = String(str);
-  let cjk = 0;
-  for (let i = 0; i < s.length; i++) {
-    const code = s.charCodeAt(i);
-    if (code >= 0x4e00 && code <= 0x9fff) cjk++;
-  }
-  const nonCjk = s.length - cjk;
-  return Math.max(1, Math.round(cjk * 1.45 + nonCjk / 3.8));
-}
-
-function stripModelVariantSuffix(rawName) {
-  return String(rawName || "")
-    .replace(/\s*\((Low|Medium|High|XHigh|Extra|Max|Thinking)\)\s*$/i, "")
-    .trim();
-}
-
-function toCanonicalModelSlug(rawStr) {
-  const clean = String(rawStr || "").trim();
-  if (!clean) return "";
-  let slug = clean
-    .toLowerCase()
-    .replace(/[()]/g, "")
-    .replace(/[\s_]+/g, "-")
-    .replace(/-+/g, "-");
-  if (slug.startsWith("claude-")) {
-    slug = slug.replace(/(\d)\.(\d)/g, "$1-$2");
-  }
-  return slug;
-}
-
-function buildKnownTelemetryModelDict(cfg) {
-  const dict = new Map();
-  const registerAlias = (aliasStr, baseLabel) => {
-    const cleanAlias = String(aliasStr || "").trim();
-    const cleanBase = stripModelVariantSuffix(baseLabel);
-    if (!cleanAlias || !cleanBase) return;
-    dict.set(cleanAlias.toLowerCase(), cleanBase);
-    const strippedAlias = stripModelVariantSuffix(cleanAlias);
-    if (strippedAlias) {
-      dict.set(strippedAlias.toLowerCase(), cleanBase);
-      const slugged = toCanonicalModelSlug(strippedAlias);
-      if (slugged) dict.set(slugged, cleanBase);
-    }
-    const directSlug = toCanonicalModelSlug(cleanAlias);
-    if (directSlug) dict.set(directSlug, cleanBase);
-  };
-
-  const registerModelObj = (m) => {
-    if (!m || typeof m !== "object") return;
-    const baseLabel = stripModelVariantSuffix(m.label || m.modelId || "");
-    if (!baseLabel) return;
-    registerAlias(baseLabel, baseLabel);
-    if (m.label) registerAlias(m.label, baseLabel);
-    if (m.modelId) registerAlias(m.modelId, baseLabel);
-    if (Array.isArray(m.variantIds)) {
-      for (const v of m.variantIds) {
-        registerAlias(v, baseLabel);
-      }
-    }
-  };
-
-  for (const m of AGENT_PLATFORM_DEFAULT_MODELS) {
-    registerModelObj(m);
-  }
-  const liveTierModels = cfg?.__meta__?.liveTierModels;
-  if (liveTierModels && typeof liveTierModels === "object") {
-    for (const list of Object.values(liveTierModels)) {
-      if (Array.isArray(list)) {
-        for (const m of list) registerModelObj(m);
-      }
-    }
-  }
-  const dynReg = cfg?.__meta__?.dynamicModelRegistry;
-  if (dynReg && typeof dynReg === "object") {
-    for (const [k, fam] of Object.entries(dynReg.placeholderToFamily || {})) {
-      registerAlias(k, fam);
-      registerAlias(fam, fam);
-    }
-    for (const [lbl, slug] of Object.entries(dynReg.labelToSlug || {})) {
-      const fam = dynReg.placeholderToFamily?.[String(slug || "").toLowerCase()] || lbl;
-      registerAlias(lbl, fam);
-      registerAlias(slug, fam);
-    }
-    for (const [ph, slug] of Object.entries(dynReg.placeholderToSlug || {})) {
-      const fam =
-        dynReg.placeholderToFamily?.[String(ph || "").toLowerCase()] ||
-        dynReg.placeholderToFamily?.[String(slug || "").toLowerCase()] ||
-        "";
-      if (fam) {
-        registerAlias(ph, fam);
-        registerAlias(slug, fam);
-      }
-    }
-  }
-  try {
-    const channels = normalizeAccountChannels(cfg);
-    if (Array.isArray(channels)) {
-      for (const ch of channels) {
-        const avail = ch?.cachedQuota?.availableModels;
-        if (Array.isArray(avail)) {
-          for (const m of avail) registerModelObj(m);
-        }
-      }
-    }
-  } catch {}
-  if (cfg?.accounts && typeof cfg.accounts === "object") {
-    const accList = Array.isArray(cfg.accounts) ? cfg.accounts : Object.values(cfg.accounts);
-    for (const acc of accList) {
-      const pools = [
-        acc?.cachedQuota?.availableModels,
-        acc?.cachedQuotaByPool?.daily?.availableModels,
-        acc?.cachedQuotaByPool?.prod?.availableModels
-      ];
-      for (const avail of pools) {
-        if (Array.isArray(avail)) {
-          for (const m of avail) registerModelObj(m);
-        }
-      }
-    }
-  }
-  return dict;
-}
-
-function matchKnownTelemetryModel(rawCandidate, knownDict) {
-  const raw = String(rawCandidate || "").trim();
-  if (!raw || /^none$/i.test(raw)) return "";
-
-  if (knownDict && knownDict.size > 0) {
-    const exactHit = knownDict.get(raw.toLowerCase());
-    if (exactHit) return exactHit;
-    const stripped = stripModelVariantSuffix(raw);
-    const strippedHit = knownDict.get(stripped.toLowerCase());
-    if (strippedHit) return strippedHit;
-    const slugHit = knownDict.get(toCanonicalModelSlug(stripped));
-    if (slugHit) return slugHit;
-    const rawSlugHit = knownDict.get(toCanonicalModelSlug(raw));
-    if (rawSlugHit) return rawSlugHit;
-  }
-
-  const strippedFallback = stripModelVariantSuffix(raw);
-  if (/\s/.test(strippedFallback) && /^[A-Z]/.test(strippedFallback)) {
-    return strippedFallback;
-  }
-  return "";
-}
-
 function discoverInstanceCdpPort(ctx) {
   try {
     if (ctx?.userDataDir) {
@@ -823,9 +675,8 @@ async function fetchWindowActiveConvIdViaCdp(port) {
   return "";
 }
 
-function extractFallbackConvAndModelFromLsLog(lsLogFile, knownDict) {
+function extractFallbackConvIdFromLsLog(lsLogFile) {
   let convId = "";
-  let lastModel = "";
   try {
     if (lsLogFile && fs.existsSync(lsLogFile)) {
       const st = fs.statSync(lsLogFile);
@@ -842,43 +693,10 @@ function extractFallbackConvAndModelFromLsLog(lsLogFile, knownDict) {
       if (convMatches.length > 0) {
         convId = convMatches[convMatches.length - 1][1] || "";
       }
-
-      const modelMatches = [
-        ...tail.matchAll(/models\/([a-zA-Z0-9._-]+):streamGenerateContent/g)
-      ];
-      for (let i = modelMatches.length - 1; i >= 0; i--) {
-        const rawSlug = modelMatches[i][1] || "";
-        if (/flash-lite/i.test(rawSlug)) continue;
-        const norm = matchKnownTelemetryModel(rawSlug, knownDict);
-        if (norm) {
-          lastModel = norm;
-          break;
-        }
-      }
     }
   } catch {}
-  return { convId, lastModel };
+  return convId;
 }
-
-function parseSettingsChangeModels(contentStr, knownDict) {
-  if (typeof contentStr !== "string" || !contentStr.includes("<USER_SETTINGS_CHANGE>")) {
-    return null;
-  }
-  const idx = contentStr.indexOf("changed setting `Model Selection` from ");
-  if (idx < 0) return null;
-  const sub = contentStr.slice(idx + "changed setting `Model Selection` from ".length);
-  const firstSentence = sub.split(/\.\s+No need|\r?\n/i)[0].replace(/\.\s*$/, "");
-  const m = /^\s*(.*?)\s*\bto\s+(.+?)\s*$/i.exec(firstSentence);
-  if (!m) return null;
-  const rawFrom = (m[1] || "").trim();
-  const rawTo = (m[2] || "").trim();
-  return {
-    fromModel: matchKnownTelemetryModel(rawFrom, knownDict),
-    toModel: matchKnownTelemetryModel(rawTo, knownDict)
-  };
-}
-
-const convTranscriptCache = new Map();
 
 function extractProjectNameFromWorkspaceUris(rawUris) {
   if (!rawUris || typeof rawUris !== "string") return "";
@@ -893,191 +711,6 @@ function extractProjectNameFromWorkspaceUris(rawUris) {
   return "";
 }
 
-function parseSingleConversationTranscript(convId, brainDir, knownDict, fallbackModel = "Gemini 4 Argon") {
-  const cleanId = String(convId || "").trim();
-  const emptyStat = {
-    sessionInputTokens: 0,
-    sessionCacheTokens: 0,
-    sessionOutputTokens: 0,
-    sessionTotalTokens: 0,
-    lastInputTokens: 0,
-    lastCacheTokens: 0,
-    lastContextTokens: 0,
-    lastOutputTokens: 0,
-    cacheHitPct: 0,
-    turnCount: 0,
-    checkpointCount: 0,
-    checkpointTokens: 0,
-    byModel: []
-  };
-  if (!cleanId) return emptyStat;
-  const logPath = path.join(brainDir, cleanId, ".system_generated", "logs", "transcript.jsonl");
-  if (!fs.existsSync(logPath)) return emptyStat;
-
-  let st = null;
-  try {
-    st = fs.statSync(logPath);
-  } catch {
-    return emptyStat;
-  }
-
-  const dictSize = knownDict ? knownDict.size : 0;
-  const cached = convTranscriptCache.get(cleanId);
-  if (
-    cached &&
-    cached.mtimeMs === st.mtimeMs &&
-    cached.size === st.size &&
-    cached.fallbackModel === fallbackModel &&
-    cached.dictSize === dictSize
-  ) {
-    return cached.data;
-  }
-
-  let sessionInputTokens = 0;
-  let sessionCacheTokens = 0;
-  let sessionOutputTokens = 0;
-  let lastInputTokens = 0;
-  let lastCacheTokens = 0;
-  let lastOutputTokens = 0;
-  let turnCount = 0;
-  let checkpointCount = 0;
-  let checkpointTokens = 0;
-  const modelMap = new Map();
-
-  try {
-    const rawText = fs.readFileSync(logPath, "utf8");
-    const lines = rawText.split(/\r?\n/).filter(Boolean);
-    const rows = [];
-    let initialBeforeChangeModel = "";
-
-    for (const line of lines) {
-      try {
-        const r = JSON.parse(line);
-        rows.push(r);
-        if (!initialBeforeChangeModel && typeof r.content === "string" && r.content.includes("<USER_SETTINGS_CHANGE>")) {
-          const parsed = parseSettingsChangeModels(r.content, knownDict);
-          if (parsed && parsed.fromModel) {
-            initialBeforeChangeModel = parsed.fromModel;
-          }
-        }
-      } catch {}
-    }
-
-    let currentModel = initialBeforeChangeModel || fallbackModel || "Gemini 4 Argon";
-    let currentTurnEstIn = 0;
-
-    for (let i = 0; i < rows.length; i++) {
-      const row = rows[i];
-      const stepType = String(row.type || "");
-      const contentStr = typeof row.content === "string" ? row.content : JSON.stringify(row.content || "");
-      const thinkingStr = typeof row.thinking === "string" ? row.thinking : "";
-      const toolsStr = row.tool_calls ? JSON.stringify(row.tool_calls) : "";
-
-      if (contentStr.includes("<USER_SETTINGS_CHANGE>")) {
-        const parsed = parseSettingsChangeModels(contentStr, knownDict);
-        if (parsed && parsed.toModel) {
-          currentModel = parsed.toModel;
-        }
-      }
-
-      if (stepType === "USER_INPUT") {
-        currentTurnEstIn = estimateTokensFromString(contentStr);
-      } else if (stepType === "PLANNER_RESPONSE" || stepType === "CHECKPOINT") {
-        const hasOfficial =
-          typeof row.input_tokens === "number" ||
-          typeof row.output_tokens === "number" ||
-          typeof row.cache_read_tokens === "number";
-        const inTok = hasOfficial ? Number(row.input_tokens || 0) : currentTurnEstIn;
-        const cacheTok = hasOfficial ? Number(row.cache_read_tokens || 0) : 0;
-        const outTok = hasOfficial
-          ? Number(row.output_tokens || 0)
-          : (estimateTokensFromString(contentStr) + estimateTokensFromString(thinkingStr) + estimateTokensFromString(toolsStr));
-
-        if (inTok > 0 || outTok > 0 || cacheTok > 0) {
-          sessionInputTokens += inTok;
-          sessionCacheTokens += cacheTok;
-          sessionOutputTokens += outTok;
-
-          if (stepType === "CHECKPOINT") {
-            checkpointCount += 1;
-            checkpointTokens += inTok + outTok;
-          } else {
-            lastInputTokens = inTok;
-            lastCacheTokens = cacheTok;
-            lastOutputTokens = outTok;
-            turnCount++;
-          }
-
-          const modelKey = currentModel || "Gemini 4 Argon";
-          if (!modelMap.has(modelKey)) {
-            modelMap.set(modelKey, {
-              modelName: modelKey,
-              turns: 0,
-              inputTokens: 0,
-              cacheTokens: 0,
-              outputTokens: 0,
-              lastUsedIndex: i
-            });
-          }
-          const mStat = modelMap.get(modelKey);
-          if (stepType === "PLANNER_RESPONSE") {
-            mStat.turns += 1;
-          }
-          mStat.inputTokens += inTok;
-          mStat.cacheTokens += cacheTok;
-          mStat.outputTokens += outTok;
-          mStat.lastUsedIndex = i;
-        }
-      }
-    }
-  } catch {}
-
-  const lastContextTokens = (lastInputTokens || 0) + (lastCacheTokens || 0);
-  const sessionTotalTokens = sessionInputTokens + sessionOutputTokens;
-  const cacheHitPct = (sessionInputTokens + sessionCacheTokens) > 0
-    ? Math.round((sessionCacheTokens / (sessionInputTokens + sessionCacheTokens)) * 100)
-    : 0;
-
-  const byModel = Array.from(modelMap.values())
-    .map((m) => ({
-      modelName: m.modelName,
-      turns: m.turns,
-      inputTokens: m.inputTokens,
-      cacheTokens: m.cacheTokens,
-      outputTokens: m.outputTokens,
-      totalTokens: m.inputTokens + m.outputTokens,
-      cacheHitPct: (m.inputTokens + m.cacheTokens) > 0 ? Math.round((m.cacheTokens / (m.inputTokens + m.cacheTokens)) * 100) : 0,
-      lastUsedIndex: m.lastUsedIndex
-    }))
-    .sort((a, b) => b.lastUsedIndex - a.lastUsedIndex)
-    .map(({ lastUsedIndex, ...rest }) => rest);
-
-  const data = {
-    sessionInputTokens,
-    sessionCacheTokens,
-    sessionOutputTokens,
-    sessionTotalTokens,
-    lastInputTokens: lastInputTokens || 0,
-    lastCacheTokens: lastCacheTokens || 0,
-    lastContextTokens,
-    lastOutputTokens: lastOutputTokens || 0,
-    cacheHitPct,
-    turnCount,
-    checkpointCount,
-    checkpointTokens,
-    byModel
-  };
-
-  convTranscriptCache.set(cleanId, {
-    mtimeMs: st.mtimeMs,
-    size: st.size,
-    fallbackModel,
-    dictSize,
-    data
-  });
-  return data;
-}
-
 export async function computeSessionTelemetrySnapshot(cfgInput = null, instanceCtx = null, activeIsGcpInput = undefined) {
   const cfg = cfgInput || readRelayConfig();
   const ctx = instanceCtx || resolveCurrentInstanceContext();
@@ -1085,15 +718,14 @@ export async function computeSessionTelemetrySnapshot(cfgInput = null, instanceC
   const activeIsGcp = activeIsGcpInput !== undefined
     ? Boolean(activeIsGcpInput)
     : Boolean(instMeta.lastAppliedGcpProject || (!ctx.isIsolatedInstance && cfg.__meta__?.lastAppliedGcpProject));
-  const knownDict = buildKnownTelemetryModelDict(cfg);
   const brainDir = path.join(HOME_DIR, ".gemini", "antigravity", "brain");
 
   // 1. 优先通过当前实例专属 CDP 端口直读正在打开的会话路由 (/c/<convId>)，次选当前实例专属 language_server.log 尾部会话 ID
   const cdpPort = discoverInstanceCdpPort(ctx);
   const cdpConvId = await fetchWindowActiveConvIdViaCdp(cdpPort);
-  const logFallback = extractFallbackConvAndModelFromLsLog(ctx.lsLogFile, knownDict);
+  const logConvId = extractFallbackConvIdFromLsLog(ctx.lsLogFile);
 
-  let targetConvId = cdpConvId || logFallback.convId || String(instMeta.lastActiveConvId || "").trim();
+  let targetConvId = cdpConvId || logConvId || String(instMeta.lastActiveConvId || "").trim();
   let targetLogPath = targetConvId
     ? path.join(brainDir, targetConvId, ".system_generated", "logs", "transcript.jsonl")
     : "";
@@ -1189,54 +821,12 @@ export async function computeSessionTelemetrySnapshot(cfgInput = null, instanceC
     ];
   }
 
-  const fallbackModel = logFallback.lastModel || "Gemini 4 Argon";
   const projectConversations = [];
-  let projInputTokens = 0;
-  let projCacheTokens = 0;
-  let projOutputTokens = 0;
-  let projTurnCount = 0;
-  let projCheckpointCount = 0;
-  let projCheckpointTokens = 0;
-  const projModelMap = new Map();
-  let projHasGcpSig = false;
-  let projHasPersonalSig = false;
-  let projMismatchedCount = 0;
-
   for (let idx = 0; idx < projectMainRows.length; idx++) {
     const r = projectMainRows[idx];
     const cid = String(r.conversation_id || "").trim();
     if (!cid) continue;
-    const tStat = parseSingleConversationTranscript(cid, brainDir, knownDict, fallbackModel);
     const sigStat = inspectConversationSignatureStatus(cid, activeIsGcp, cid === targetConvId);
-    if (sigStat.hasGcpSig) projHasGcpSig = true;
-    if (sigStat.hasPersonalSig) projHasPersonalSig = true;
-    if (sigStat.mismatched) projMismatchedCount += 1;
-
-    projInputTokens += tStat.sessionInputTokens;
-    projCacheTokens += tStat.sessionCacheTokens;
-    projOutputTokens += tStat.sessionOutputTokens;
-    projTurnCount += tStat.turnCount;
-    projCheckpointCount += tStat.checkpointCount;
-    projCheckpointTokens += tStat.checkpointTokens;
-
-    for (const m of tStat.byModel) {
-      if (!projModelMap.has(m.modelName)) {
-        projModelMap.set(m.modelName, {
-          modelName: m.modelName,
-          turns: 0,
-          inputTokens: 0,
-          cacheTokens: 0,
-          outputTokens: 0,
-          orderIdx: idx
-        });
-      }
-      const pm = projModelMap.get(m.modelName);
-      pm.turns += m.turns;
-      pm.inputTokens += m.inputTokens;
-      pm.cacheTokens += m.cacheTokens;
-      pm.outputTokens += m.outputTokens;
-    }
-
     const rawTitle = String(r.title || "").trim();
     projectConversations.push({
       fullConversationId: cid,
@@ -1249,8 +839,7 @@ export async function computeSessionTelemetrySnapshot(cfgInput = null, instanceC
         hasGcpSig: sigStat.hasGcpSig,
         hasPersonalSig: sigStat.hasPersonalSig,
         mismatched: sigStat.mismatched
-      },
-      ...tStat
+      }
     });
   }
 
@@ -1262,57 +851,8 @@ export async function computeSessionTelemetrySnapshot(cfgInput = null, instanceC
       conversationId: targetConvId ? targetConvId.slice(0, 8) : "",
       title: targetConvId ? targetConvId.slice(0, 8) : "",
       isCurrentActive: true,
-      signatureStatus: inspectConversationSignatureStatus(targetConvId, activeIsGcp, true),
-      ...parseSingleConversationTranscript(targetConvId, brainDir, knownDict, fallbackModel)
+      signatureStatus: inspectConversationSignatureStatus(targetConvId, activeIsGcp, true)
     };
-
-  const projTotalTokens = projInputTokens + projOutputTokens;
-  const projCacheHitPct = (projInputTokens + projCacheTokens) > 0
-    ? Math.round((projCacheTokens / (projInputTokens + projCacheTokens)) * 100)
-    : 0;
-  const projByModel = Array.from(projModelMap.values())
-    .map((m) => ({
-      modelName: m.modelName,
-      turns: m.turns,
-      inputTokens: m.inputTokens,
-      cacheTokens: m.cacheTokens,
-      outputTokens: m.outputTokens,
-      totalTokens: m.inputTokens + m.outputTokens,
-      cacheHitPct: (m.inputTokens + m.cacheTokens) > 0 ? Math.round((m.cacheTokens / (m.inputTokens + m.cacheTokens)) * 100) : 0
-    }))
-    .sort((a, b) => b.totalTokens - a.totalTokens);
-
-  let projSigType = "none";
-  if (activeIsGcp && projHasGcpSig) projSigType = "gcp";
-  else if (!activeIsGcp && projHasPersonalSig) projSigType = "personal";
-  else if (projHasGcpSig) projSigType = "gcp";
-  else if (projHasPersonalSig) projSigType = "personal";
-
-  const projectTotal = {
-    projectId,
-    projectName: projectName || "",
-    conversationCount: projectConversations.length,
-    lastInputTokens: activeConvItem.lastInputTokens || 0,
-    lastCacheTokens: activeConvItem.lastCacheTokens || 0,
-    lastContextTokens: activeConvItem.lastContextTokens || 0,
-    lastOutputTokens: activeConvItem.lastOutputTokens || 0,
-    sessionInputTokens: projInputTokens,
-    sessionCacheTokens: projCacheTokens,
-    sessionOutputTokens: projOutputTokens,
-    sessionTotalTokens: projTotalTokens,
-    cacheHitPct: projCacheHitPct,
-    turnCount: projTurnCount,
-    checkpointCount: projCheckpointCount,
-    checkpointTokens: projCheckpointTokens,
-    byModel: projByModel,
-    signatureStatus: {
-      sigType: projSigType,
-      hasGcpSig: projHasGcpSig,
-      hasPersonalSig: projHasPersonalSig,
-      mismatched: projMismatchedCount > 0,
-      mismatchedCount: projMismatchedCount
-    }
-  };
 
   return {
     fullConversationId: activeConvItem.fullConversationId,
@@ -1321,22 +861,8 @@ export async function computeSessionTelemetrySnapshot(cfgInput = null, instanceC
     projectId,
     projectName: projectName || "",
     signatureStatus: activeConvItem.signatureStatus,
-    lastInputTokens: activeConvItem.lastInputTokens || 0,
-    lastCacheTokens: activeConvItem.lastCacheTokens || 0,
-    lastContextTokens: activeConvItem.lastContextTokens || 0,
-    lastOutputTokens: activeConvItem.lastOutputTokens || 0,
-    sessionInputTokens: activeConvItem.sessionInputTokens || 0,
-    sessionCacheTokens: activeConvItem.sessionCacheTokens || 0,
-    sessionOutputTokens: activeConvItem.sessionOutputTokens || 0,
-    sessionTotalTokens: activeConvItem.sessionTotalTokens || 0,
-    cacheHitPct: activeConvItem.cacheHitPct || 0,
-    turnCount: activeConvItem.turnCount || 0,
-    checkpointCount: activeConvItem.checkpointCount || 0,
-    checkpointTokens: activeConvItem.checkpointTokens || 0,
-    byModel: activeConvItem.byModel || [],
     projectConversations,
-    projectTotal,
-    source: "official_transcript"
+    source: "signature_only"
   };
 }
 
