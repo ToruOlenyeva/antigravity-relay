@@ -298,7 +298,13 @@ export function selectBestPersonalRouteCandidate(baseFamily, cfg, excludedIds = 
   const poolsOrder = ["daily"];
   const thresholdPct = Number(cfg?.routing?.lowQuotaThresholdPct ?? 5);
   const targetLower = (baseFamily || "").toLowerCase();
-  const excludeSet = excludedIds instanceof Set ? excludedIds : new Set(Array.isArray(excludedIds) ? excludedIds : []);
+  const excludeSet = excludedIds instanceof Set ? new Set(excludedIds) : new Set(Array.isArray(excludedIds) ? excludedIds : []);
+  const excludeAccountId = String(opts?.excludeAccountId || "").trim();
+  if (excludeAccountId) {
+    excludeSet.add(excludeAccountId);
+    excludeSet.add(`${excludeAccountId}@daily`);
+    excludeSet.add(`${excludeAccountId}@prod`);
+  }
   const preferredTierKey = String(opts?.preferredTierKey || "").trim().toLowerCase();
   const allowFallback = opts?.allowFallback !== false;
   const nowMs = Date.now();
@@ -392,6 +398,81 @@ export function selectBestPersonalRouteCandidate(baseFamily, cfg, excludedIds = 
 export function selectBestPersonalChannelForModel(baseFamily, cfg, excludedIds = null) {
   const best = selectBestPersonalRouteCandidate(baseFamily, cfg, excludedIds);
   return best ? best.acc : null;
+}
+
+/**
+ * 解析指定个人账号的可用候选：若指定账号可用且有余量则直选；
+ * 若已耗尽/受限且开启回退，按“同等级优先 → 其他等级兜底”顺序选出接替账号；
+ * 若关闭回退且指定账号不可用，则返回 null。
+ */
+export function selectPinnedPersonalAccountCandidate(pinnedAcc, baseFamily, cfg, excludedIds = null, opts = null) {
+  if (!pinnedAcc || pinnedAcc.channelType === "gcp" || pinnedAcc.gcpProjectId) return null;
+  const allowFallback = opts?.allowFallback !== false;
+  const explicitPool = String(opts?.explicitPool || "").trim();
+  const defaultPool = "daily";
+  const targetLower = String(baseFamily || "").toLowerCase();
+  const exSet = excludedIds instanceof Set ? excludedIds : new Set(Array.isArray(excludedIds) ? excludedIds : []);
+  const nowMs = Date.now();
+  const blockedUntil = Number(pinnedAcc.routeBlockedUntil || 0);
+  const errAt = Number(pinnedAcc.lastProbeError?.at || 0);
+  const errMsg = String(pinnedAcc.lastProbeError?.message || "");
+  const isBlocked = Boolean(
+    pinnedAcc.authExpired ||
+    blockedUntil > nowMs ||
+    (errAt > 0 && (nowMs - errAt) < 600000 && /#3501|valid license|\b401\b|\b403\b/i.test(errMsg))
+  );
+
+  const checkPool = (poolKey) => {
+    if (!poolKey || exSet.has(`${pinnedAcc.id}@${poolKey}`)) return null;
+    const poolQuota =
+      pinnedAcc.cachedQuotaByPool?.[poolKey] ||
+      (poolKey === defaultPool ? pinnedAcc.cachedQuota : null);
+    if (!poolQuota || typeof poolQuota !== "object") return null;
+    const models = poolQuota.availableModels || [];
+    const matched = models.find((m) => {
+      const id = (m.modelId || m.label || "").toLowerCase();
+      if (id === targetLower) return true;
+      return Array.isArray(m.variantIds) && m.variantIds.some((v) => String(v).toLowerCase() === targetLower);
+    });
+    if (!matched && targetLower) return null;
+    const dual = extractModelDualQuota(poolQuota, matched, baseFamily);
+    if (dual.weeklyPct <= 0 || dual.fiveHourPct <= 0) return null;
+    return {
+      acc: pinnedAcc,
+      pool: poolKey,
+      upstreamHostname: getCloudCodeHostnameForPool(poolKey, false),
+      matched,
+      weeklyPct: dual.weeklyPct,
+      fiveHourPct: dual.fiveHourPct,
+      pinnedMatched: true,
+      fallbackUsed: false
+    };
+  };
+
+  if (!isBlocked && !exSet.has(pinnedAcc.id)) {
+    const chosenPool = explicitPool ? explicitPool : defaultPool;
+    const primaryHit = checkPool(chosenPool);
+    if (primaryHit) return primaryHit;
+    if (!explicitPool) {
+      const altPool = chosenPool === "prod" ? "daily" : "prod";
+      const altHit = checkPool(altPool);
+      if (altHit) return altHit;
+    }
+  }
+
+  if (!allowFallback) return null;
+  const pinnedTierKey = getPersonalAccountTierKey(pinnedAcc);
+  const fb = selectBestPersonalRouteCandidate(
+    baseFamily,
+    cfg,
+    exSet,
+    {
+      preferredTierKey: pinnedTierKey,
+      allowFallback: true,
+      excludeAccountId: pinnedAcc.id
+    }
+  );
+  return fb ? { ...fb, pinnedMatched: false, fallbackUsed: true } : null;
 }
 
 export async function getValidPersonalAccessToken(cfg, targetAcc) {

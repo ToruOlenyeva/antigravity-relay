@@ -181,7 +181,7 @@ function computeRelaySnapshotSignature(snapshot) {
 
 function getFrontendAssetsVersion() {
   let ver = 0;
-  for (const f of ["index.html", "styles.css", "i18n.js", "ui-session-quota.js", "ui-channels-drawers.js", "app.js"]) {
+  for (const f of ["index.html", "styles.css", "i18n.js", "ui-session-quota.js", "ui-channels-drawers.js", "ui-routing.js", "app.js"]) {
     try {
       ver += Math.floor(fs.statSync(path.join(__dirname, f)).mtimeMs);
     } catch {}
@@ -372,7 +372,7 @@ async function requestHandler(req, res) {
     return;
   }
 
-  if (req.method === "GET" && (pathname === "/app.js" || pathname === "/ui-session-quota.js" || pathname === "/ui-channels-drawers.js")) {
+  if (req.method === "GET" && (pathname === "/app.js" || pathname === "/ui-session-quota.js" || pathname === "/ui-channels-drawers.js" || pathname === "/ui-routing.js")) {
     const scriptName = pathname.slice(1);
     res.writeHead(200, {
       "Content-Type": "application/javascript; charset=utf-8",

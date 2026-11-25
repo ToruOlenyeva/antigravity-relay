@@ -257,13 +257,14 @@ function resolveBestAvailableChannelSpec(baseModelName, relayCfg, activeMeta = n
   const targetLower = (baseModelName || "").toLowerCase();
   const preferredTierKey = String(opts?.preferredTierKey || "").trim().toLowerCase();
   const allowFallback = opts?.allowFallback !== false;
+  const excludeAccountId = String(opts?.excludeAccountId || "").trim();
   const nowMs = Date.now();
 
   const collectAndRank = (tierFilterKey = "") => {
     const candidates = [];
     for (const acc of accounts) {
       const isGcp = acc.channelType === "gcp" || Boolean(acc.gcpProjectId);
-      if (isGcp || isTemporarilyBlockedForHook(acc, nowMs)) continue;
+      if (isGcp || (excludeAccountId && acc.id === excludeAccountId) || isTemporarilyBlockedForHook(acc, nowMs)) continue;
       if (tierFilterKey && getPersonalAccountTierKeyForHook(acc) !== tierFilterKey) continue;
       for (const pool of poolOrder) {
         const poolQuota = acc?.cachedQuotaByPool?.[pool] || (pool === preferredPool ? acc?.cachedQuota : null);
@@ -328,6 +329,48 @@ function resolveBestAvailableChannelSpec(baseModelName, relayCfg, activeMeta = n
   }
 
   return collectAndRank("");
+}
+
+function resolvePinnedOrFallbackChannelSpec(accId, explicitPool, baseModelName, relayCfg, activeMeta = null, opts = null) {
+  const cleanId = String(accId || "").trim();
+  if (!cleanId) return null;
+  const acc = relayCfg?.accounts?.[cleanId] || (!cleanId.includes("#") ? relayCfg?.accounts?.[`${cleanId}#personal`] : null);
+  if (!acc || acc.channelType === "gcp" || acc.gcpProjectId) return null;
+  const allowFallback = opts?.allowFallback !== false;
+  const nowMs = Date.now();
+  const blocked = isTemporarilyBlockedForHook(acc, nowMs);
+  const preferredPool = "daily";
+  const chosenPool = explicitPool ? explicitPool : preferredPool;
+  const targetLower = String(baseModelName || "").toLowerCase();
+
+  const checkPool = (poolKey) => {
+    const poolQuota = acc?.cachedQuotaByPool?.[poolKey] || (poolKey === preferredPool ? acc?.cachedQuota : null);
+    if (!poolQuota || typeof poolQuota !== "object") return false;
+    const models = poolQuota.availableModels || [];
+    const matched = models.find((m) => {
+      const id = (m.modelId || m.label || "").toLowerCase();
+      if (id === targetLower) return true;
+      return Array.isArray(m.variantIds) && m.variantIds.some((v) => String(v).toLowerCase() === targetLower);
+    });
+    if (!matched && targetLower) return false;
+    const dual = extractModelDualQuotaForHook(poolQuota, matched, baseModelName);
+    return dual.weeklyPct > 0 && dual.fiveHourPct > 0;
+  };
+
+  if (!blocked) {
+    if (checkPool(chosenPool)) return `account:${acc.id}@${chosenPool}`;
+    if (!explicitPool) {
+      const altPool = chosenPool === "prod" ? "daily" : "prod";
+      if (checkPool(altPool)) return `account:${acc.id}@${altPool}`;
+    }
+  }
+
+  if (!allowFallback) return null;
+  return resolveBestAvailableChannelSpec(baseModelName, relayCfg, activeMeta, {
+    preferredTierKey: getPersonalAccountTierKeyForHook(acc),
+    allowFallback: true,
+    excludeAccountId: acc.id
+  });
 }
 
 function resolveHookInstanceMeta(relayCfg) {
@@ -548,8 +591,25 @@ async function applyTargetRoute(targetSpec, relayCfg, baseModelName = "", rawMod
 
   const parsedRef = parseHookAccountRef(resolvedSpec);
   if (parsedRef) {
-    const { accId, explicitPool } = parsedRef;
-    const acc = relayCfg?.accounts?.[accId] || (!accId.includes("#") ? relayCfg?.accounts?.[`${accId}#personal`] : null);
+    let targetAccId = parsedRef.accId;
+    let targetExplicitPool = parsedRef.explicitPool;
+    const allowFallback = relayCfg?.routing?.tierFallbackToAny !== false;
+    if (!targetTierKey && resolvedSpec === targetSpec && allowFallback) {
+      const resolvedFallback = resolvePinnedOrFallbackChannelSpec(
+        targetAccId,
+        targetExplicitPool,
+        baseModelName,
+        relayCfg,
+        activeMeta,
+        { allowFallback: true }
+      );
+      const reparsed = resolvedFallback ? parseHookAccountRef(resolvedFallback) : null;
+      if (reparsed) {
+        targetAccId = reparsed.accId;
+        targetExplicitPool = reparsed.explicitPool;
+      }
+    }
+    const acc = relayCfg?.accounts?.[targetAccId] || (!targetAccId.includes("#") ? relayCfg?.accounts?.[`${targetAccId}#personal`] : null);
     if (!acc || acc.channelType === "gcp" || acc.gcpProjectId) {
       writeJsonSafe(relayConfigPath, relayCfg);
       return false;
@@ -558,7 +618,7 @@ async function applyTargetRoute(targetSpec, relayCfg, baseModelName = "", rawMod
     if (lsTarget) {
       await ensureLocalCloudCodeProxyMounted(lsTarget, relayCfg, activeMeta);
     }
-    const routedPool = explicitPool || String(relayCfg?.routing?.personalQuotaPool || "daily");
+    const routedPool = targetExplicitPool || String(relayCfg?.routing?.personalQuotaPool || "daily");
     if (activeMeta) {
       activeMeta.lastRoutedChannelId = acc.id;
       activeMeta.lastRoutedPool = routedPool;
@@ -657,6 +717,7 @@ module.exports = {
   parseTierRouteSpecForHook,
   getPersonalAccountTierKeyForHook,
   resolveBestAvailableChannelSpec,
+  resolvePinnedOrFallbackChannelSpec,
   scrubAndReloadCascadeIfNeeded: (cascadeId, lsTarget) => scrubAndReloadCascadeIfNeeded(cascadeId, lsTarget, convDir),
   scrubAllConversationDbsSync: () => scrubAllConversationDbsSync(convDir)
 };

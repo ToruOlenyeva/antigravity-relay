@@ -42,6 +42,7 @@ import {
   extractModelDualQuota,
   hasActivePersonalRoutingConfig,
   selectBestPersonalRouteCandidate,
+  selectPinnedPersonalAccountCandidate,
   selectBestPersonalChannelForModel,
   getValidPersonalAccessToken
 } from "./route-selector.mjs";
@@ -55,6 +56,7 @@ export {
   extractModelDualQuota,
   hasActivePersonalRoutingConfig,
   selectBestPersonalRouteCandidate,
+  selectPinnedPersonalAccountCandidate,
   selectBestPersonalChannelForModel,
   getValidPersonalAccessToken
 };
@@ -251,6 +253,19 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
   const tierSelectOpts = targetTierKey
     ? { preferredTierKey: targetTierKey, allowFallback: allowTierFallback }
     : null;
+  let pinnedCandidateAcc = null;
+  let pinnedExplicitPool = "";
+  if (typeof routeSpec === "string" && routeSpec.startsWith("account:")) {
+    const rawRef = routeSpec.slice(8).trim();
+    const hashIdx = rawRef.indexOf("#");
+    const poolAtIdx = hashIdx >= 0 ? rawRef.indexOf("@", hashIdx) : -1;
+    const refId = poolAtIdx >= 0 ? rawRef.slice(0, poolAtIdx) : rawRef;
+    pinnedExplicitPool = poolAtIdx >= 0 ? normalizePersonalQuotaPool(rawRef.slice(poolAtIdx + 1)) : "";
+    const resolvedPinned = cfg.accounts?.[refId] || (!refId.includes("#") ? cfg.accounts?.[`${refId}#personal`] : null);
+    if (resolvedPinned && resolvedPinned.channelType !== "gcp" && !resolvedPinned.gcpProjectId) {
+      pinnedCandidateAcc = resolvedPinned;
+    }
+  }
 
   const prepareAttemptPayload = async () => {
     const outHeaders = { ...baseHeaders };
@@ -305,33 +320,53 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
             tierExhaustedError = { tierKey: targetTierKey, baseFamily };
           }
         }
-      } else if (typeof routeSpec === "string" && routeSpec.startsWith("account:")) {
-        const rawRef = routeSpec.slice(8).trim();
-        const hashIdx = rawRef.indexOf("#");
-        const poolAtIdx = hashIdx >= 0 ? rawRef.indexOf("@", hashIdx) : -1;
-        const refId = poolAtIdx >= 0 ? rawRef.slice(0, poolAtIdx) : rawRef;
-        const explicitPool = poolAtIdx >= 0 ? rawRef.slice(poolAtIdx + 1) : "";
-        const candidateAcc = cfg.accounts?.[refId] || (!refId.includes("#") ? cfg.accounts?.[`${refId}#personal`] : null);
-        if (candidateAcc && candidateAcc.channelType !== "gcp" && !candidateAcc.gcpProjectId) {
-          let chosenPool = explicitPool ? normalizePersonalQuotaPool(explicitPool) : defaultPool;
-          const chosenQuota = candidateAcc.cachedQuotaByPool?.[chosenPool] || (chosenPool === defaultPool ? candidateAcc.cachedQuota : null);
+      } else if (pinnedCandidateAcc) {
+        if (allowTierFallback) {
+          let lastTokenFailedAcc = null;
+          for (let tokTry = 0; tokTry < 6; tokTry++) {
+            const bestCand = selectPinnedPersonalAccountCandidate(
+              pinnedCandidateAcc,
+              baseFamily,
+              cfg,
+              excludedIds,
+              { explicitPool: pinnedExplicitPool, allowFallback: true }
+            );
+            if (!bestCand) break;
+            const tok = await getValidPersonalAccessToken(cfg, bestCand.acc);
+            if (tok) {
+              routedTargetAcc = bestCand.acc;
+              targetPool = bestCand.pool;
+              targetHostname = getCloudCodeHostnameForPool(targetPool);
+              resolvedToken = tok;
+              break;
+            }
+            excludedIds.add(bestCand.acc.id);
+            excludedIds.add(`${bestCand.acc.id}@${bestCand.pool}`);
+            lastTokenFailedAcc = bestCand.acc;
+          }
+          if (!routedTargetAcc && lastTokenFailedAcc) {
+            tokenErrorAcc = lastTokenFailedAcc;
+          }
+        } else {
+          let chosenPool = pinnedExplicitPool || defaultPool;
+          const chosenQuota = pinnedCandidateAcc.cachedQuotaByPool?.[chosenPool] || (chosenPool === defaultPool ? pinnedCandidateAcc.cachedQuota : null);
           const matchedChosen = (chosenQuota?.availableModels || []).find(
             (m) => (m.modelId || m.label || "").toLowerCase() === baseFamily.toLowerCase()
           );
           const chosenDual = extractModelDualQuota(chosenQuota, matchedChosen, baseFamily);
-          if (!explicitPool && (chosenDual.weeklyPct <= 0 || chosenDual.fiveHourPct <= 0 || excludedIds.has(`${candidateAcc.id}@${chosenPool}`))) {
+          if (!pinnedExplicitPool && (chosenDual.weeklyPct <= 0 || chosenDual.fiveHourPct <= 0 || excludedIds.has(`${pinnedCandidateAcc.id}@${chosenPool}`))) {
             const altPool = chosenPool === "prod" ? "daily" : "prod";
-            const altQuota = candidateAcc.cachedQuotaByPool?.[altPool];
+            const altQuota = pinnedCandidateAcc.cachedQuotaByPool?.[altPool];
             const matchedAlt = (altQuota?.availableModels || []).find(
               (m) => (m.modelId || m.label || "").toLowerCase() === baseFamily.toLowerCase()
             );
             const altDual = extractModelDualQuota(altQuota, matchedAlt, baseFamily);
-            if (altDual.weeklyPct > 0 && altDual.fiveHourPct > 0 && !excludedIds.has(`${candidateAcc.id}@${altPool}`)) {
+            if (altDual.weeklyPct > 0 && altDual.fiveHourPct > 0 && !excludedIds.has(`${pinnedCandidateAcc.id}@${altPool}`)) {
               chosenPool = altPool;
             }
           }
-          if (!excludedIds.has(candidateAcc.id) && !excludedIds.has(`${candidateAcc.id}@${chosenPool}`)) {
-            routedTargetAcc = candidateAcc;
+          if (!excludedIds.has(pinnedCandidateAcc.id) && !excludedIds.has(`${pinnedCandidateAcc.id}@${chosenPool}`)) {
+            routedTargetAcc = pinnedCandidateAcc;
             targetPool = chosenPool;
             targetHostname = getCloudCodeHostnameForPool(targetPool);
             resolvedToken = await getValidPersonalAccessToken(cfg, routedTargetAcc);
@@ -480,8 +515,17 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
                 });
                 excludedIds.add(routedTargetAcc.id);
                 excludedIds.add(`${routedTargetAcc.id}@${targetPool}`);
-                const hasFallback = (routeSpec === "auto_poll" || Boolean(targetTierKey)) &&
-                  Boolean(selectBestPersonalRouteCandidate(baseFamily, cfg, excludedIds, tierSelectOpts));
+                const hasFallback =
+                  ((routeSpec === "auto_poll" || Boolean(targetTierKey)) &&
+                    Boolean(selectBestPersonalRouteCandidate(baseFamily, cfg, excludedIds, tierSelectOpts))) ||
+                  Boolean(
+                    pinnedCandidateAcc &&
+                    allowTierFallback &&
+                    selectPinnedPersonalAccountCandidate(pinnedCandidateAcc, baseFamily, cfg, excludedIds, {
+                      explicitPool: pinnedExplicitPool,
+                      allowFallback: true
+                    })
+                  );
                 if (hasFallback) {
                   executeUpstreamAttempt(attemptIdx + 1).then(resolve);
                   return;
@@ -508,7 +552,14 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
               routeSpec.indexOf("@", routeSpec.indexOf("#")) >= 0;
             const hasNextCandidate = (routeSpec === "auto_poll" || Boolean(targetTierKey))
               ? Boolean(selectBestPersonalRouteCandidate(baseFamily, cfg, excludedIds, tierSelectOpts))
-              : (!hasExplicitPoolLock && !excludedIds.has(`${routedTargetAcc.id}@${altPool}`));
+              : (pinnedCandidateAcc && allowTierFallback
+                  ? Boolean(
+                      selectPinnedPersonalAccountCandidate(pinnedCandidateAcc, baseFamily, cfg, excludedIds, {
+                        explicitPool: pinnedExplicitPool,
+                        allowFallback: true
+                      })
+                    )
+                  : (!hasExplicitPoolLock && !excludedIds.has(`${routedTargetAcc.id}@${altPool}`)));
             if (hasNextCandidate) {
               upRes.resume();
               setTimeout(() => {
@@ -589,8 +640,21 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
                       const poolAtIdx = hashIdx >= 0 ? rawRef.indexOf("@", hashIdx) : -1;
                       const refId = poolAtIdx >= 0 ? rawRef.slice(0, poolAtIdx) : rawRef;
                       const expPool = poolAtIdx >= 0 ? rawRef.slice(poolAtIdx + 1) : "";
-                      tAcc = cfg.accounts?.[refId] || (!refId.includes("#") ? cfg.accounts?.[`${refId}#personal`] : null);
-                      if (expPool) tPool = normalizePersonalQuotaPool(expPool);
+                      const refAcc = cfg.accounts?.[refId] || (!refId.includes("#") ? cfg.accounts?.[`${refId}#personal`] : null);
+                      const normExpPool = expPool ? normalizePersonalQuotaPool(expPool) : "";
+                      if (refAcc && allowTierFallback) {
+                        const resolvedPinned = selectPinnedPersonalAccountCandidate(refAcc, mFamily, cfg, null, {
+                          explicitPool: normExpPool,
+                          allowFallback: true
+                        });
+                        if (resolvedPinned) {
+                          tAcc = resolvedPinned.acc;
+                          tPool = resolvedPinned.pool;
+                        }
+                      } else {
+                        tAcc = refAcc;
+                        if (normExpPool) tPool = normExpPool;
+                      }
                     }
                     if (tAcc && tAcc.channelType !== "gcp" && !tAcc.gcpProjectId) {
                       const curFraction = mObj.quotaInfo?.remainingFraction !== undefined

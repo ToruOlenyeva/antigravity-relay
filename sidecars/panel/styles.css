@@ -758,11 +758,30 @@ button.danger:hover {
   border-radius: 7px;
 }
 
+.routing-row.is-fallback {
+  border-color: rgba(245, 158, 11, 0.42);
+  box-shadow: inset 3px 0 0 #f59e0b;
+}
+
+.routing-row.is-exhausted {
+  border-color: rgba(239, 68, 68, 0.42);
+  box-shadow: inset 3px 0 0 var(--danger);
+}
+
 .routing-model-info {
   display: flex;
   flex-direction: column;
+  gap: 2px;
   min-width: 0;
   flex: 1;
+}
+
+.routing-model-title-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex-wrap: wrap;
 }
 
 .routing-model-name {
@@ -774,9 +793,62 @@ button.danger:hover {
   white-space: nowrap;
 }
 
+.routing-exhausted-pill {
+  display: inline-flex;
+  align-items: center;
+  font-size: 9.5px;
+  font-weight: 600;
+  line-height: 1.25;
+  padding: 1px 6px;
+  border-radius: 999px;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.routing-exhausted-pill.warn {
+  background: rgba(249, 115, 22, 0.14);
+  color: #fb923c;
+  border: 1px solid rgba(249, 115, 22, 0.36);
+}
+
+:root[data-theme="light"] .routing-exhausted-pill.warn {
+  color: #c2410c;
+}
+
+.routing-exhausted-pill.danger {
+  background: rgba(239, 68, 68, 0.13);
+  color: var(--danger);
+  border: 1px solid rgba(239, 68, 68, 0.34);
+}
+
 .routing-model-sub {
   font-size: 10px;
   color: var(--text-muted);
+}
+
+.routing-model-sub.warn {
+  color: #fbbf24;
+}
+
+:root[data-theme="light"] .routing-model-sub.warn {
+  color: #b45309;
+}
+
+.routing-model-sub.danger {
+  color: var(--danger);
+}
+
+.dropdown-option-status-tag {
+  font-size: 9.5px;
+  font-weight: 600;
+  line-height: 1.2;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(239, 68, 68, 0.12);
+  color: var(--danger);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 /* 现代圆角悬浮下拉框组件 (对齐 plugin-switcher) */
