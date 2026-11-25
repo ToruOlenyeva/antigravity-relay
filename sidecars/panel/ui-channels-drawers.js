@@ -14,10 +14,7 @@ function createCompactFormDropdown(options, selectedValue, onSelect) {
   leftWrap.className = "active-email-wrap";
 
   if (activeOpt.badgeText) {
-    const b = document.createElement("span");
-    b.className = "channel-type-badge " + (activeOpt.badgeType || "personal");
-    b.textContent = activeOpt.badgeText;
-    leftWrap.appendChild(b);
+    leftWrap.appendChild(createChannelBadgeNode(activeOpt.badgeType || "personal", activeOpt.badgeText, activeOpt.badgeSubText));
   }
 
   const triggerText = document.createElement("span");
@@ -45,10 +42,7 @@ function createCompactFormDropdown(options, selectedValue, onSelect) {
     itemLeft.className = "active-email-wrap";
 
     if (opt.badgeText) {
-      const b = document.createElement("span");
-      b.className = "channel-type-badge " + (opt.badgeType || "personal");
-      b.textContent = opt.badgeText;
-      itemLeft.appendChild(b);
+      itemLeft.appendChild(createChannelBadgeNode(opt.badgeType || "personal", opt.badgeText, opt.badgeSubText));
     }
 
     const itemLabel = document.createElement("span");
@@ -248,7 +242,8 @@ function renderMultiInstanceDrawer() {
       value: acc.id,
       label: isGcp ? `${acc.email} · ${acc.gcpProjectId}` : acc.email,
       badgeType: badgeInfo.badgeType,
-      badgeText: badgeInfo.badgeText
+      badgeText: badgeInfo.badgeText,
+      badgeSubText: badgeInfo.badgeSubText || ""
     };
   });
 
@@ -659,10 +654,7 @@ function buildAccountCardElement(acc, activeEmail, activeGcp) {
   titleWrap.className = "account-title-wrap";
 
   const badgeInfo = getChannelBadgeInfo(acc);
-  const typeBadge = document.createElement("span");
-  typeBadge.className = "channel-type-badge " + badgeInfo.badgeType;
-  typeBadge.textContent = badgeInfo.badgeText;
-  titleWrap.appendChild(typeBadge);
+  titleWrap.appendChild(createChannelBadgeNode(badgeInfo.badgeType, badgeInfo.badgeText, badgeInfo.badgeSubText));
 
   const emailEl = document.createElement("span");
   emailEl.className = "account-email";

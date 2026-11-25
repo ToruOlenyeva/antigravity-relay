@@ -339,29 +339,31 @@ function parseTierRouteSpecUi(spec) {
 function getTierBadgeMetaUi(tierKey) {
   const t = I18N[currentLang];
   if (tierKey === "ultra") {
-    return { badgeType: "ultra", badgeText: "Ultra", tierLabel: t.tierLabelUltra || "Ultra" };
+    return { badgeType: "ultra", badgeText: "Ultra", badgeSubText: "", tierLabel: t.tierLabelUltra || "Ultra" };
   }
   if (tierKey === "pro_lite") {
     return {
       badgeType: "pro-lite",
-      badgeText: t.channelProLiteBadge || "Pro Lite",
-      tierLabel: t.tierLabelProLite || "Pro Lite"
+      badgeText: "Pro",
+      badgeSubText: "Trial",
+      tierLabel: t.tierLabelProLite || "Trial Pro"
     };
   }
   if (tierKey === "pro") {
     return {
       badgeType: "personal",
       badgeText: t.channelPersonalBadge || "Pro",
-      tierLabel: t.tierLabelPro || "Pro"
+      badgeSubText: "Paid",
+      tierLabel: t.tierLabelPro || "Paid Pro"
     };
   }
   if (tierKey === "plus") {
-    return { badgeType: "plus", badgeText: "Plus", tierLabel: t.tierLabelPlus || "Plus" };
+    return { badgeType: "plus", badgeText: "Plus", badgeSubText: "", tierLabel: t.tierLabelPlus || "Plus" };
   }
   if (tierKey === "free") {
-    return { badgeType: "free", badgeText: "Free", tierLabel: t.tierLabelFree || "Free" };
+    return { badgeType: "free", badgeText: "Free", badgeSubText: "", tierLabel: t.tierLabelFree || "Free" };
   }
-  return { badgeType: "unknown", badgeText: t.channelUnknownBadge || "", tierLabel: tierKey };
+  return { badgeType: "unknown", badgeText: t.channelUnknownBadge || "", badgeSubText: "", tierLabel: tierKey };
 }
 
 function buildRouteOptionsList(modelObj = null, isGcpScope = false, currentSelectedRoute = "") {
@@ -369,7 +371,7 @@ function buildRouteOptionsList(modelObj = null, isGcpScope = false, currentSelec
   if (isGcpScope) {
     // GCP 通道专属路由表：无自动轮询，不混入任何个人账号，仅提供「跟随当前 GCP 通道」与手选其他已收录 GCP 通道
     const gcpOptions = [
-      { value: "follow_current", label: t.routeFollowCurrentGcp || t.routeFollowCurrent, badgeType: "", badgeText: "" }
+      { value: "follow_current", label: t.routeFollowCurrentGcp || t.routeFollowCurrent, badgeType: "", badgeText: "", badgeSubText: "" }
     ];
     const seenGcp = new Set(["follow_current"]);
     for (const acc of (state.accounts || [])) {
@@ -386,15 +388,16 @@ function buildRouteOptionsList(modelObj = null, isGcpScope = false, currentSelec
         value: val,
         label: acc.gcpProjectId ? `${acc.email} · ${acc.gcpProjectId}` : acc.email,
         badgeType: badgeInfo.badgeType,
-        badgeText: badgeInfo.badgeText
+        badgeText: badgeInfo.badgeText,
+        badgeSubText: badgeInfo.badgeSubText || ""
       });
     }
     return gcpOptions;
   }
 
   const options = [
-    { value: "follow_current", label: t.routeFollowCurrent, badgeType: "", badgeText: "" },
-    { value: "auto_poll", label: t.routeAutoPoll, badgeType: "", badgeText: "" }
+    { value: "follow_current", label: t.routeFollowCurrent, badgeType: "", badgeText: "", badgeSubText: "" },
+    { value: "auto_poll", label: t.routeAutoPoll, badgeType: "", badgeText: "", badgeSubText: "" }
   ];
 
   const seenValues = new Set(["follow_current", "auto_poll"]);
@@ -403,7 +406,7 @@ function buildRouteOptionsList(modelObj = null, isGcpScope = false, currentSelec
 
   for (const acc of (state.accounts || [])) {
     const isGcp = acc.channelType === "gcp" || Boolean(acc.gcpProjectId);
-    // 个人通道路由表仅列出个人账号（Free / Plus / Pro Lite / Pro / Ultra），绝不混入 GCP 通道
+    // 个人通道路由表仅列出个人账号（Free / Plus / Trial Pro / Paid Pro / Ultra），绝不混入 GCP 通道
     if (isGcp) continue;
     if (modelObj && !findModelInChannel(acc, modelObj)) {
       continue;
@@ -417,8 +420,8 @@ function buildRouteOptionsList(modelObj = null, isGcpScope = false, currentSelec
   const allowFallback = state.routing?.tierFallbackToAny !== false;
   if (tierSet.size >= 2 || (currentTierKey && tierSet.has(currentTierKey))) {
     const prefix = allowFallback
-      ? (t.routeTierPriorityPrefix || "优先轮询 · ")
-      : (t.routeTierStrictPrefix || "仅轮询 · ");
+      ? (t.routeTierPriorityPrefix || "优先轮询 ·")
+      : (t.routeTierStrictPrefix || "仅轮询 ·");
     for (const tKey of PERSONAL_TIER_KEYS_UI) {
       if (!tierSet.has(tKey)) continue;
       const val = `tier:${tKey}`;
@@ -427,9 +430,11 @@ function buildRouteOptionsList(modelObj = null, isGcpScope = false, currentSelec
       const meta = getTierBadgeMetaUi(tKey);
       options.push({
         value: val,
-        label: `${prefix}${meta.tierLabel}`,
+        label: prefix,
         badgeType: meta.badgeType,
-        badgeText: meta.badgeText
+        badgeText: meta.badgeText,
+        badgeSubText: meta.badgeSubText,
+        badgeAfterLabel: true
       });
     }
   }
@@ -443,11 +448,32 @@ function buildRouteOptionsList(modelObj = null, isGcpScope = false, currentSelec
       value: val,
       label: acc.email,
       badgeType: badgeInfo.badgeType,
-      badgeText: badgeInfo.badgeText
+      badgeText: badgeInfo.badgeText,
+      badgeSubText: badgeInfo.badgeSubText || ""
     });
   }
 
   return options;
+}
+
+function appendDropdownOptionContent(containerEl, opt, textClassName) {
+  if (opt.badgeAfterLabel) {
+    const lblEl = document.createElement("span");
+    lblEl.className = "dropdown-tier-prefix";
+    lblEl.textContent = opt.label;
+    containerEl.appendChild(lblEl);
+    if (opt.badgeText) {
+      containerEl.appendChild(createChannelBadgeNode(opt.badgeType, opt.badgeText, opt.badgeSubText));
+    }
+    return;
+  }
+  if (opt.badgeText) {
+    containerEl.appendChild(createChannelBadgeNode(opt.badgeType, opt.badgeText, opt.badgeSubText));
+  }
+  const lblEl = document.createElement("span");
+  lblEl.className = textClassName;
+  lblEl.textContent = opt.label;
+  containerEl.appendChild(lblEl);
 }
 
 function createCustomDropdown(selectedValue, onSelect, modelObj = null, isGcpScope = false) {
@@ -463,18 +489,7 @@ function createCustomDropdown(selectedValue, onSelect, modelObj = null, isGcpSco
 
   const triggerLeft = document.createElement("div");
   triggerLeft.className = "active-email-wrap";
-
-  if (activeOpt.badgeText) {
-    const trigBadge = document.createElement("span");
-    trigBadge.className = "channel-type-badge " + activeOpt.badgeType;
-    trigBadge.textContent = activeOpt.badgeText;
-    triggerLeft.appendChild(trigBadge);
-  }
-
-  const triggerText = document.createElement("span");
-  triggerText.className = "dropdown-trigger-text";
-  triggerText.textContent = activeOpt.label;
-  triggerLeft.appendChild(triggerText);
+  appendDropdownOptionContent(triggerLeft, activeOpt, "dropdown-trigger-text");
 
   const arrowSvg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   arrowSvg.setAttribute("class", "dropdown-arrow");
@@ -494,18 +509,7 @@ function createCustomDropdown(selectedValue, onSelect, modelObj = null, isGcpSco
 
     const itemLeft = document.createElement("div");
     itemLeft.className = "active-email-wrap";
-
-    if (opt.badgeText) {
-      const optBadge = document.createElement("span");
-      optBadge.className = "channel-type-badge " + opt.badgeType;
-      optBadge.textContent = opt.badgeText;
-      itemLeft.appendChild(optBadge);
-    }
-
-    const itemLabel = document.createElement("span");
-    itemLabel.className = "dropdown-option-label";
-    itemLabel.textContent = opt.label;
-    itemLeft.appendChild(itemLabel);
+    appendDropdownOptionContent(itemLeft, opt, "dropdown-option-label");
 
     const checkSvg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     checkSvg.setAttribute("class", "check-icon");

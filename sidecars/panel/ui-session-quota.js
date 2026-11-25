@@ -47,41 +47,54 @@ function getPersonalAccountTierKeyUi(ch) {
 
 function getChannelBadgeInfo(ch) {
   const t = I18N[currentLang];
-  if (!ch) return { badgeType: "unknown", badgeText: t.channelUnknownBadge || "未知" };
+  if (!ch) return { badgeType: "unknown", badgeText: t.channelUnknownBadge || "未知", badgeSubText: "" };
   const isGcp = ch.channelType === "gcp" || Boolean(ch.gcpProjectId);
   if (isGcp) {
-    return { badgeType: "gcp", badgeText: t.channelGcpBadge };
+    return { badgeType: "gcp", badgeText: t.channelGcpBadge, badgeSubText: "" };
   }
   const tierKey = getPersonalAccountTierKeyUi(ch);
   if (tierKey === "ultra") {
-    return { badgeType: "ultra", badgeText: "Ultra" };
+    return { badgeType: "ultra", badgeText: "Ultra", badgeSubText: "" };
   }
   if (tierKey === "pro_lite") {
-    return { badgeType: "pro-lite", badgeText: t.channelProLiteBadge || "Pro Lite" };
+    return { badgeType: "pro-lite", badgeText: "Pro", badgeSubText: "Trial" };
   }
   if (tierKey === "pro") {
-    return { badgeType: "personal", badgeText: t.channelPersonalBadge };
+    return { badgeType: "personal", badgeText: t.channelPersonalBadge || "Pro", badgeSubText: "Paid" };
   }
   if (tierKey === "plus") {
-    return { badgeType: "plus", badgeText: "Plus" };
+    return { badgeType: "plus", badgeText: "Plus", badgeSubText: "" };
   }
   if (tierKey === "free") {
-    return { badgeType: "free", badgeText: "Free" };
+    return { badgeType: "free", badgeText: "Free", badgeSubText: "" };
   }
-  return { badgeType: "unknown", badgeText: t.channelUnknownBadge || "未知" };
+  return { badgeType: "unknown", badgeText: t.channelUnknownBadge || "未知", badgeSubText: "" };
 }
 
 /**
- * 创建带防外部 DOM 翻译保护的通道类型徽章节点。
+ * 创建带防外部 DOM 翻译保护的通道类型徽章节点（支持单行与双层微徽章）。
  * @param {string} badgeType 徽章样式类别
- * @param {string} badgeText 徽章文本
+ * @param {string} badgeText 徽章主文本
+ * @param {string} badgeSubText 可选上行辅助小字（如 Trial / Paid）
  * @returns {HTMLSpanElement}
  */
-function createChannelBadgeNode(badgeType, badgeText) {
+function createChannelBadgeNode(badgeType, badgeText, badgeSubText = "") {
   const badge = document.createElement("span");
-  badge.className = `channel-type-badge ${badgeType || "personal"} notranslate`;
+  badge.className = `channel-type-badge ${badgeType || "personal"}${badgeSubText ? " stacked" : ""} notranslate`;
   badge.setAttribute("translate", "no");
-  badge.textContent = badgeText;
+  if (badgeSubText) {
+    const subEl = document.createElement("span");
+    subEl.className = "badge-sub";
+    subEl.textContent = badgeSubText;
+    const mainEl = document.createElement("span");
+    mainEl.className = "badge-main";
+    mainEl.textContent = badgeText;
+    badge.appendChild(subEl);
+    badge.appendChild(mainEl);
+    badge.title = `${badgeSubText} ${badgeText}`;
+  } else {
+    badge.textContent = badgeText;
+  }
   return badge;
 }
 
@@ -518,7 +531,7 @@ function renderSessionSelector() {
   leftWrap.appendChild(dot);
 
   const curBadge = getChannelBadgeInfo(currentViewed);
-  leftWrap.appendChild(createChannelBadgeNode(curBadge.badgeType, curBadge.badgeText));
+  leftWrap.appendChild(createChannelBadgeNode(curBadge.badgeType, curBadge.badgeText, curBadge.badgeSubText));
 
   const emailText = document.createElement("span");
   emailText.className = "active-email";
@@ -557,7 +570,7 @@ function renderSessionSelector() {
     itemLeft.appendChild(itemDot);
 
     const chBadge = getChannelBadgeInfo(ch);
-    itemLeft.appendChild(createChannelBadgeNode(chBadge.badgeType, chBadge.badgeText));
+    itemLeft.appendChild(createChannelBadgeNode(chBadge.badgeType, chBadge.badgeText, chBadge.badgeSubText));
 
     const itemLabel = document.createElement("span");
     itemLabel.className = "dropdown-option-label";
