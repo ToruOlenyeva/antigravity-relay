@@ -6,13 +6,26 @@
   <title>账号与配额管理</title>
   <script>
     (function() {
+      var uiStyle = "modern";
+      var fontScale = "md";
       var isDark = true;
       try {
-        var saved = localStorage.getItem("antigravity_theme_mode");
-        if (saved === "light") isDark = false;
-        else if (saved === "dark") isDark = true;
-        else if (window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches) isDark = false;
+        var savedStyle = localStorage.getItem("agy_relay_ui_style");
+        if (savedStyle === "classic" || savedStyle === "modern") uiStyle = savedStyle;
+        var savedFont = localStorage.getItem("agy_relay_font_scale");
+        if (savedFont === "sm" || savedFont === "md" || savedFont === "lg") fontScale = savedFont;
+        var themePref = localStorage.getItem("agy_relay_theme_pref") || "auto";
+        if (themePref === "light") isDark = false;
+        else if (themePref === "dark") isDark = true;
+        else {
+          var saved = localStorage.getItem("antigravity_theme_mode");
+          if (saved === "light") isDark = false;
+          else if (saved === "dark") isDark = true;
+          else if (window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches) isDark = false;
+        }
       } catch (e) {}
+      document.documentElement.setAttribute("data-ui-style", uiStyle);
+      document.documentElement.setAttribute("data-font-scale", fontScale);
       document.documentElement.setAttribute("data-theme", isDark ? "dark" : "light");
     })();
   </script>
@@ -28,11 +41,18 @@
       <span class="badge" id="uiLsBadge">在线</span>
     </div>
     <div class="header-actions">
-      <button class="secondary small" id="langToggleBtn" onclick="toggleLanguage()">EN</button>
+      <button class="header-update-pill" id="headerUpdatePill" style="display: none;" onclick="switchMainTab('preferences')"></button>
       <button class="secondary small" id="refreshBtn" onclick="handleManualRefresh()">刷新</button>
     </div>
   </div>
 
+  <!-- 顶部主导航切换栏（账号与路由 / 偏好设置） -->
+  <div class="top-tab-bar" role="tablist">
+    <button type="button" class="top-tab-btn active" id="tabDashboardBtn" role="tab" onclick="switchMainTab('dashboard')">账号与路由</button>
+    <button type="button" class="top-tab-btn" id="tabPrefsBtn" role="tab" onclick="switchMainTab('preferences')">偏好设置</button>
+  </div>
+
+  <div id="dashboardView">
   <!-- 1. 账户模型额度（支持下拉选择任意已收录账号/通道查看实时配额与可用模型） -->
   <div class="section-card">
     <div class="section-header">
@@ -110,10 +130,14 @@
 
     <div class="routing-list" id="modelRoutingContainer"></div>
   </div>
+  </div>
+
+  <div id="preferencesView" style="display: none;"></div>
 
   <div class="toast" id="toast"></div>
 
   <script src="/i18n.js"></script>
+  <script src="/ui-prefs.js"></script>
   <script src="/ui-session-quota.js"></script>
   <script src="/ui-channels-drawers.js"></script>
   <script src="/ui-routing.js"></script>

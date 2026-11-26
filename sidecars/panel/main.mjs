@@ -120,6 +120,8 @@ function restartSelfGracefully() {
 }
 
 let lsBridge = await import("./ls-bridge.mjs");
+const updaterMod = await import("./bridge/plugin-updater.mjs");
+const { getUpdaterStatus, setUpdaterConfig, checkForPluginUpdate, performPluginUpdate } = updaterMod;
 
 const watchedBackendFiles = [
   path.join(__dirname, "ls-bridge.mjs"),
@@ -131,7 +133,8 @@ const watchedBackendFiles = [
   path.join(__dirname, "bridge", "route-selector.mjs"),
   path.join(__dirname, "bridge", "cloudcode-proxy.mjs"),
   path.join(__dirname, "bridge", "oauth-launcher.mjs"),
-  path.join(__dirname, "bridge", "signature-scrub.mjs")
+  path.join(__dirname, "bridge", "signature-scrub.mjs"),
+  path.join(__dirname, "bridge", "plugin-updater.mjs")
 ];
 for (const wp of watchedBackendFiles) {
   try {
@@ -181,7 +184,7 @@ function computeRelaySnapshotSignature(snapshot) {
 
 function getFrontendAssetsVersion() {
   let ver = 0;
-  for (const f of ["index.html", "styles.css", "i18n.js", "ui-session-quota.js", "ui-channels-drawers.js", "ui-routing.js", "app.js"]) {
+  for (const f of ["index.html", "styles.css", "i18n.js", "ui-session-quota.js", "ui-channels-drawers.js", "ui-routing.js", "ui-prefs.js", "app.js"]) {
     try {
       ver += Math.floor(fs.statSync(path.join(__dirname, f)).mtimeMs);
     } catch {}
@@ -372,7 +375,7 @@ async function requestHandler(req, res) {
     return;
   }
 
-  if (req.method === "GET" && (pathname === "/app.js" || pathname === "/ui-session-quota.js" || pathname === "/ui-channels-drawers.js" || pathname === "/ui-routing.js")) {
+  if (req.method === "GET" && (pathname === "/app.js" || pathname === "/ui-prefs.js" || pathname === "/ui-session-quota.js" || pathname === "/ui-channels-drawers.js" || pathname === "/ui-routing.js")) {
     const scriptName = pathname.slice(1);
     res.writeHead(200, {
       "Content-Type": "application/javascript; charset=utf-8",
@@ -939,6 +942,43 @@ async function requestHandler(req, res) {
     }
   }
 
+  // 10. 插件版本检查、更新策略与一键更新
+  if (req.method === "GET" && pathname === "/api/updater-status") {
+    try {
+      return sendJson(res, 200, { success: true, ...(await getUpdaterStatus()) });
+    } catch (err) {
+      return sendJson(res, 500, { success: false, error: err.message });
+    }
+  }
+
+  if (req.method === "POST" && pathname === "/api/updater-check") {
+    try {
+      return sendJson(res, 200, await checkForPluginUpdate({ force: true }));
+    } catch (err) {
+      return sendJson(res, 500, { success: false, error: err.message });
+    }
+  }
+
+  if (req.method === "POST" && pathname === "/api/updater-config") {
+    try {
+      const body = await readJsonBody(req).catch(() => ({}));
+      return sendJson(res, 200, { success: true, ...(await setUpdaterConfig(body)) });
+    } catch (err) {
+      return sendJson(res, 500, { success: false, error: err.message });
+    }
+  }
+
+  if (req.method === "POST" && pathname === "/api/updater-apply") {
+    try {
+      const result = await performPluginUpdate({
+        onUpdatedRestart: () => restartSelfGracefully()
+      });
+      return sendJson(res, 200, result);
+    } catch (err) {
+      return sendJson(res, 500, { success: false, error: err.message });
+    }
+  }
+
   res.writeHead(404);
   res.end("Not Found");
 }
@@ -1074,3 +1114,16 @@ lsBridge.fetchLiveSystemSnapshot(false)
     broadcastSnapshot(updatedSnap);
   })
   .catch(() => {});
+
+// 启动 12 秒后按更新策略温和检查一次远程版本（6 小时冷却 TTL）
+setTimeout(async () => {
+  try {
+    const st = await getUpdaterStatus();
+    if (st.updateMode === "off") return;
+    if (Date.now() - Number(st.lastCheckedAt || 0) < 6 * 3600 * 1000) return;
+    const checked = await checkForPluginUpdate({ force: false });
+    if (checked.updateMode === "auto" && checked.hasUpdate && (checked.installMode === "zip" || checked.worktreeClean)) {
+      await performPluginUpdate({ onUpdatedRestart: () => restartSelfGracefully() });
+    }
+  } catch {}
+}, 12000).unref();

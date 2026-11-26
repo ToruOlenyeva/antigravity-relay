@@ -335,16 +335,12 @@ function renderAddGcpDrawer() {
   titleSpan.textContent = t.gcpDrawerTitle;
   const headerBtns = document.createElement("div");
   headerBtns.className = "btn-group";
-  const hasExistingGcpForDraft = !isNewOAuthMode && addGcpDraft.email
-    ? (state.accounts || []).some(
-        (a) => a.email === addGcpDraft.email && (a.channelType === "gcp" || Boolean(a.gcpProjectId))
-      )
-    : false;
-  if (!isNewOAuthMode && addGcpDraft.channelType !== "personal" && addGcpDraft.email && hasExistingGcpForDraft) {
+  if (!isNewOAuthMode && addGcpDraft.channelType !== "personal" && addGcpDraft.email) {
     const scanBtn = document.createElement("button");
     scanBtn.className = "secondary small";
-    scanBtn.textContent = t.btnDiscoverGcp;
-    scanBtn.onclick = () => handleDiscoverGcpProjects(addGcpDraft.email);
+    scanBtn.disabled = Boolean(addGcpDraft.isScanning);
+    scanBtn.textContent = addGcpDraft.isScanning ? (t.gcpScanBtnScanning || "扫描中...") : t.btnDiscoverGcp;
+    scanBtn.onclick = () => handleDiscoverGcpProjects(addGcpDraft.email, { silent: false });
     headerBtns.appendChild(scanBtn);
   }
   const closeBtn = document.createElement("button");
@@ -458,9 +454,14 @@ function renderAddGcpDrawer() {
     pidInput.value = addGcpDraft.projectId || "";
     const loginGcpBtn = document.createElement("button");
     loginGcpBtn.className = "small";
-    loginGcpBtn.textContent = t.btnStartNewOAuthGcpDirect;
+    loginGcpBtn.textContent = (addGcpDraft.projectId || "").trim()
+      ? t.btnStartNewOAuthGcpDirect
+      : (t.btnStartNewOAuthGcpScan || t.btnStartNewOAuthGcpDirect);
     pidInput.oninput = () => {
       addGcpDraft.projectId = pidInput.value;
+      loginGcpBtn.textContent = (pidInput.value || "").trim()
+        ? t.btnStartNewOAuthGcpDirect
+        : (t.btnStartNewOAuthGcpScan || t.btnStartNewOAuthGcpDirect);
     };
     loginGcpBtn.onclick = () => {
       const cleanPid = (pidInput.value || "").trim();
@@ -479,6 +480,10 @@ function renderAddGcpDrawer() {
     pidRow.appendChild(pidInput);
     pidRow.appendChild(loginGcpBtn);
     drawer.appendChild(pidRow);
+    const hintDiv = document.createElement("div");
+    hintDiv.className = "gcp-scan-hint";
+    hintDiv.textContent = t.newOAuthGcpHint;
+    drawer.appendChild(hintDiv);
     return;
   }
 
@@ -540,8 +545,31 @@ function renderAddGcpDrawer() {
   }
   drawer.appendChild(modeLocRow);
 
-  // 若自动扫描发现了多个项目 ID，提供下拉列表点击填入输入框
-  if (Array.isArray(addGcpDraft.scannedProjects) && addGcpDraft.scannedProjects.length > 1) {
+  // 切换至已有邮箱 GCP 模式时，首次自动静默触发一次项目扫描
+  if (
+    addGcpDraft.email &&
+    !addGcpDraft.isScanning &&
+    typeof autoScannedGcpEmails !== "undefined" &&
+    !autoScannedGcpEmails.has(addGcpDraft.email.toLowerCase()) &&
+    typeof handleDiscoverGcpProjects === "function"
+  ) {
+    autoScannedGcpEmails.add(addGcpDraft.email.toLowerCase());
+    setTimeout(() => {
+      if (isAddGcpDrawerOpen && addGcpDraft.sourceMode === "existing" && addGcpDraft.channelType === "gcp" && addGcpDraft.email) {
+        handleDiscoverGcpProjects(addGcpDraft.email, { silent: true });
+      }
+    }, 0);
+  }
+
+  if (addGcpDraft.isScanning) {
+    const scanHint = document.createElement("div");
+    scanHint.className = "gcp-scan-hint";
+    scanHint.textContent = t.gcpScanningHint || "正在扫描可用的 GCP 项目...";
+    drawer.appendChild(scanHint);
+  }
+
+  // 若自动扫描发现了 1 个或多个项目 ID，提供下拉列表点击填入输入框
+  if (Array.isArray(addGcpDraft.scannedProjects) && addGcpDraft.scannedProjects.length > 0) {
     const scannedRow = document.createElement("div");
     scannedRow.className = "gcp-config-row";
     const scannedOpts = addGcpDraft.scannedProjects.map((p) => ({
@@ -558,6 +586,11 @@ function renderAddGcpDrawer() {
     );
     scannedRow.appendChild(scannedDropdown);
     drawer.appendChild(scannedRow);
+  } else if (addGcpDraft.scanMessage) {
+    const msgHint = document.createElement("div");
+    msgHint.className = "gcp-scan-hint warn";
+    msgHint.textContent = addGcpDraft.scanMessage;
+    drawer.appendChild(msgHint);
   }
 
   // 输入云项目编号 + 确认添加

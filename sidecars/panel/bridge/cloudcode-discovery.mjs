@@ -117,32 +117,61 @@ async function fetchCloudResourceJson(requestPath, accessToken, extraHeaders = {
 
 async function fetchCloudResourceProjects(accessToken, quotaProjectId = "") {
   const extraHeaders = quotaProjectId ? { "X-Goog-User-Project": quotaProjectId } : {};
-  const resp = await fetchCloudResourceJson("/v1/projects?pageSize=100", accessToken, extraHeaders);
-  if (resp.status !== 200) {
-    let reason = "";
-    if (resp.status === 403) {
-      reason = /ACCESS_TOKEN_SCOPE_INSUFFICIENT/i.test(resp.rawText) ? "scope_insufficient" : "api_disabled";
+  const list = [];
+  let pageToken = "";
+  let firstStatus = 200;
+  let firstReason = "";
+
+  for (let page = 0; page < 3; page += 1) {
+    const qs = pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : "";
+    const resp = await fetchCloudResourceJson(`/v1/projects?pageSize=100${qs}`, accessToken, extraHeaders);
+    if (resp.status !== 200) {
+      if (page === 0) {
+        firstStatus = resp.status;
+        if (resp.status === 403) {
+          firstReason = /ACCESS_TOKEN_SCOPE_INSUFFICIENT/i.test(resp.rawText) ? "scope_insufficient" : "api_disabled";
+        }
+      }
+      break;
     }
-    return { projects: [], status: resp.status, reason };
+    for (const p of (resp.data?.projects || [])) {
+      if (p && p.projectId && (!p.lifecycleState || p.lifecycleState === "ACTIVE") && !isInternalConsumerPoolProject(p.projectId)) {
+        list.push({
+          projectId: String(p.projectId).trim(),
+          name: String(p.name || p.projectId).trim()
+        });
+      }
+    }
+    pageToken = String(resp.data?.nextPageToken || "").trim();
+    if (!pageToken) break;
   }
-  const list = (resp.data?.projects || [])
-    .filter((p) => p && p.projectId && (!p.lifecycleState || p.lifecycleState === "ACTIVE") && !isInternalConsumerPoolProject(p.projectId))
-    .map((p) => ({
-      projectId: String(p.projectId).trim(),
-      name: String(p.name || p.projectId).trim()
-    }));
-  return { projects: list, status: 200, reason: "" };
+
+  return {
+    projects: list,
+    status: list.length > 0 ? 200 : firstStatus,
+    reason: list.length > 0 ? "" : firstReason
+  };
 }
 
 async function fetchCloudResourceV3Projects(accessToken) {
-  const resp = await fetchCloudResourceJson("/v3/projects:search?pageSize=100", accessToken);
-  if (resp.status !== 200 || !resp.data) return [];
-  return (resp.data.projects || [])
-    .filter((p) => p && p.projectId && (!p.state || p.state === "ACTIVE") && !isInternalConsumerPoolProject(p.projectId))
-    .map((p) => ({
-      projectId: String(p.projectId).trim(),
-      name: String(p.displayName || p.projectId).trim()
-    }));
+  const list = [];
+  let pageToken = "";
+  for (let page = 0; page < 3; page += 1) {
+    const qs = pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : "";
+    const resp = await fetchCloudResourceJson(`/v3/projects:search?pageSize=100${qs}`, accessToken);
+    if (resp.status !== 200 || !resp.data) break;
+    for (const p of (resp.data.projects || [])) {
+      if (p && p.projectId && (!p.state || p.state === "ACTIVE") && !isInternalConsumerPoolProject(p.projectId)) {
+        list.push({
+          projectId: String(p.projectId).trim(),
+          name: String(p.displayName || p.projectId).trim()
+        });
+      }
+    }
+    pageToken = String(resp.data?.nextPageToken || "").trim();
+    if (!pageToken) break;
+  }
+  return list;
 }
 
 function readLocalGcloudProjectsForEmail(email) {
@@ -281,13 +310,18 @@ export async function discoverGcpProjectsForAccount(targetEmail = "") {
 
   let accessToken = storedToken.token.access_token || "";
   const refreshToken = storedToken.token.refresh_token || "";
+  const expMs = new Date(storedToken.token.expiry || 0).getTime() || 0;
+  const tokenStillFresh = Boolean(accessToken && expMs > Date.now() + 300000);
 
-  if (refreshToken) {
+  if (refreshToken && !tokenStillFresh) {
     try {
       const refreshed = await refreshOAuthAccessToken(refreshToken);
       if (refreshed && refreshed.access_token) {
         accessToken = refreshed.access_token;
         storedToken.token.access_token = accessToken;
+        if (Number(refreshed.expires_in) > 0) {
+          storedToken.token.expiry = new Date(Date.now() + Number(refreshed.expires_in) * 1000).toISOString();
+        }
         writeRelayConfig(cfg);
       }
     } catch {}

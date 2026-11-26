@@ -1,9 +1,8 @@
 // 全局状态管理、主题与多语言同步、API 动作与 SSE / 可见性主控制器
 
-let savedLang = null;
-try { savedLang = localStorage.getItem("agy_relay_lang"); } catch (e) {}
-const defaultBrowserLang = (typeof navigator !== "undefined" && typeof navigator.language === "string" && /^zh\b/i.test(navigator.language)) ? "zh" : "en";
-let currentLang = (savedLang === "en" || savedLang === "zh") ? savedLang : defaultBrowserLang;
+let currentLang = typeof resolveEffectiveLang === "function"
+  ? resolveEffectiveLang()
+  : ((typeof navigator !== "undefined" && typeof navigator.language === "string" && /^zh\b/i.test(navigator.language)) ? "zh" : "en");
 
 let state = {
   lsOnline: false,
@@ -43,8 +42,11 @@ let addGcpDraft = {
   gcpBillingMode: "agent_platform",
   gcpLocation: "global",
   projectId: "",
-  scannedProjects: []
+  scannedProjects: [],
+  isScanning: false,
+  scanMessage: ""
 };
+const autoScannedGcpEmails = new Set();
 
 function showToast(msg) {
   const el = document.getElementById("toast");
@@ -57,7 +59,7 @@ function showToast(msg) {
   }, 2600);
 }
 
-// 自动跟随 Antigravity 宿主与系统深浅色主题（无手动按钮）
+// 自动跟随 Antigravity 宿主与系统深浅色主题（尊重偏好设置中的手动主题锁定）
 window.addEventListener("message", (event) => {
   if (event.data && event.data.type === "theme-change") {
     const vars = event.data.payload?.cssVariables || {};
@@ -65,8 +67,10 @@ window.addEventListener("message", (event) => {
     if (bg) {
       const isLight = bg.startsWith("#f") || bg.startsWith("#e") || bg.startsWith("#d") || bg === "white" || bg.startsWith("rgb(25") || bg.startsWith("rgb(24");
       const mode = isLight ? "light" : "dark";
-      document.documentElement.setAttribute("data-theme", mode);
       try { localStorage.setItem("antigravity_theme_mode", mode); } catch (e) {}
+      if (typeof getThemePref !== "function" || getThemePref() === "auto") {
+        document.documentElement.setAttribute("data-theme", mode);
+      }
     }
   }
 });
@@ -74,8 +78,9 @@ window.addEventListener("message", (event) => {
 if (window.matchMedia) {
   try {
     window.matchMedia("(prefers-color-scheme: light)").addEventListener("change", (e) => {
-      const mode = e.matches ? "light" : "dark";
-      document.documentElement.setAttribute("data-theme", mode);
+      if (typeof getThemePref !== "function" || getThemePref() === "auto") {
+        document.documentElement.setAttribute("data-theme", e.matches ? "light" : "dark");
+      }
     });
   } catch (e) {}
 }
@@ -158,7 +163,12 @@ function toggleLanguage() {
 function applyI18n() {
   const t = I18N[currentLang];
   document.getElementById("uiAppTitle").textContent = t.appTitle;
-  document.getElementById("langToggleBtn").textContent = t.langBtn;
+  const langBtn = document.getElementById("langToggleBtn");
+  if (langBtn) langBtn.textContent = t.langBtn;
+  const tabDash = document.getElementById("tabDashboardBtn");
+  if (tabDash) tabDash.textContent = t.tabDashboard || "账号与路由";
+  const tabPrefs = document.getElementById("tabPrefsBtn");
+  if (tabPrefs) tabPrefs.textContent = t.tabPreferences || "偏好设置";
   document.getElementById("refreshBtn").textContent = t.refreshBtn;
   document.getElementById("secCurrentTitle").textContent = t.secCurrentTitle;
   const telTitleEl = document.getElementById("secTelemetryTitle");
@@ -178,6 +188,10 @@ function applyI18n() {
   document.getElementById("btnCancelOAuth").textContent = t.btnCancelOAuth;
   document.getElementById("secRoutingTitle").textContent = t.secRoutingTitle;
   document.getElementById("secRoutingHint").textContent = t.secRoutingHint;
+  if (typeof syncHeaderUpdatePill === "function") syncHeaderUpdatePill();
+  if (typeof renderPreferencesView === "function" && typeof activeMainTab !== "undefined" && activeMainTab === "preferences") {
+    renderPreferencesView();
+  }
   renderAll();
 }
 
@@ -268,6 +282,9 @@ function applyIncomingSnapshot(nextSnap, opts = {}) {
         addGcpDraft.email = prevOAuthEvent.email;
         addGcpDraft.channelType = "gcp";
         addGcpDraft.scannedProjects = [];
+        addGcpDraft.projectId = "";
+        addGcpDraft.scanMessage = "";
+        autoScannedGcpEmails.add(prevOAuthEvent.email.toLowerCase());
       }
     }
     if (opts.forceRender) {
@@ -275,8 +292,15 @@ function applyIncomingSnapshot(nextSnap, opts = {}) {
     } else {
       safeRenderAll();
     }
-    if (isNewOAuthEvent && opts.allowOAuthToast !== false) {
-      showToast(`${I18N[currentLang].toastOAuthSuccess}${prevOAuthEvent.email}`);
+    if (isNewOAuthEvent) {
+      if (prevOAuthEvent.autoScanGcp) {
+        if (opts.allowOAuthToast !== false) {
+          showToast(`${I18N[currentLang].toastOAuthGcpScanReady || I18N[currentLang].toastOAuthSuccess}${prevOAuthEvent.email}`);
+        }
+        handleDiscoverGcpProjects(prevOAuthEvent.email, { silent: false });
+      } else if (opts.allowOAuthToast !== false) {
+        showToast(`${I18N[currentLang].toastOAuthSuccess}${prevOAuthEvent.email}`);
+      }
     }
     return true;
   }
@@ -318,9 +342,15 @@ function handleManualRefresh() {
   loadSystemStatus(true, false);
 }
 
-async function handleDiscoverGcpProjects(targetEmail = "") {
+async function handleDiscoverGcpProjects(targetEmail = "", opts = {}) {
+  const email = (targetEmail || state.activeAccount?.email || "").trim();
+  if (!email) return;
+  const silent = Boolean(opts?.silent);
+  const t = I18N[currentLang];
+  addGcpDraft.isScanning = true;
+  addGcpDraft.scanMessage = "";
+  renderAddGcpDrawer();
   try {
-    const email = targetEmail || state.activeAccount?.email || "";
     const res = await fetch("/api/discover-gcp-projects", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -328,25 +358,35 @@ async function handleDiscoverGcpProjects(targetEmail = "") {
     });
     const data = await res.json();
     const list = Array.isArray(data.discovered) ? data.discovered : [];
-    const t = I18N[currentLang];
+    autoScannedGcpEmails.add(email.toLowerCase());
     if (list.length === 1) {
-      addGcpDraft.scannedProjects = [];
-      addGcpDraft.projectId = list[0].projectId || "";
-      renderAddGcpDrawer();
-      showToast(`${t.toastGcpSingleFilled}${addGcpDraft.projectId}`);
-    } else if (list.length > 1) {
       addGcpDraft.scannedProjects = list;
       addGcpDraft.projectId = list[0].projectId || "";
-      renderAddGcpDrawer();
-      showToast(`${t.toastGcpMultiFound}${list.length}`);
+      addGcpDraft.scanMessage = "";
+      if (!silent) showToast(`${t.toastGcpSingleFilled}${addGcpDraft.projectId}`);
+    } else if (list.length > 1) {
+      addGcpDraft.scannedProjects = list;
+      if (!addGcpDraft.projectId || !list.some((p) => p.projectId === addGcpDraft.projectId)) {
+        addGcpDraft.projectId = list[0].projectId || "";
+      }
+      addGcpDraft.scanMessage = "";
+      if (!silent) showToast(`${t.toastGcpMultiFound}${list.length}`);
     } else {
       addGcpDraft.scannedProjects = [];
       if (/^(aicode-consumers|rising-fact-|gen-lang-client-)/i.test(addGcpDraft.projectId || "")) {
         addGcpDraft.projectId = "";
       }
-      renderAddGcpDrawer();
+      addGcpDraft.scanMessage = data.reason === "scope_insufficient"
+        ? (t.gcpScanScopeHint || t.toastGcpScopeRestricted)
+        : (t.toastGcpNoneFound || "");
+      if (!silent && addGcpDraft.scanMessage) showToast(addGcpDraft.scanMessage);
     }
-  } catch (e) {}
+  } catch (e) {
+    addGcpDraft.scanMessage = e?.message || "";
+  } finally {
+    addGcpDraft.isScanning = false;
+    renderAddGcpDrawer();
+  }
 }
 
 async function addPersonalChannelForEmail(email) {
@@ -913,6 +953,7 @@ bindPanelVisibilityListeners();
 if (isPanelActuallyVisible()) {
   lastVisibleRefreshAt = Date.now();
   loadSystemStatus(false, true);
+  if (typeof loadUpdaterStatus === "function") loadUpdaterStatus();
   ensureSseConnected();
 }
 // 仅按本地时钟每 60 秒刷新一次倒计时分钟数显示，不发起任何云端或状态网络轮询（零风控）
