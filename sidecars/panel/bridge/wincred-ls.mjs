@@ -20,30 +20,14 @@ import {
   getInstanceTokenFilePath,
   ensureInstanceIsolatedHome
 } from "../store.mjs";
+import { getDynamicOAuthClientsSync } from "./oauth-extract.mjs";
+import { createProxiedHttpsAgent } from "./net-proxy.mjs";
 
-const _G_HOST = ["apps", "googleusercontent", "com"].join(".");
-const _G_PREF = ["GOC", "SPX"].join("");
-export const DEFAULT_AGY_OAUTH_CLIENTS = [
-  {
-    clientId: `${["1071006060591", "tmhssin2h21lcre235vtolojh4g403ep"].join("-")}.${_G_HOST}`,
-    clientSecret: `${_G_PREF}-${["K58FWR486LdLJ1m", "LB8sXC4z6qDAf"].join("")}`
-  },
-  {
-    clientId: `${["884354919052", "36trc1jjb3tguiac32ov6cod268c5blh"].join("-")}.${_G_HOST}`,
-    clientSecret: `${_G_PREF}-${["9YQWpF7RWDC0QTdj", "-YxKMwR0ZtsX"].join("")}`
-  },
-  {
-    clientId: `${["1098991175725", "mdu1oe5cbbe1ckggsebobh94toiap657"].join("-")}.${_G_HOST}`,
-    clientSecret: `${_G_PREF}-${["j7Rn4pvpwI9-bk-J", "0bgEy70PW4-5"].join("")}`
-  },
-  {
-    clientId: `${["71006060591", "tmhssin2h21lcre235vtolojh4g403ep"].join("-")}.${_G_HOST}`,
-    clientSecret: `${_G_PREF}-${["K58FWR486LdLJ1m", "LB8sXC4z6qDAf"].join("")}`
-  }
-];
+export const DEFAULT_AGY_OAUTH_CLIENTS = [];
 
 export function getOAuthClientForChannel() {
-  return DEFAULT_AGY_OAUTH_CLIENTS[0];
+  const clients = loadOAuthClients();
+  return clients[0] || { clientId: "", clientSecret: "" };
 }
 
 export function loadOAuthClients() {
@@ -54,16 +38,16 @@ export function loadOAuthClients() {
       merged.push({ clientId: String(c.clientId).trim(), clientSecret: String(c.clientSecret).trim() });
     }
   };
+  if (process.env.AGY_OAUTH_CLIENT_ID && process.env.AGY_OAUTH_CLIENT_SECRET) {
+    addClient({ clientId: process.env.AGY_OAUTH_CLIENT_ID, clientSecret: process.env.AGY_OAUTH_CLIENT_SECRET });
+  }
   try {
     const cfg = readRelayConfig();
     if (Array.isArray(cfg?.__meta__?.oauthClients)) {
       for (const c of cfg.__meta__.oauthClients) addClient(c);
     }
   } catch {}
-  if (process.env.AGY_OAUTH_CLIENT_ID && process.env.AGY_OAUTH_CLIENT_SECRET) {
-    addClient({ clientId: process.env.AGY_OAUTH_CLIENT_ID, clientSecret: process.env.AGY_OAUTH_CLIENT_SECRET });
-  }
-  for (const c of DEFAULT_AGY_OAUTH_CLIENTS) addClient(c);
+  for (const c of getDynamicOAuthClientsSync()) addClient(c);
   return merged;
 }
 
@@ -1644,9 +1628,10 @@ export async function callLsRpc(ls, method, body = {}) {
   }
 }
 
-function refreshOAuthAccessTokenWithClient(refreshToken, clientId, clientSecret) {
+async function refreshOAuthAccessTokenWithClient(refreshToken, clientId, clientSecret) {
+  if (!refreshToken) throw new Error("Missing refresh_token");
+  const proxyCtx = await createProxiedHttpsAgent("oauth2.googleapis.com", 443, { timeoutMs: 3500 });
   return new Promise((resolve, reject) => {
-    if (!refreshToken) return reject(new Error("Missing refresh_token"));
     const params = new URLSearchParams({
       client_id: clientId,
       client_secret: clientSecret,
@@ -1655,10 +1640,12 @@ function refreshOAuthAccessTokenWithClient(refreshToken, clientId, clientSecret)
     });
     const body = Buffer.from(params.toString(), "utf8");
     let settled = false;
+    let hardTimer = null;
     const finish = (err, val) => {
       if (settled) return;
       settled = true;
       clearTimeout(hardTimer);
+      proxyCtx.cleanup();
       if (err) reject(err);
       else resolve(val);
     };
@@ -1668,12 +1655,12 @@ function refreshOAuthAccessTokenWithClient(refreshToken, clientId, clientSecret)
         port: 443,
         path: "/token",
         method: "POST",
-        family: 4,
+        ...(proxyCtx.agent ? { agent: proxyCtx.agent } : { family: 4 }),
         headers: {
           "Content-Type": "application/x-www-form-urlencoded",
           "Content-Length": body.length
         },
-        timeout: 4500
+        timeout: 6000
       },
       (res) => {
         const chunks = [];
@@ -1700,10 +1687,10 @@ function refreshOAuthAccessTokenWithClient(refreshToken, clientId, clientSecret)
         });
       }
     );
-    const hardTimer = setTimeout(() => {
+    hardTimer = setTimeout(() => {
       req.destroy();
       finish(new Error("Refresh token timeout"));
-    }, 4500);
+    }, 6000);
     req.on("error", (err) => finish(err));
     req.on("timeout", () => {
       req.destroy();
@@ -1717,7 +1704,14 @@ function refreshOAuthAccessTokenWithClient(refreshToken, clientId, clientSecret)
 export async function refreshOAuthAccessToken(refreshToken) {
   if (!refreshToken) throw new Error("Missing refresh_token");
   let lastErr = null;
-  const clients = loadOAuthClients();
+  let clients = loadOAuthClients();
+  if (clients.length === 0) {
+    getDynamicOAuthClientsSync(true);
+    clients = loadOAuthClients();
+  }
+  if (clients.length === 0) {
+    throw new Error("No OAuth client found in local Antigravity binary");
+  }
   for (const c of clients) {
     try {
       return await refreshOAuthAccessTokenWithClient(refreshToken, c.clientId, c.clientSecret);

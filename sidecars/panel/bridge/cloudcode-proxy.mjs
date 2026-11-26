@@ -46,6 +46,7 @@ import {
   selectBestPersonalChannelForModel,
   getValidPersonalAccessToken
 } from "./route-selector.mjs";
+import { createProxiedHttpsAgent } from "./net-proxy.mjs";
 
 export {
   isGcpThoughtSignature,
@@ -469,14 +470,22 @@ export async function proxyCloudCodeRequest(req, res, rawBodyBuf) {
       return;
     }
 
-    return new Promise((resolve) => {
+    const proxyCtx = await createProxiedHttpsAgent(targetHostname, 443, { timeoutMs: 6000 });
+    return new Promise((rawResolve) => {
+      let settled = false;
+      const resolve = () => {
+        if (settled) return;
+        settled = true;
+        proxyCtx.cleanup();
+        rawResolve();
+      };
       const upReq = https.request(
         {
           hostname: targetHostname,
           port: 443,
           path: reqUrl,
           method: req.method || "POST",
-          family: 4,
+          ...(proxyCtx.agent ? { agent: proxyCtx.agent } : { family: 4 }),
           headers: outHeaders,
           timeout: 120000
         },

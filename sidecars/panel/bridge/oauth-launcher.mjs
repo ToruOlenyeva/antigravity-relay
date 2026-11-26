@@ -42,6 +42,7 @@ import {
   findStoredTokenForEmail,
   probeChannelQuotaSnapshot
 } from "./quota-probe.mjs";
+import { createProxiedHttpsAgent } from "./net-proxy.mjs";
 
 function discoverInstanceCdpPort(ctx) {
   try {
@@ -1098,27 +1099,41 @@ export function hasActiveOAuthSession() {
   return Boolean(activeOAuthSession);
 }
 
-function exchangeOAuthCodeForTokens({ code, redirectUri, codeVerifier, clientId, clientSecret }) {
+async function exchangeOAuthCodeForTokens({ code, redirectUri, codeVerifier, clientId, clientSecret }) {
+  const fallbackClient = getOAuthClientForChannel();
+  const proxyCtx = await createProxiedHttpsAgent("oauth2.googleapis.com", 443, { timeoutMs: 4500 });
   return new Promise((resolve, reject) => {
     const params = new URLSearchParams({
-      client_id: clientId || AGY_OAUTH_CLIENT_ID,
-      client_secret: clientSecret || AGY_OAUTH_CLIENT_SECRET,
+      client_id: clientId || fallbackClient.clientId || AGY_OAUTH_CLIENT_ID,
+      client_secret: clientSecret || fallbackClient.clientSecret || AGY_OAUTH_CLIENT_SECRET,
       code,
       code_verifier: codeVerifier,
       grant_type: "authorization_code",
       redirect_uri: redirectUri
     });
     const body = Buffer.from(params.toString(), "utf8");
+    let settled = false;
+    let hardTimer = null;
+    const finish = (err, val) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(hardTimer);
+      proxyCtx.cleanup();
+      if (err) reject(err);
+      else resolve(val);
+    };
     const req = https.request(
       {
         hostname: "oauth2.googleapis.com",
         port: 443,
         path: "/token",
         method: "POST",
+        ...(proxyCtx.agent ? { agent: proxyCtx.agent } : {}),
         headers: {
           "Content-Type": "application/x-www-form-urlencoded",
           "Content-Length": body.length
-        }
+        },
+        timeout: 12000
       },
       (res) => {
         const chunks = [];
@@ -1126,13 +1141,25 @@ function exchangeOAuthCodeForTokens({ code, redirectUri, codeVerifier, clientId,
         res.on("end", () => {
           const text = Buffer.concat(chunks).toString("utf8");
           if (res.statusCode !== 200) {
-            return reject(new Error(`OAuth token exchange HTTP ${res.statusCode}: ${text}`));
+            return finish(new Error(`OAuth token exchange HTTP ${res.statusCode}: ${text}`));
           }
-          resolve(JSON.parse(text));
+          try {
+            finish(null, JSON.parse(text));
+          } catch (e) {
+            finish(e);
+          }
         });
       }
     );
-    req.on("error", reject);
+    hardTimer = setTimeout(() => {
+      req.destroy();
+      finish(new Error("OAuth token exchange timeout"));
+    }, 12000);
+    req.on("error", (err) => finish(err));
+    req.on("timeout", () => {
+      req.destroy();
+      finish(new Error("OAuth token exchange timeout"));
+    });
     req.write(body);
     req.end();
   });
@@ -1171,6 +1198,9 @@ export function startIsolatedOAuthFlow(optionsOrCallback = {}, maybeCallback = n
   const targetGcpLocation = ["global", "us", "eu"].includes(opts.gcpLocation) ? opts.gcpLocation : "global";
   const loginHint = String(opts.loginHint || opts.email || "").trim();
   const oauthClient = getOAuthClientForChannel(targetChannelType);
+  if (!oauthClient?.clientId || !oauthClient?.clientSecret) {
+    return Promise.reject(new Error("未在本机 Antigravity 客户端中提取到 OAuth 凭据"));
+  }
 
   const codeVerifier = crypto.randomBytes(32).toString("base64url");
   const codeChallenge = crypto.createHash("sha256").update(codeVerifier).digest("base64url");

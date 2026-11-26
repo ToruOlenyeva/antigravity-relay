@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
+import { decryptConfigTokensInPlace, encryptConfigTokensInPlace } from "./bridge/token-vault.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -430,6 +431,7 @@ export function getInstanceMeta(cfg, instanceCtx = null) {
 }
 
 let lastValidCache = null;
+let isAutoMigratingPlaintextTokens = false;
 
 function createDefaultConfig() {
   return {
@@ -459,7 +461,17 @@ export function readRelayConfig() {
           const parsed = JSON.parse(raw);
           if (parsed && typeof parsed === "object") {
             lastValidCache = raw;
-            return ensureConfigDefaults(parsed);
+            const { hadPlaintextTokens } = decryptConfigTokensInPlace(parsed);
+            const normalized = ensureConfigDefaults(parsed);
+            if (hadPlaintextTokens && process.platform === "win32" && !isAutoMigratingPlaintextTokens) {
+              isAutoMigratingPlaintextTokens = true;
+              try {
+                writeRelayConfig(normalized);
+              } finally {
+                isAutoMigratingPlaintextTokens = false;
+              }
+            }
+            return normalized;
           }
         }
       }
@@ -468,7 +480,9 @@ export function readRelayConfig() {
 
   if (lastValidCache) {
     try {
-      return ensureConfigDefaults(JSON.parse(lastValidCache));
+      const parsed = JSON.parse(lastValidCache);
+      decryptConfigTokensInPlace(parsed);
+      return ensureConfigDefaults(parsed);
     } catch (e) {}
   }
 
@@ -478,6 +492,7 @@ export function readRelayConfig() {
       const parsed = JSON.parse(bakRaw);
       if (parsed && typeof parsed === "object") {
         lastValidCache = bakRaw;
+        decryptConfigTokensInPlace(parsed);
         return ensureConfigDefaults(parsed);
       }
     } catch (e) {}
@@ -594,6 +609,7 @@ export function writeRelayConfig(cfg) {
         if (diskRaw && diskRaw.trim()) {
           const diskCfg = JSON.parse(diskRaw);
           if (diskCfg && typeof diskCfg === "object") {
+            decryptConfigTokensInPlace(diskCfg);
             const ctx = resolveCurrentInstanceContext();
             const curInstId = ctx?.instanceId || "main";
             if (!cfg.__meta__ || typeof cfg.__meta__ !== "object") cfg.__meta__ = {};
@@ -772,7 +788,9 @@ export function writeRelayConfig(cfg) {
       }
     } catch {}
 
-    const serialized = JSON.stringify(cfg, null, 2);
+    const cfgForDisk = JSON.parse(JSON.stringify(cfg));
+    encryptConfigTokensInPlace(cfgForDisk);
+    const serialized = JSON.stringify(cfgForDisk, null, 2);
     if (existingDiskRaw && existingDiskRaw === serialized) {
       lastValidCache = serialized;
       return true;

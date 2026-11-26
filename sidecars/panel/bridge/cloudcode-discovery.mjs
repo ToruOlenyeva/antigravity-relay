@@ -4,6 +4,7 @@ import https from "node:https";
 import fs from "node:fs";
 import path from "node:path";
 import { readRelayConfig, writeRelayConfig } from "../store.mjs";
+import { createProxiedHttpsAgent } from "./net-proxy.mjs";
 import {
   readWinCredToken,
   getCloudCodeUserAgent,
@@ -61,21 +62,32 @@ export function getCloudCodeHostnameForPool(_pool = "daily", isGcp = false) {
  * @param {object} extraHeaders 额外请求头
  * @returns {Promise<{status: number, rawText: string, data: object|null}>}
  */
-function fetchCloudResourceJson(requestPath, accessToken, extraHeaders = {}) {
+async function fetchCloudResourceJson(requestPath, accessToken, extraHeaders = {}) {
+  if (!accessToken) return { status: 0, rawText: "", data: null };
+  const proxyCtx = await createProxiedHttpsAgent("cloudresourcemanager.googleapis.com", 443, { timeoutMs: 3500 });
   return new Promise((resolve) => {
-    if (!accessToken) return resolve({ status: 0, rawText: "", data: null });
+    let settled = false;
+    let hardTimer = null;
+    const finish = (val) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(hardTimer);
+      proxyCtx.cleanup();
+      resolve(val);
+    };
     const req = https.request(
       {
         hostname: "cloudresourcemanager.googleapis.com",
         port: 443,
         path: requestPath,
         method: "GET",
+        ...(proxyCtx.agent ? { agent: proxyCtx.agent } : {}),
         headers: {
           Authorization: `Bearer ${accessToken}`,
           Accept: "application/json",
           ...extraHeaders
         },
-        timeout: 4500
+        timeout: 6000
       },
       (res) => {
         const chunks = [];
@@ -86,14 +98,18 @@ function fetchCloudResourceJson(requestPath, accessToken, extraHeaders = {}) {
           try {
             data = JSON.parse(rawText);
           } catch {}
-          resolve({ status: res.statusCode || 0, rawText, data });
+          finish({ status: res.statusCode || 0, rawText, data });
         });
       }
     );
-    req.on("error", () => resolve({ status: -1, rawText: "", data: null }));
+    hardTimer = setTimeout(() => {
+      req.destroy();
+      finish({ status: -2, rawText: "", data: null });
+    }, 6000);
+    req.on("error", () => finish({ status: -1, rawText: "", data: null }));
     req.on("timeout", () => {
       req.destroy();
-      resolve({ status: -2, rawText: "", data: null });
+      finish({ status: -2, rawText: "", data: null });
     });
     req.end();
   });
@@ -165,16 +181,19 @@ function readLocalGcloudProjectsForEmail(email) {
  * @param {string} targetHostname 目标上游域名
  * @returns {Promise<{status: number, data: object|null, raw?: string, error?: string}>}
  */
-export function callCloudCodeApi(endpointPath, accessToken, payloadObj = {}, extraHeaders = {}, targetHostname = "") {
+export async function callCloudCodeApi(endpointPath, accessToken, payloadObj = {}, extraHeaders = {}, targetHostname = "") {
+  if (!accessToken) return { status: 0, data: null };
+  const hostname = String(targetHostname || "").trim() || "cloudcode-pa.googleapis.com";
+  const proxyCtx = await createProxiedHttpsAgent(hostname, 443, { timeoutMs: 4000 });
   return new Promise((resolve) => {
-    if (!accessToken) return resolve({ status: 0, data: null });
-    const hostname = String(targetHostname || "").trim() || "cloudcode-pa.googleapis.com";
     const body = Buffer.from(JSON.stringify(payloadObj || {}), "utf8");
     let settled = false;
+    let hardTimer = null;
     const finish = (val) => {
       if (settled) return;
       settled = true;
       clearTimeout(hardTimer);
+      proxyCtx.cleanup();
       resolve(val);
     };
     const req = https.request(
@@ -183,7 +202,7 @@ export function callCloudCodeApi(endpointPath, accessToken, payloadObj = {}, ext
         port: 443,
         path: endpointPath,
         method: "POST",
-        family: 4,
+        ...(proxyCtx.agent ? { agent: proxyCtx.agent } : { family: 4 }),
         headers: {
           Authorization: `Bearer ${accessToken}`,
           "Content-Type": "application/json",
@@ -191,7 +210,7 @@ export function callCloudCodeApi(endpointPath, accessToken, payloadObj = {}, ext
           "Content-Length": body.length,
           ...extraHeaders
         },
-        timeout: 6000
+        timeout: 8000
       },
       (res) => {
         const chunks = [];
@@ -206,10 +225,10 @@ export function callCloudCodeApi(endpointPath, accessToken, payloadObj = {}, ext
         });
       }
     );
-    const hardTimer = setTimeout(() => {
+    hardTimer = setTimeout(() => {
       req.destroy();
       finish({ status: -2, data: null, error: "timeout" });
-    }, 6000);
+    }, 8000);
     req.on("error", (err) => finish({ status: -1, data: null, error: err.message }));
     req.on("timeout", () => {
       req.destroy();
