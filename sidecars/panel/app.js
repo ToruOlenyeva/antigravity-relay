@@ -72,6 +72,9 @@ window.addEventListener("message", (event) => {
         document.documentElement.setAttribute("data-theme", mode);
       }
     }
+    if (typeof handleHostThemeFontVars === "function") {
+      handleHostThemeFontVars(vars);
+    }
   }
 });
 
@@ -270,6 +273,9 @@ function applyIncomingSnapshot(nextSnap, opts = {}) {
   const prevOAuthEvent = nextSnap.lastOAuthEvent;
   const prevActive = state.activeAccount;
   state = reconcileSwitchingState(nextSnap, prevActive);
+  if (nextSnap.hostAppearance && typeof syncHostAppearanceFromSnapshot === "function") {
+    syncHostAppearanceFromSnapshot(nextSnap.hostAppearance);
+  }
 
   if (prevOAuthEvent?.success && prevOAuthEvent.email) {
     const eventKey = prevOAuthEvent.eventId || `${prevOAuthEvent.email}|${prevOAuthEvent.autoScanGcp ? "gcp" : "personal"}`;

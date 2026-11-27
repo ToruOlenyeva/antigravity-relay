@@ -7,13 +7,24 @@
   <script>
     (function() {
       var uiStyle = "modern";
-      var fontScale = "md";
+      var fontScale = "auto";
+      var fontScaleNum = 1;
+      var hostFontFamily = "";
       var isDark = true;
       try {
         var savedStyle = localStorage.getItem("agy_relay_ui_style");
         if (savedStyle === "classic" || savedStyle === "modern") uiStyle = savedStyle;
         var savedFont = localStorage.getItem("agy_relay_font_scale");
-        if (savedFont === "sm" || savedFont === "md" || savedFont === "lg") fontScale = savedFont;
+        if (savedFont === "auto" || savedFont === "sm" || savedFont === "md" || savedFont === "lg") fontScale = savedFont;
+        if (fontScale === "sm") fontScaleNum = 0.88;
+        else if (fontScale === "lg") fontScaleNum = 1.15;
+        else if (fontScale === "auto") {
+          var hostPx = parseFloat(localStorage.getItem("antigravity_host_font_px") || "");
+          if (isFinite(hostPx) && hostPx > 0) {
+            fontScaleNum = Math.round(Math.min(1.45, Math.max(0.82, hostPx / 14)) * 1000) / 1000;
+          }
+        }
+        hostFontFamily = localStorage.getItem("antigravity_host_font_family") || "";
         var themePref = localStorage.getItem("agy_relay_theme_pref") || "auto";
         if (themePref === "light") isDark = false;
         else if (themePref === "dark") isDark = true;
@@ -26,6 +37,10 @@
       } catch (e) {}
       document.documentElement.setAttribute("data-ui-style", uiStyle);
       document.documentElement.setAttribute("data-font-scale", fontScale);
+      document.documentElement.style.setProperty("--ui-font-scale", String(fontScaleNum));
+      if (hostFontFamily) {
+        document.documentElement.style.setProperty("--ui-font-family", hostFontFamily);
+      }
       document.documentElement.setAttribute("data-theme", isDark ? "dark" : "light");
     })();
   </script>

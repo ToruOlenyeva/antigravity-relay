@@ -30,9 +30,45 @@ function getThemePref() {
   return v === "light" || v === "dark" ? v : "auto";
 }
 
+const FONT_SCALE_PRESETS = { sm: 0.88, md: 1, lg: 1.15 };
+const HOST_BASE_FONT_PX = 14;
+let detectedHostAppearance = {
+  fontSizePx: null,
+  fontFamily: "",
+  source: ""
+};
+
+function clampFontScaleRatio(num) {
+  return Math.round(Math.min(1.45, Math.max(0.82, num)) * 1000) / 1000;
+}
+
+function parseFontSizePx(raw) {
+  if (raw === undefined || raw === null || raw === "") return null;
+  if (typeof raw === "number") {
+    return Number.isFinite(raw) && raw >= 9 && raw <= 36 ? raw : null;
+  }
+  const str = String(raw).trim();
+  if (!str) return null;
+  const pxMatch = str.match(/^(\d+(?:\.\d+)?)\s*px$/i);
+  if (pxMatch) {
+    const n = parseFloat(pxMatch[1]);
+    return Number.isFinite(n) && n >= 9 && n <= 36 ? n : null;
+  }
+  const remMatch = str.match(/^(\d+(?:\.\d+)?)\s*(?:rem|em)$/i);
+  if (remMatch) {
+    const n = parseFloat(remMatch[1]) * 16;
+    return Number.isFinite(n) && n >= 9 && n <= 36 ? Math.round(n * 10) / 10 : null;
+  }
+  if (/^\d+(?:\.\d+)?$/.test(str)) {
+    const n = parseFloat(str);
+    return Number.isFinite(n) && n >= 9 && n <= 36 ? n : null;
+  }
+  return null;
+}
+
 function getFontScalePref() {
-  const v = readStorageSafe("agy_relay_font_scale", "md");
-  return v === "sm" || v === "lg" ? v : "md";
+  const v = readStorageSafe("agy_relay_font_scale", "auto");
+  return v === "auto" || v === "sm" || v === "md" || v === "lg" ? v : "auto";
 }
 
 function getLangPref() {
@@ -59,16 +95,155 @@ function resolveAutoThemeMode() {
   return "dark";
 }
 
+function resolveEffectiveFontScaleInfo() {
+  const pref = getFontScalePref();
+  if (pref !== "auto" && Object.prototype.hasOwnProperty.call(FONT_SCALE_PRESETS, pref)) {
+    return {
+      pref,
+      scale: FONT_SCALE_PRESETS[pref],
+      source: "manual",
+      hostPx: null
+    };
+  }
+  const savedHostPx = parseFontSizePx(readStorageSafe("antigravity_host_font_px", ""));
+  const hostPx = parseFontSizePx(detectedHostAppearance.fontSizePx) ?? savedHostPx;
+  if (hostPx !== null) {
+    return {
+      pref: "auto",
+      scale: clampFontScaleRatio(hostPx / HOST_BASE_FONT_PX),
+      source: detectedHostAppearance.source || "host",
+      hostPx
+    };
+  }
+  try {
+    const rootEl = typeof document !== "undefined" ? document.documentElement : null;
+    if (rootEl && typeof window !== "undefined" && typeof window.getComputedStyle === "function") {
+      const rootPx = parseFloat(window.getComputedStyle(rootEl).fontSize || "");
+      if (Number.isFinite(rootPx) && Math.abs(rootPx - 16) >= 0.5) {
+        const sysScale = Math.round(Math.min(1.35, Math.max(0.85, rootPx / 16)) * 1000) / 1000;
+        const equivPx = Math.round(sysScale * HOST_BASE_FONT_PX * 10) / 10;
+        return {
+          pref: "auto",
+          scale: sysScale,
+          source: "system",
+          hostPx: equivPx
+        };
+      }
+    }
+  } catch {}
+  return {
+    pref: "auto",
+    scale: 1,
+    source: "default",
+    hostPx: HOST_BASE_FONT_PX
+  };
+}
+
+function formatHostFontFamilyCss(rawFamily) {
+  const clean = String(rawFamily || "").trim();
+  if (!clean || /^(inherit|initial|unset|default|auto)$/i.test(clean)) return "";
+  if (clean.includes(",") || /var\(/i.test(clean)) return clean;
+  const quoted = (clean.startsWith("\"") || clean.startsWith("'")) ? clean : `"${clean.replace(/"/g, "")}"`;
+  return `${quoted}, var(--font-sans)`;
+}
+
+function handleHostThemeFontVars(vars) {
+  if (!vars || typeof vars !== "object") return false;
+  let changed = false;
+  const sizeKeys = ["--font-size", "--base-font-size", "--ui-font-size", "--text-base", "--vscode-font-size", "--body-font-size"];
+  for (const key of sizeKeys) {
+    const px = parseFontSizePx(vars[key]);
+    if (px !== null) {
+      if (detectedHostAppearance.fontSizePx !== px || detectedHostAppearance.source !== "theme-change") {
+        detectedHostAppearance.fontSizePx = px;
+        detectedHostAppearance.source = "theme-change";
+        writeStorageSafe("antigravity_host_font_px", String(px));
+        changed = true;
+      }
+      break;
+    }
+  }
+  const familyKeys = ["--font-sans", "--ui-font-family", "--font-family", "--vscode-font-family"];
+  for (const key of familyKeys) {
+    const formatted = formatHostFontFamilyCss(vars[key]);
+    if (formatted) {
+      if (detectedHostAppearance.fontFamily !== formatted) {
+        detectedHostAppearance.fontFamily = formatted;
+        writeStorageSafe("antigravity_host_font_family", formatted);
+        changed = true;
+      }
+      break;
+    }
+  }
+  if (changed) {
+    applyAppearancePreferences();
+    if (typeof activeMainTab !== "undefined" && activeMainTab === "preferences" && typeof renderPreferencesView === "function") {
+      renderPreferencesView();
+    }
+  }
+  return changed;
+}
+
+function syncHostAppearanceFromSnapshot(hostApp) {
+  if (!hostApp || typeof hostApp !== "object") return false;
+  let changed = false;
+  if (detectedHostAppearance.source !== "theme-change") {
+    const cfgPx = parseFontSizePx(hostApp.fontSizePx);
+    if (cfgPx !== null) {
+      if (detectedHostAppearance.fontSizePx !== cfgPx || detectedHostAppearance.source !== "config") {
+        detectedHostAppearance.fontSizePx = cfgPx;
+        detectedHostAppearance.source = "config";
+        writeStorageSafe("antigravity_host_font_px", String(cfgPx));
+        changed = true;
+      }
+    } else if (detectedHostAppearance.source === "config" && detectedHostAppearance.fontSizePx !== null) {
+      detectedHostAppearance.fontSizePx = null;
+      detectedHostAppearance.source = "";
+      try { localStorage.removeItem("antigravity_host_font_px"); } catch {}
+      changed = true;
+    }
+    const cfgFamily = formatHostFontFamilyCss(hostApp.fontFamily);
+    if (cfgFamily) {
+      if (detectedHostAppearance.fontFamily !== cfgFamily) {
+        detectedHostAppearance.fontFamily = cfgFamily;
+        writeStorageSafe("antigravity_host_font_family", cfgFamily);
+        changed = true;
+      }
+    } else if (detectedHostAppearance.source === "config" && detectedHostAppearance.fontFamily) {
+      detectedHostAppearance.fontFamily = "";
+      try { localStorage.removeItem("antigravity_host_font_family"); } catch {}
+      changed = true;
+    }
+  }
+  if (changed) {
+    applyAppearancePreferences();
+    if (typeof activeMainTab !== "undefined" && activeMainTab === "preferences" && typeof renderPreferencesView === "function") {
+      renderPreferencesView();
+    }
+  }
+  return changed;
+}
+
 function applyAppearancePreferences() {
   const style = getUiStylePref();
   const themePref = getThemePref();
   const fontScale = getFontScalePref();
+  const fsInfo = resolveEffectiveFontScaleInfo();
   const resolvedTheme = themePref === "auto" ? resolveAutoThemeMode() : themePref;
   const root = document.documentElement;
   if (root) {
     root.setAttribute("data-ui-style", style);
     root.setAttribute("data-font-scale", fontScale);
     root.setAttribute("data-theme", resolvedTheme);
+    if (root.style && typeof root.style.setProperty === "function") {
+      root.style.setProperty("--ui-font-scale", String(fsInfo.scale));
+      const hostFam = detectedHostAppearance.fontFamily || formatHostFontFamilyCss(readStorageSafe("antigravity_host_font_family", ""));
+      if (hostFam) {
+        root.style.setProperty("--ui-font-family", hostFam);
+      } else if (typeof root.style.removeProperty === "function") {
+        root.style.removeProperty("--ui-font-family");
+      }
+    }
   }
 }
 
@@ -87,7 +262,7 @@ function setThemePref(pref) {
 }
 
 function setFontScalePref(scale) {
-  const next = scale === "sm" || scale === "lg" ? scale : "md";
+  const next = scale === "auto" || scale === "sm" || scale === "md" || scale === "lg" ? scale : "auto";
   writeStorageSafe("agy_relay_font_scale", next);
   applyAppearancePreferences();
   renderPreferencesView();
@@ -329,17 +504,25 @@ function renderPreferencesView() {
     )
   );
 
+  const fsInfo = resolveEffectiveFontScaleInfo();
+  const fsPct = Math.round(fsInfo.scale * 100);
+  const fontHintText = fsInfo.pref === "auto"
+    ? `${t.prefsFontHintAutoHost || "当前自动跟随宿主/系统字号："}${fsInfo.hostPx || HOST_BASE_FONT_PX}px（${fsPct}%）`
+    : `${t.prefsFontHintManual || "当前已手动锁定字号缩放："}${fsPct}%`;
+
   addGroup(
     t.prefsFontLabel || "字体大小",
     buildSegmentedGroup(
       [
+        { value: "auto", label: t.prefsFontAuto || "跟随系统" },
         { value: "sm", label: t.prefsFontSm || "小" },
         { value: "md", label: t.prefsFontMd || "标准" },
         { value: "lg", label: t.prefsFontLg || "大" }
       ],
       getFontScalePref(),
       setFontScalePref
-    )
+    ),
+    fontHintText
   );
 
   addGroup(

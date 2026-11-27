@@ -1,9 +1,12 @@
-:root,
-:root[data-theme="light"] {
+:root {
   --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", Roboto, sans-serif;
+  --ui-font-family: var(--font-sans);
   --ease-modern: cubic-bezier(0.16, 1, 0.3, 1);
   --ui-font-scale: 1;
+}
 
+:root,
+:root[data-theme="light"] {
   /* Light Mode: Cool Porcelain Canvas + Pure White Elevated Cards + Soft Fog Surfaces */
   --bg-base: #f4f7fb;
   --bg-surface: #ffffff;
@@ -94,26 +97,42 @@
   display: none !important;
 }
 
-[data-font-scale="sm"] {
-  --ui-font-scale: 0.92;
+:root[data-font-scale="sm"] {
+  --ui-font-scale: 0.88;
 }
 
-[data-font-scale="md"] {
+:root[data-font-scale="md"] {
   --ui-font-scale: 1;
 }
 
-[data-font-scale="lg"] {
-  --ui-font-scale: 1.12;
+:root[data-font-scale="lg"] {
+  --ui-font-scale: 1.15;
+}
+
+:root,
+:root[data-font-scale] {
+  --fs-badge-sub: calc(7.5px * var(--ui-font-scale, 1));
+  --fs-3xs: calc(9px * var(--ui-font-scale, 1));
+  --fs-badge-main: calc(9.5px * var(--ui-font-scale, 1));
+  --fs-2xs: calc(10px * var(--ui-font-scale, 1));
+  --fs-xs: calc(10.5px * var(--ui-font-scale, 1));
+  --fs-sm: calc(11px * var(--ui-font-scale, 1));
+  --fs-control: calc(11.5px * var(--ui-font-scale, 1));
+  --fs-md: calc(12px * var(--ui-font-scale, 1));
+  --fs-base: calc(12.5px * var(--ui-font-scale, 1));
+  --fs-title: calc(13px * var(--ui-font-scale, 1));
+  --fs-lg: calc(13.5px * var(--ui-font-scale, 1));
+  --fs-h1: calc(14.5px * var(--ui-font-scale, 1));
 }
 
 body {
-  background-color: var(--bg-base);
-  color: var(--text-main);
-  font-family: var(--font-sans);
-  font-size: calc(12.5px * var(--ui-font-scale, 1));
+  background-color: var(--bg-base) !important;
+  color: var(--text-main) !important;
+  font-family: var(--ui-font-family, var(--font-sans)) !important;
+  font-size: var(--fs-base);
   line-height: 1.48;
   font-variant-numeric: tabular-nums;
-  padding: 12px;
+  padding: 12px !important;
   user-select: none;
   -webkit-font-smoothing: antialiased;
 }
@@ -159,7 +178,7 @@ body {
 }
 
 .header h1 {
-  font-size: 14.5px;
+  font-size: var(--fs-h1);
   font-weight: 600;
   letter-spacing: -0.01em;
   white-space: nowrap;
@@ -168,7 +187,7 @@ body {
 }
 
 .badge {
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   font-weight: 600;
   padding: 2px 9px;
   border-radius: 999px;
@@ -211,19 +230,19 @@ body {
 }
 
 .section-title {
-  font-size: 13px;
+  font-size: var(--fs-title);
   font-weight: 600;
   color: var(--text-main);
   letter-spacing: -0.005em;
 }
 
 .section-hint {
-  font-size: 11px;
+  font-size: var(--fs-sm);
   color: var(--text-muted);
 }
 
 .tier-pill {
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   font-weight: 600;
   padding: 2px 8px;
   border-radius: 999px;
@@ -272,14 +291,14 @@ body {
 
 .active-email {
   font-weight: 600;
-  font-size: 12.5px;
+  font-size: var(--fs-base);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .billing-mode-tag {
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   font-weight: 600;
   padding: 2px 8px;
   border-radius: 999px;
@@ -303,14 +322,15 @@ body {
 .compact-input {
   flex: 1;
   min-width: 0;
-  height: 29px;
+  min-height: calc(29px * var(--ui-font-scale, 1));
+  height: auto;
   background: var(--bg-surface);
   border: none;
   border-radius: 8px;
-  padding: 0 10px;
+  padding: 4px 10px;
   color: var(--text-main);
-  font-family: var(--font-sans);
-  font-size: 11.5px;
+  font-family: var(--ui-font-family, var(--font-sans));
+  font-size: var(--fs-control);
   outline: none;
   transition: box-shadow 150ms var(--ease-modern), background-color 150ms var(--ease-modern);
 }
@@ -324,13 +344,14 @@ button {
   background: var(--primary);
   color: #ffffff;
   border: none;
-  font-family: var(--font-sans);
+  font-family: var(--ui-font-family, var(--font-sans));
   font-weight: 500;
   cursor: pointer;
   border-radius: 8px;
-  font-size: 11.5px;
-  height: 28px;
-  padding: 0 11px;
+  font-size: var(--fs-control);
+  min-height: calc(28px * var(--ui-font-scale, 1));
+  height: auto;
+  padding: 3px 11px;
   white-space: nowrap;
   display: inline-flex;
   align-items: center;
@@ -404,7 +425,7 @@ button.danger:hover {
 }
 
 .quota-group-title {
-  font-size: 12.5px;
+  font-size: var(--fs-base);
   font-weight: 600;
   color: var(--text-main);
   margin-bottom: 1px;
@@ -415,7 +436,7 @@ button.danger:hover {
   justify-content: space-between;
   align-items: flex-start;
   gap: 8px;
-  font-size: 12px;
+  font-size: var(--fs-md);
   line-height: 1.38;
 }
 
@@ -450,8 +471,8 @@ button.danger:hover {
 }
 
 .quota-ring-svg {
-  width: 15px;
-  height: 15px;
+  width: calc(15px * var(--ui-font-scale, 1));
+  height: calc(15px * var(--ui-font-scale, 1));
   flex-shrink: 0;
   transform: rotate(-90deg);
 }
@@ -479,7 +500,7 @@ button.danger:hover {
 }
 
 .quota-bucket-reset {
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
 }
@@ -494,7 +515,7 @@ button.danger:hover {
   border-radius: 10px;
   background: var(--primary-soft);
   border: none;
-  font-size: 11.5px;
+  font-size: var(--fs-control);
   color: var(--text-main);
 }
 
@@ -531,13 +552,13 @@ button.danger:hover {
 }
 
 .channel-group-title {
-  font-size: 11.5px;
+  font-size: var(--fs-control);
   font-weight: 600;
   color: var(--text-secondary);
 }
 
 .channel-group-hint {
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   color: var(--text-muted);
 }
 
@@ -584,12 +605,13 @@ button.danger:hover {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 40px;
-  height: 22px;
-  font-size: 10px;
+  min-width: calc(40px * var(--ui-font-scale, 1));
+  min-height: calc(22px * var(--ui-font-scale, 1));
+  height: auto;
+  font-size: var(--fs-2xs);
   font-weight: 700;
   line-height: 1;
-  padding: 0 7px;
+  padding: 3px 7px;
   border-radius: 6px;
   border: none;
   flex-shrink: 0;
@@ -603,7 +625,7 @@ button.danger:hover {
 }
 
 .channel-type-badge .badge-sub {
-  font-size: 7.5px;
+  font-size: var(--fs-badge-sub);
   font-weight: 700;
   line-height: 1;
   letter-spacing: 0.15px;
@@ -611,7 +633,7 @@ button.danger:hover {
 }
 
 .channel-type-badge .badge-main {
-  font-size: 9.5px;
+  font-size: var(--fs-badge-main);
   font-weight: 700;
   line-height: 1;
 }
@@ -682,7 +704,7 @@ button.danger:hover {
 
 .account-email {
   font-weight: 600;
-  font-size: 12px;
+  font-size: var(--fs-md);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -701,7 +723,7 @@ button.danger:hover {
   align-items: center;
   justify-content: space-between;
   gap: 6px;
-  font-size: 11px;
+  font-size: var(--fs-sm);
   color: var(--text-secondary);
   background: color-mix(in srgb, var(--bg-surface) 78%, transparent);
   border: none;
@@ -736,7 +758,7 @@ button.danger:hover {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  font-size: 11.5px;
+  font-size: var(--fs-control);
   font-weight: 600;
   color: var(--text-main);
 }
@@ -755,9 +777,10 @@ button.danger:hover {
 }
 
 .custom-dropdown.compact-form-dropdown .dropdown-trigger {
-  height: 28px;
-  padding: 0 9px;
-  font-size: 11px;
+  min-height: calc(28px * var(--ui-font-scale, 1));
+  height: auto;
+  padding: 3px 9px;
+  font-size: var(--fs-sm);
   background: var(--bg-surface);
   border-radius: 8px;
 }
@@ -770,7 +793,7 @@ button.danger:hover {
 }
 
 .channel-sub-info {
-  font-size: 11px;
+  font-size: var(--fs-sm);
   color: var(--text-muted);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -809,13 +832,13 @@ button.danger:hover {
 }
 
 .routing-fallback-title {
-  font-size: 12px;
+  font-size: var(--fs-md);
   font-weight: 600;
   color: var(--text-main);
 }
 
 .routing-fallback-hint {
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   color: var(--text-muted);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -922,7 +945,7 @@ button.danger:hover {
 
 .routing-model-name {
   font-weight: 600;
-  font-size: 12px;
+  font-size: var(--fs-md);
   color: var(--text-main);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -932,7 +955,7 @@ button.danger:hover {
 .routing-exhausted-pill {
   display: inline-flex;
   align-items: center;
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   font-weight: 600;
   line-height: 1.25;
   padding: 1px 7px;
@@ -957,7 +980,7 @@ button.danger:hover {
 }
 
 .routing-model-sub {
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   color: var(--text-muted);
 }
 
@@ -974,7 +997,7 @@ button.danger:hover {
 }
 
 .dropdown-option-status-tag {
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   font-weight: 600;
   line-height: 1.2;
   padding: 2px 6px;
@@ -996,14 +1019,15 @@ button.danger:hover {
 
 .dropdown-trigger {
   width: 100%;
-  height: 29px;
+  min-height: calc(29px * var(--ui-font-scale, 1));
+  height: auto;
   background: var(--bg-pill-select);
   color: var(--text-main);
   border: none;
-  padding: 0 10px 0 12px;
+  padding: 4px 10px 4px 12px;
   border-radius: 999px;
-  font-family: var(--font-sans);
-  font-size: 11.5px;
+  font-family: var(--ui-font-family, var(--font-sans));
+  font-size: var(--fs-control);
   font-weight: 500;
   cursor: pointer;
   display: flex;
@@ -1074,7 +1098,7 @@ button.danger:hover {
 .dropdown-option {
   padding: 7px 9px;
   border-radius: 7px;
-  font-size: 11.5px;
+  font-size: var(--fs-control);
   color: var(--text-main);
   cursor: pointer;
   display: flex;
@@ -1127,11 +1151,12 @@ button.danger:hover {
 }
 
 .custom-dropdown.session-selector-dropdown .dropdown-trigger {
-  height: 36px;
-  padding: 0 12px;
+  min-height: calc(36px * var(--ui-font-scale, 1));
+  height: auto;
+  padding: 5px 12px;
   background: var(--bg-subtle);
   border-radius: 10px;
-  font-size: 12.5px;
+  font-size: var(--fs-base);
 }
 
 .custom-dropdown.session-selector-dropdown .dropdown-trigger:hover {
@@ -1166,13 +1191,13 @@ button.danger:hover {
 }
 
 .gcp-billing-title {
-  font-size: 12px;
+  font-size: var(--fs-md);
   font-weight: 600;
   color: var(--text-main);
 }
 
 .gcp-unlimited-pill {
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   font-weight: 600;
   padding: 2px 8px;
   border-radius: 999px;
@@ -1183,7 +1208,7 @@ button.danger:hover {
 }
 
 .gcp-models-label {
-  font-size: 11px;
+  font-size: var(--fs-sm);
   color: var(--text-secondary);
 }
 
@@ -1194,7 +1219,7 @@ button.danger:hover {
 }
 
 .gcp-model-chip {
-  font-size: 11px;
+  font-size: var(--fs-sm);
   font-weight: 500;
   padding: 3px 9px;
   border-radius: 7px;
@@ -1220,7 +1245,7 @@ button.danger:hover {
   color: var(--text-main);
   padding: 9px 13px;
   border-radius: 10px;
-  font-size: 11.5px;
+  font-size: var(--fs-control);
   box-shadow: var(--shadow-popover);
   display: none;
   z-index: 1000;
@@ -1242,7 +1267,7 @@ button.danger:hover {
   padding: 2px 8px;
   border-radius: 999px;
   border: none;
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   font-weight: 600;
   line-height: 1.4;
   white-space: nowrap;
@@ -1285,7 +1310,7 @@ button.danger:hover {
 }
 
 .cross-switch-prompt {
-  font-size: 11px;
+  font-size: var(--fs-sm);
   line-height: 1.4;
   color: var(--text-main);
 }
@@ -1309,9 +1334,10 @@ button.danger:hover {
 }
 
 .quota-pool-btn {
-  height: 22px;
-  padding: 0 9px;
-  font-size: 10.5px;
+  min-height: calc(22px * var(--ui-font-scale, 1));
+  height: auto;
+  padding: 2px 9px;
+  font-size: var(--fs-xs);
   font-weight: 600;
   line-height: 1.3;
   border-radius: 7px;
@@ -1353,10 +1379,11 @@ button.danger:hover {
   align-items: center;
   gap: 3px;
   height: auto;
+  min-height: calc(20px * var(--ui-font-scale, 1));
   padding: 2px 7px;
   margin-left: 2px;
   border-radius: 999px;
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   font-weight: 600;
   line-height: 1.35;
   background: var(--danger-soft);
@@ -1373,7 +1400,7 @@ button.danger:hover {
 }
 
 .probe-error-badge-btn .badge-caret {
-  font-size: 9px;
+  font-size: var(--fs-3xs);
   opacity: 0.85;
 }
 
@@ -1396,7 +1423,7 @@ button.danger:hover {
 }
 
 .channel-error-meta {
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   font-weight: 600;
   color: var(--danger);
   overflow: hidden;
@@ -1406,7 +1433,7 @@ button.danger:hover {
 }
 
 .channel-error-msg {
-  font-size: 11.5px;
+  font-size: var(--fs-control);
   line-height: 1.45;
   color: var(--text-main);
   word-break: break-word;
@@ -1414,7 +1441,7 @@ button.danger:hover {
 }
 
 .channel-error-sub {
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   line-height: 1.4;
   color: var(--text-secondary);
   word-break: break-word;
@@ -1446,7 +1473,7 @@ button.danger:hover {
   cursor: pointer;
   user-select: none;
   color: var(--text-secondary);
-  font-size: 11.5px;
+  font-size: var(--fs-control);
   border-radius: 10px;
   transition: background-color 150ms var(--ease-modern), color 150ms var(--ease-modern);
 }
@@ -1493,7 +1520,7 @@ button.danger:hover {
 }
 
 .routing-other-hint {
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   color: var(--text-muted);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1521,10 +1548,11 @@ button.danger:hover {
 
 /* 顶部主导航栏（账号与路由 / 偏好设置）与更新徽标 */
 .header-update-pill {
-  height: 24px;
-  padding: 0 9px;
+  min-height: calc(24px * var(--ui-font-scale, 1));
+  height: auto;
+  padding: 3px 9px;
   border-radius: 999px;
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   font-weight: 600;
   background: var(--primary-soft);
   color: var(--primary);
@@ -1547,13 +1575,14 @@ button.danger:hover {
 }
 
 .top-tab-btn {
-  height: 26px;
-  padding: 0 13px;
+  min-height: calc(26px * var(--ui-font-scale, 1));
+  height: auto;
+  padding: 3px 13px;
   border-radius: 999px;
   border: none;
   background: transparent;
   color: var(--text-secondary);
-  font-size: calc(11.5px * var(--ui-font-scale, 1));
+  font-size: var(--fs-control);
   font-weight: 600;
   transition: background-color 160ms var(--ease-modern), color 160ms var(--ease-modern);
 }
@@ -1586,13 +1615,13 @@ button.danger:hover {
 }
 
 .prefs-label {
-  font-size: calc(11.5px * var(--ui-font-scale, 1));
+  font-size: var(--fs-control);
   font-weight: 600;
   color: var(--text-secondary);
 }
 
 .prefs-hint {
-  font-size: calc(10.5px * var(--ui-font-scale, 1));
+  font-size: var(--fs-xs);
   color: var(--text-muted);
   line-height: 1.4;
 }
@@ -1611,13 +1640,14 @@ button.danger:hover {
 .prefs-seg-btn {
   flex: 1;
   min-width: 0;
-  height: 27px;
-  padding: 0 10px;
+  min-height: calc(27px * var(--ui-font-scale, 1));
+  height: auto;
+  padding: 4px 10px;
   border-radius: 7px;
   border: none;
   background: transparent;
   color: var(--text-secondary);
-  font-size: calc(11.5px * var(--ui-font-scale, 1));
+  font-size: var(--fs-control);
   font-weight: 500;
   transition: background-color 160ms var(--ease-modern), color 160ms var(--ease-modern);
 }
@@ -1655,13 +1685,13 @@ button.danger:hover {
 }
 
 .update-meta-val {
-  font-size: calc(13.5px * var(--ui-font-scale, 1));
+  font-size: var(--fs-lg);
   font-weight: 600;
   color: var(--text-main);
 }
 
 .update-status-pill {
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   font-weight: 600;
   padding: 2px 9px;
   border-radius: 999px;
@@ -1675,7 +1705,7 @@ button.danger:hover {
 }
 
 .gcp-scan-hint {
-  font-size: calc(11px * var(--ui-font-scale, 1));
+  font-size: var(--fs-sm);
   line-height: 1.42;
   color: var(--text-secondary);
   padding: 6px 9px;
@@ -1749,7 +1779,7 @@ button.danger:hover {
 }
 
 [data-ui-style="classic"] body {
-  padding: 10px;
+  padding: 10px !important;
 }
 
 [data-ui-style="classic"] .header {
@@ -1792,8 +1822,9 @@ button.danger:hover {
 [data-ui-style="classic"] button {
   border-radius: 5px;
   border: 1px solid var(--primary);
-  height: 26px;
-  padding: 0 8px;
+  min-height: calc(26px * var(--ui-font-scale, 1));
+  height: auto;
+  padding: 3px 8px;
 }
 
 [data-ui-style="classic"] button.secondary {
@@ -1864,7 +1895,9 @@ button.danger:hover {
 [data-ui-style="classic"] .dropdown-trigger {
   border: 1px solid var(--border-subtle);
   border-radius: 6px;
-  height: 28px;
+  min-height: calc(28px * var(--ui-font-scale, 1));
+  height: auto;
+  padding: 3px 10px 3px 12px;
   background: var(--bg-surface);
 }
 

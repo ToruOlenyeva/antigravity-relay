@@ -11,8 +11,13 @@ if (!globalThis.__AGY_RELAY_MAIN_V2__) {
   setTimeout(() => process.exit(0), 100);
 }
 
+import fs from "node:fs";
+import path from "node:path";
+
 const _storeMod = await import("./store.mjs");
 const {
+  HOME_DIR,
+  APP_STORAGE_FILE,
   readRelayConfig,
   writeRelayConfig,
   resolveCurrentInstanceContext,
@@ -114,6 +119,92 @@ export {
   startIsolatedOAuthFlow,
   addOrUpdatePersonalChannelCard
 };
+
+let cachedHostAppearance = { mtimeMs: -1, storageMtimeMs: -1, value: { fontSizePx: null, fontFamily: "" } };
+
+function parseHostConfigFontPx(raw) {
+  if (raw === undefined || raw === null || raw === "") return null;
+  if (typeof raw === "number") {
+    return Number.isFinite(raw) && raw >= 9 && raw <= 36 ? raw : null;
+  }
+  const str = String(raw).trim();
+  if (!str) return null;
+  const upper = str.toUpperCase();
+  if (upper.includes("SMALL") || upper === "SM") return 12;
+  if (upper.includes("LARGE") && !upper.includes("EXTRA")) return 16;
+  if (upper.includes("EXTRA_LARGE") || upper === "XL") return 18;
+  if (upper.includes("DEFAULT") || upper.includes("MEDIUM") || upper === "MD") return 14;
+  const pxMatch = str.match(/^(\d+(?:\.\d+)?)\s*px$/i);
+  if (pxMatch) {
+    const n = parseFloat(pxMatch[1]);
+    return Number.isFinite(n) && n >= 9 && n <= 36 ? n : null;
+  }
+  if (/^\d+(?:\.\d+)?$/.test(str)) {
+    const n = parseFloat(str);
+    return Number.isFinite(n) && n >= 9 && n <= 36 ? n : null;
+  }
+  return null;
+}
+
+export function readHostAppearanceFromConfig() {
+  const cfgPath = HOME_DIR ? path.join(HOME_DIR, ".gemini", "config", "config.json") : "";
+  try {
+    const cfgMtimeMs = cfgPath && fs.existsSync(cfgPath) ? fs.statSync(cfgPath).mtimeMs : 0;
+    const storMtimeMs = APP_STORAGE_FILE && fs.existsSync(APP_STORAGE_FILE) ? fs.statSync(APP_STORAGE_FILE).mtimeMs : 0;
+    if (
+      cachedHostAppearance.mtimeMs === cfgMtimeMs &&
+      cachedHostAppearance.storageMtimeMs === storMtimeMs
+    ) {
+      return cachedHostAppearance.value;
+    }
+    let fontSizePx = null;
+    let fontFamily = "";
+    if (cfgMtimeMs > 0) {
+      const parsed = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
+      const us = parsed?.userSettings && typeof parsed.userSettings === "object" ? parsed.userSettings : {};
+      for (const k of ["fontSize", "uiFontSize", "chatFontSize", "baseFontSize", "textSize", "appearanceFontSize"]) {
+        const px = parseHostConfigFontPx(us[k]);
+        if (px !== null) {
+          fontSizePx = px;
+          break;
+        }
+      }
+      for (const k of ["fontFamily", "font", "uiFontFamily", "appearanceFontFamily"]) {
+        const fam = typeof us[k] === "string" ? us[k].trim() : "";
+        if (fam && !/^(default|inherit|auto)$/i.test(fam)) {
+          fontFamily = fam;
+          break;
+        }
+      }
+    }
+    if ((fontSizePx === null || !fontFamily) && storMtimeMs > 0) {
+      const stor = JSON.parse(fs.readFileSync(APP_STORAGE_FILE, "utf8"));
+      if (fontSizePx === null) {
+        for (const k of ["fontSize", "uiFontSize", "chatFontSize", "baseFontSize"]) {
+          const px = parseHostConfigFontPx(stor?.[k]);
+          if (px !== null) {
+            fontSizePx = px;
+            break;
+          }
+        }
+      }
+      if (!fontFamily) {
+        for (const k of ["fontFamily", "font", "uiFontFamily"]) {
+          const fam = typeof stor?.[k] === "string" ? stor[k].trim() : "";
+          if (fam && !/^(default|inherit|auto)$/i.test(fam)) {
+            fontFamily = fam;
+            break;
+          }
+        }
+      }
+    }
+    const result = { fontSizePx, fontFamily };
+    cachedHostAppearance = { mtimeMs: cfgMtimeMs, storageMtimeMs: storMtimeMs, value: result };
+    return result;
+  } catch {
+    return { fontSizePx: null, fontFamily: "" };
+  }
+}
 
 export async function addOrUpdateGcpChannelCard(email, projectId, opts = {}) {
   const cleanEmail = (email || "").trim();
@@ -1314,7 +1405,8 @@ export async function fetchLiveSystemSnapshot(forceWinCred = false, opts = {}) {
     gcpProjects: cfg.gcpProjects || [],
     routing: cfg.routing || {},
     oauthPending: hasActiveOAuthSession(),
-    telemetry
+    telemetry,
+    hostAppearance: readHostAppearanceFromConfig()
   };
 }
 
