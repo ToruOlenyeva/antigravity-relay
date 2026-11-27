@@ -128,6 +128,11 @@ function persistRefreshedPersonalTokens(cfg, acc, baseToken, isGcp) {
       cfg.__meta__.oauthTokensByEmail = {};
     }
     cfg.__meta__.oauthTokensByEmail[acc.email] = JSON.parse(JSON.stringify(cleanTok));
+  } else if (isGcp && acc.email) {
+    if (!cfg.__meta__.gcpOAuthTokensByEmail || typeof cfg.__meta__.gcpOAuthTokensByEmail !== "object") {
+      cfg.__meta__.gcpOAuthTokensByEmail = {};
+    }
+    cfg.__meta__.gcpOAuthTokensByEmail[acc.email] = JSON.parse(JSON.stringify(cleanTok));
   }
   writeRelayConfig(cfg);
 }
@@ -233,10 +238,12 @@ export async function probeChannelQuotaSnapshot(channelId) {
 
   const liveTierTemplate = cfg.__meta__?.liveTierModels?.[isGcp ? "gcp" : "personal"] || [];
 
+  const isGcpTokenObj = (tok) => Boolean(tok && (tok.project_id || tok.auth_method === "gcp" || tok.auth_method === "adc"));
   const candidateTokenObjs = [];
   const seenRtSet = new Set();
   const pushCandidateToken = (tokObj) => {
     if (!tokObj || !tokObj.token) return;
+    if (!isGcp && isGcpTokenObj(tokObj)) return;
     const key = String(tokObj.token.refresh_token || tokObj.token.access_token || "").trim();
     if (!key || seenRtSet.has(key)) return;
     seenRtSet.add(key);
@@ -252,12 +259,9 @@ export async function probeChannelQuotaSnapshot(channelId) {
         pushCandidateToken(item.storedToken);
       }
     }
-    for (const item of Object.values(cfg.accounts || {})) {
-      if (item.email === acc.email) pushCandidateToken(item.storedToken);
-    }
     if (candidateTokenObjs.length === 0) {
       const winCred = readWinCredToken(false);
-      if (winCred && winCred.id_token_email === acc.email && !winCred.project_id) {
+      if (winCred && winCred.id_token_email === acc.email && !isGcpTokenObj(winCred)) {
         pushCandidateToken(winCred);
       }
     }
@@ -270,7 +274,6 @@ export async function probeChannelQuotaSnapshot(channelId) {
         pushCandidateToken(item.storedToken);
       }
     }
-    pushCandidateToken(cfg?.__meta__?.oauthTokensByEmail?.[acc.email]);
   }
 
   if (candidateTokenObjs.length === 0) {
@@ -417,6 +420,7 @@ export async function probeChannelQuotaSnapshot(channelId) {
 
   let sawAuthExpired = false;
   let sawValidToken = false;
+  let lastValidGcpBaseToken = null;
   const diag = { channelId: acc.id, at: Date.now(), attempts: [], ok: false };
   const applyRefreshedToken = (baseToken, refreshToken, refreshed) => {
     const accessToken = refreshed.access_token;
@@ -425,7 +429,8 @@ export async function probeChannelQuotaSnapshot(channelId) {
     baseToken.token.refreshedForRt = refreshToken;
     baseToken.token.expiry = expiryIso;
     for (const item of Object.values(cfg.accounts || {})) {
-      if (item.storedToken?.token?.refresh_token === refreshToken) {
+      const itemIsGcp = Boolean(item.gcpProjectId || item.channelType === "gcp");
+      if (itemIsGcp === isGcp && item.storedToken?.token?.refresh_token === refreshToken) {
         item.storedToken.token.access_token = accessToken;
         item.storedToken.token.refreshedForRt = refreshToken;
         item.storedToken.token.expiry = expiryIso;
@@ -452,7 +457,6 @@ export async function probeChannelQuotaSnapshot(channelId) {
           sawValidToken = true;
           attemptDiag.refreshOk = true;
           accessToken = applyRefreshedToken(baseToken, refreshToken, refreshed);
-          persistRefreshedPersonalTokens(cfg, acc, baseToken, isGcp);
         }
       } catch (err) {
         attemptDiag.refreshError = String(err?.message || err || "refresh_failed").slice(0, 260);
@@ -477,14 +481,25 @@ export async function probeChannelQuotaSnapshot(channelId) {
       }
       if (accessToken) {
         sawValidToken = true;
-        persistRefreshedPersonalTokens(cfg, acc, baseToken, true);
+        lastValidGcpBaseToken = baseToken;
       } else {
         continue;
       }
     }
 
     let probeRes = await tryProbeWithToken(accessToken);
-    if ((probeRes.modelsResp.status === 401 || (!probeRes.modelsResp.data && probeRes.modelsResp.status <= 0)) && refreshToken) {
+    const shouldReactiveRefresh = Boolean(
+      refreshToken &&
+      !attemptDiag.refreshAttempted &&
+      (
+        probeRes.modelsResp.status === 401 ||
+        probeRes.modelsResp.status === 403 ||
+        probeRes.loadResp?.status === 401 ||
+        probeRes.loadResp?.status === 403 ||
+        (!probeRes.modelsResp.data && probeRes.modelsResp.status <= 0)
+      )
+    );
+    if (shouldReactiveRefresh) {
       attemptDiag.refreshAttempted = true;
       try {
         const refreshed = await refreshOAuthAccessToken(refreshToken);
@@ -492,7 +507,6 @@ export async function probeChannelQuotaSnapshot(channelId) {
           sawValidToken = true;
           attemptDiag.refreshOk = true;
           accessToken = applyRefreshedToken(baseToken, refreshToken, refreshed);
-          persistRefreshedPersonalTokens(cfg, acc, baseToken, isGcp);
           probeRes = await tryProbeWithToken(accessToken);
         }
       } catch (err) {
@@ -581,14 +595,12 @@ export async function probeChannelQuotaSnapshot(channelId) {
         probeRes.userTier
       );
       const hasValidQuotaGroups = Boolean(
-        !probeRes.loadIneligibleInfo &&
         parsedPool &&
         Array.isArray(parsedPool.quotaGroups) &&
         parsedPool.quotaGroups.length > 0
       );
       const hasValidModelsOnly = Boolean(
         !loadErrObj &&
-        !probeRes.loadIneligibleInfo &&
         poolData.modelsResp?.status === 200 &&
         parsedPool &&
         Array.isArray(parsedPool.availableModels) &&
@@ -647,7 +659,7 @@ export async function probeChannelQuotaSnapshot(channelId) {
         delete acc.lastProbeError;
         delete acc.routeBlockedUntil;
         delete acc.routeBlockedReason;
-        writeRelayConfig(cfg);
+        persistRefreshedPersonalTokens(cfg, acc, baseToken, true);
         diag.ok = true;
         probeDiagnosticByChannel.set(acc.id, diag);
         return acc.cachedQuota;
@@ -750,7 +762,11 @@ export async function probeChannelQuotaSnapshot(channelId) {
       probedVia: "agent_platform_catalog",
       updatedAt: Date.now()
     };
-    writeRelayConfig(cfg);
+    if (lastValidGcpBaseToken) {
+      persistRefreshedPersonalTokens(cfg, acc, lastValidGcpBaseToken, true);
+    } else {
+      writeRelayConfig(cfg);
+    }
     return acc.cachedQuota;
   }
 

@@ -823,11 +823,21 @@ async function requestHandler(req, res) {
       const targetAcc = cfg.accounts?.[accountId];
       if (targetAcc) {
         if (targetAcc.email && targetAcc.storedToken?.token) {
-          if (!cfg.__meta__.oauthTokensByEmail || typeof cfg.__meta__.oauthTokensByEmail !== "object") {
-            cfg.__meta__.oauthTokensByEmail = {};
-          }
-          if (!cfg.__meta__.oauthTokensByEmail[targetAcc.email]) {
-            cfg.__meta__.oauthTokensByEmail[targetAcc.email] = targetAcc.storedToken;
+          const targetIsGcp = Boolean(targetAcc.gcpProjectId || targetAcc.channelType === "gcp");
+          if (targetIsGcp) {
+            if (!cfg.__meta__.gcpOAuthTokensByEmail || typeof cfg.__meta__.gcpOAuthTokensByEmail !== "object") {
+              cfg.__meta__.gcpOAuthTokensByEmail = {};
+            }
+            if (!cfg.__meta__.gcpOAuthTokensByEmail[targetAcc.email]) {
+              cfg.__meta__.gcpOAuthTokensByEmail[targetAcc.email] = targetAcc.storedToken;
+            }
+          } else {
+            if (!cfg.__meta__.oauthTokensByEmail || typeof cfg.__meta__.oauthTokensByEmail !== "object") {
+              cfg.__meta__.oauthTokensByEmail = {};
+            }
+            if (!cfg.__meta__.oauthTokensByEmail[targetAcc.email]) {
+              cfg.__meta__.oauthTokensByEmail[targetAcc.email] = targetAcc.storedToken;
+            }
           }
         }
         delete cfg.accounts[accountId];

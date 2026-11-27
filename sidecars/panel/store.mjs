@@ -739,16 +739,25 @@ export function writeRelayConfig(cfg) {
                 if (diskAcc.companionProjectId && !memAcc.companionProjectId) {
                   memAcc.companionProjectId = diskAcc.companionProjectId;
                 }
-                const diskTokExp = new Date(diskAcc.storedToken?.token?.expiry || 0).getTime() || 0;
+                const memIsGcp = Boolean(memAcc.channelType === "gcp" || memAcc.gcpProjectId);
+                const diskTok = diskAcc.storedToken;
+                const diskTokIsGcp = Boolean(diskTok && (diskTok.project_id || diskTok.auth_method === "gcp" || diskTok.auth_method === "adc"));
+                const diskTokMatchesChannel = Boolean(diskTok?.token?.access_token) && (memIsGcp ? diskTokIsGcp : !diskTokIsGcp);
+                const diskSavedAt = Date.parse(diskAcc.savedAt || "") || 0;
+                const memSavedAt = Date.parse(memAcc.savedAt || "") || 0;
+                const diskRt = String(diskTok?.token?.refresh_token || "").trim();
+                const memRt = String(memAcc.storedToken?.token?.refresh_token || "").trim();
+                const diskTokExp = new Date(diskTok?.token?.expiry || 0).getTime() || 0;
                 const memTokExp = new Date(memAcc.storedToken?.token?.expiry || 0).getTime() || 0;
                 if (
-                  diskAcc.storedToken?.token?.access_token &&
-                  (!memAcc.storedToken?.token?.access_token || diskTokExp > memTokExp)
+                  diskTokMatchesChannel &&
+                  (!memAcc.storedToken?.token?.access_token ||
+                    (diskSavedAt >= memSavedAt && (diskRt === memRt ? diskTokExp > memTokExp : diskSavedAt > memSavedAt)))
                 ) {
                   memAcc.storedToken = diskAcc.storedToken;
-                  if (diskAcc.authExpired === false) memAcc.authExpired = false;
+                  if (diskAcc.authExpired === false && diskSavedAt >= memSavedAt) memAcc.authExpired = false;
                 }
-                if (diskErrAt > memErrAt && diskErrAt >= memUpdated) {
+                if (diskErrAt > memErrAt && diskErrAt >= memUpdated && diskErrAt >= memSavedAt) {
                   memAcc.lastProbeError = diskAcc.lastProbeError;
                   if (diskAcc.routeBlockedUntil) memAcc.routeBlockedUntil = diskAcc.routeBlockedUntil;
                   if (diskAcc.routeBlockedReason) memAcc.routeBlockedReason = diskAcc.routeBlockedReason;

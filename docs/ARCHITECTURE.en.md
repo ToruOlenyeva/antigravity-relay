@@ -26,24 +26,29 @@ antigravity-relay/
 ├── sidecars/
 │   └── panel/                   # Native build-free decoupled Sidecar panel
 │       ├── bridge/              # Cohesive backend domain sub-modules
-│       │   ├── channel-catalog.mjs   # Tier detection, API error parsing, model catalog & normalization
+│       │   ├── channel-catalog.mjs     # Tier detection, API error parsing, model catalog & normalization
 │       │   ├── cloudcode-discovery.mjs # CloudCode API transport, GCP project discovery & response parsing
-│       │   ├── cloudcode-proxy.mjs   # Local transparent proxy, rewrite & 429 failover
-│       │   ├── oauth-launcher.mjs    # Isolated OAuth, multi-instance launcher & telemetry
-│       │   ├── quota-probe.mjs       # Multi-channel probe orchestrator, error merge & 600s cooldown
-│       │   ├── route-selector.mjs    # Model family resolver & two-layer personal router
-│       │   ├── signature-scrub.mjs   # Offline SQLite Protobuf signature scrubber
-│       │   └── wincred-ls.mjs        # WinCred P/Invoke, multi-client OAuth & LS RPC
+│       │   ├── cloudcode-proxy.mjs     # Local transparent proxy, rewrite & 429 failover
+│       │   ├── net-proxy.mjs           # System proxy & CONNECT tunnel HTTPS transport adapter
+│       │   ├── oauth-extract.mjs       # PE64 binary dynamic OAuth client extractor
+│       │   ├── oauth-launcher.mjs      # Isolated OAuth, multi-instance launcher & telemetry
+│       │   ├── plugin-updater.mjs      # Git/ZIP self-updater with dirty-worktree protection
+│       │   ├── quota-probe.mjs         # Multi-channel probe orchestrator, error merge & 600s cooldown
+│       │   ├── route-selector.mjs      # Model family resolver & two-layer personal router
+│       │   ├── signature-scrub.mjs     # Offline SQLite Protobuf signature scrubber
+│       │   ├── token-vault.mjs         # Windows DPAPI at-rest token encryption/decryption engine
+│       │   └── wincred-ls.mjs          # WinCred P/Invoke, multi-client OAuth & LS RPC
 │       ├── app.js               # Frontend interaction, custom dropdowns, and sync engine
 │       ├── i18n.js              # Strictly isolated English and Chinese dictionary
 │       ├── index.html           # Frontend HTML skeleton structure
 │       ├── ls-bridge.mjs        # Backend orchestrator and barrel export facade
 │       ├── main.mjs             # Backend dual-port HTTP router and SSE broadcaster
-│       ├── preload.js           # Host preload script
 │       ├── sidecar.json         # Antigravity Sidecar container manifest
 │       ├── store.mjs            # Atomic config persistence and stale model sanitizer
-│       ├── styles.css           # Frontend flat adaptive theme stylesheet
+│       ├── styles.css           # Frontend adaptive theme stylesheet
 │       ├── ui-channels-drawers.js # Channel cards, expandable error drawer, re-login & action views
+│       ├── ui-prefs.js          # Appearance styles, 4-tier font scale, host sync & updater UI module
+│       ├── ui-routing.js        # Model compute routing & tier priority controls module
 │       └── ui-session-quota.js  # Session telemetry, project total & quota ring view
 ├── agy-relay-config.example.json # Sanitized example configuration file
 ├── hooks.json                   # Antigravity Hook configuration
@@ -89,8 +94,9 @@ antigravity-relay/
 ### 2.2 Tier Classification (Unknown Fallback), Structured Error Drawers & Multi-Instance Isolation
 `channel-catalog.mjs`, `cloudcode-discovery.mjs`, and `quota-probe.mjs` classify tiers, assemble live model whitelists, and normalize probe diagnostics from upstream metadata without static templates:
 1. <b>Strict Native List Alignment, `dynamicModelRegistry` Self-Learning & `Unknown` Fallback</b>: Foreground active accounts read live available models directly from host `GetUserStatus` (`clientModelConfigs`), filtering out `disabled` / `Unavailable` while preserving `tagTitle: "Notice"` grace-period models, enriching only matching families from cached/probed snapshots without merging back natively unavailable items; background probes against `/v1internal:fetchAvailableModels` strictly adhere to the `agentModelSorts` whitelist (excluding internal `\bsonar\b` telemetry nodes) and auto-learn placeholders plus `Orchestrator (Argon)` (`MODEL_PLACEHOLDER_M668` $\rightarrow$ `gemini-pro-orchestrator-g1-pro`) into `dynamicModelRegistry`, while `index.html` and `createChannelBadgeNode` enforce `translate="no" class="notranslate"` to block external DOM translation overlays from hijacking `Free` / `Pro` / `Plus` / `Ultra` / `GCP` badges, with `Unknown` fallback on unconfirmed tiers.
-2. <b>Isolated OAuth Refresh, Merged `lastProbeError` & 600s Routing Cooldown</b>: `wincred-ls.mjs` propagates refreshed `access_token` values strictly by matching `refresh_token`; `parseCloudCodeApiError` and `quota-probe.mjs` merge `status`, `apiStatus`, `reason`, `category` (`license_3501`, `validation_required`), `detailMessage`, `validationUrl`, and `helpLinks` across primary HTTP failures, refresh errors, and `loadCodeAssist`'s `ineligibleTiers[].reasonMessage` into `acc.lastProbeError`, stamping a `600000ms` `routeBlockedUntil` cooldown on `#3501` and `VALIDATION_REQUIRED` errors; the UI keeps the top quota section concise while showing clickable error badges on channel cards that expand an action drawer with browser verification link launching (`/api/open-external-url`), re-login, and re-probe controls.
+2. <b>Isolated OAuth Refresh, Merged `lastProbeError` & 600s Routing Cooldown</b>: `buildCleanChannelToken` in `wincred-ls.mjs` preserves `refreshedForRt` when it matches `refresh_token` to eliminate per-request OAuth refresh storms; `quota-probe.mjs` executes one forced same-channel token refresh retry on `401` / `403`, persists refreshed tokens only after upstream probe verification succeeds, and treats `loadCodeAssist` `ineligibleTiers` solely as fallback error diagnostics when `fetchAvailableModels` and `retrieveUserQuotaSummary` return no valid `200` quota or models (preventing `Trial Pro` accounts from receiving synthetic `403` restrictions); `parseCloudCodeApiError` merges primary HTTP failures, refresh errors, `validationUrl`, and `helpLinks` into `acc.lastProbeError`, stamping a `600000ms` `routeBlockedUntil` cooldown on `#3501` and `VALIDATION_REQUIRED` errors.
 3. <b>Cross-Talk-Free Multi-Instance Launcher (`+ Multi-Instance`)</b>: `oauth-launcher.mjs` passes `--user-data-dir=<path>` (with `=`) so Chromium switches its `userData` lock directory prior to `app.requestSingleInstanceLock()`, copies `app_storage.json` to bypass the onboarding wizard, and preserves the primary window's `writer_id` while temporarily staging the target channel's credential (preventing `cred_store.go`'s 1-second polling loop from switching the primary window), automatically restoring the primary credential once the new instance logs `Auth succeeded`.
+4. <b>Personal vs `GCP` Full-Stack Credential & Probe Hard Isolation</b>: OAuth logins (`oauth-launcher.mjs`) and account deletion archival (`/api/delete-account` in `main.mjs`) enforce strict bucket separation (personal flows write only `oauthTokensByEmail` and `channelTokensById["<email>#personal"]`, whereas `GCP` flows write only `gcpOAuthTokensByEmail` and `channelTokensById["<email>#gcp:<pid>"]`) with zero cross-overwrites; `findStoredTokenForEmail()` (`channel-catalog.mjs`), `normalizeAccountChannels()`, `quota-probe.mjs` candidate token pools, and `getValidPersonalAccessToken()` (`route-selector.mjs`) strictly block cross-channel reads and writes by default, allowing `{ allowCrossChannel: true }` only when explicitly deriving a new card or scanning unbound `GCP` projects; `store.mjs` validates channel type, `savedAt`, and rotated `refresh_token` state during concurrent disk merges so stale credentials or probe errors never roll back a freshly re-logged-in channel.
 
 ## 3. Dual-Layer Channel Architecture: Primary Reload Switch vs Reload-Free Personal Routing
 
@@ -160,3 +166,9 @@ All endpoints are served identically from both the host-assigned internal Sideca
 ### 4.4 Model Routing and Localization Endpoints
 - <b>Save Model and Subagent Compute Routing Rules</b>: `POST /api/save-routing` (Payload includes `modelId`, `variantIds`, `targetSpec`, `routeScope`, `subagentDefaultTarget`, `autoRelayOnLowQuota`)
 - <b>Switch UI Language and Persist Metadata</b>: `POST /api/set-language` (Payload: `{ "lang": "zh" }` or `{ "lang": "en" }`)
+
+### 4.5 Plugin Self-Updater Endpoints
+- <b>Get Version & Update Strategy Status</b>: `GET /api/updater-status`
+- <b>Trigger Remote Update Check</b>: `POST /api/updater-check`
+- <b>Save Update Policy Mode</b>: `POST /api/updater-config` (supports `manual`, `auto`, `off`)
+- <b>Apply Plugin Update and Restart Sidecar Gracefully</b>: `POST /api/updater-apply`

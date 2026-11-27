@@ -4,7 +4,8 @@ import {
 } from "../store.mjs";
 import {
   refreshOAuthAccessToken,
-  buildLoadCodeAssistMetadata
+  buildLoadCodeAssistMetadata,
+  buildCleanChannelToken
 } from "./wincred-ls.mjs";
 import {
   findStoredTokenForEmail,
@@ -475,17 +476,21 @@ export function selectPinnedPersonalAccountCandidate(pinnedAcc, baseFamily, cfg,
   return fb ? { ...fb, pinnedMatched: false, fallbackUsed: true } : null;
 }
 
+const isGcpTokenObjForPersonal = (tok) =>
+  Boolean(tok && (tok.project_id || tok.auth_method === "gcp" || tok.auth_method === "adc"));
+
 export async function getValidPersonalAccessToken(cfg, targetAcc) {
-  const preferredStored = (
-    targetAcc?.storedToken &&
-    !targetAcc.storedToken.project_id &&
-    targetAcc.storedToken.auth_method !== "gcp" &&
-    targetAcc.storedToken.auth_method !== "adc"
-  )
+  if (targetAcc && (targetAcc.channelType === "gcp" || targetAcc.gcpProjectId)) {
+    return "";
+  }
+  const preferredStored = (targetAcc?.storedToken && !isGcpTokenObjForPersonal(targetAcc.storedToken))
     ? targetAcc.storedToken
     : null;
-  const baseToken = preferredStored || findStoredTokenForEmail(cfg, targetAcc?.email, false) || targetAcc?.storedToken;
-  if (!baseToken || !baseToken.token) return "";
+  const channelStored = (targetAcc?.id && cfg?.__meta__?.channelTokensById?.[targetAcc.id] && !isGcpTokenObjForPersonal(cfg.__meta__.channelTokensById[targetAcc.id]))
+    ? cfg.__meta__.channelTokensById[targetAcc.id]
+    : null;
+  const baseToken = preferredStored || channelStored || findStoredTokenForEmail(cfg, targetAcc?.email, false);
+  if (!baseToken || !baseToken.token || isGcpTokenObjForPersonal(baseToken)) return "";
   let accessToken = baseToken.token.access_token || "";
   const refreshToken = baseToken.token.refresh_token || "";
   const expiryStr = baseToken.token.expiry || "";
@@ -503,17 +508,28 @@ export async function getValidPersonalAccessToken(cfg, targetAcc) {
         baseToken.token.access_token = accessToken;
         baseToken.token.refreshedForRt = refreshToken;
         baseToken.token.expiry = newExpiry;
+        const cleanTok = buildCleanChannelToken(baseToken, "", "", false);
         if (targetAcc) {
           targetAcc.authExpired = false;
           delete targetAcc.lastTokenRefreshError;
+          targetAcc.storedToken = cleanTok;
+          if (!cfg.__meta__.channelTokensById || typeof cfg.__meta__.channelTokensById !== "object") {
+            cfg.__meta__.channelTokensById = {};
+          }
+          cfg.__meta__.channelTokensById[targetAcc.id] = JSON.parse(JSON.stringify(cleanTok));
+        }
+        if (targetAcc?.email) {
+          if (!cfg.__meta__.oauthTokensByEmail || typeof cfg.__meta__.oauthTokensByEmail !== "object") {
+            cfg.__meta__.oauthTokensByEmail = {};
+          }
+          cfg.__meta__.oauthTokensByEmail[targetAcc.email] = JSON.parse(JSON.stringify(cleanTok));
         }
         for (const item of Object.values(cfg.accounts || {})) {
-          if (item.storedToken?.token?.refresh_token === refreshToken) {
+          const itemIsGcp = Boolean(item.gcpProjectId || item.channelType === "gcp");
+          if (!itemIsGcp && item.storedToken?.token?.refresh_token === refreshToken) {
             item.authExpired = false;
             delete item.lastTokenRefreshError;
-            item.storedToken.token.access_token = accessToken;
-            item.storedToken.token.refreshedForRt = refreshToken;
-            item.storedToken.token.expiry = newExpiry;
+            item.storedToken = buildCleanChannelToken(baseToken, "", "", false);
           }
         }
         writeRelayConfig(cfg);

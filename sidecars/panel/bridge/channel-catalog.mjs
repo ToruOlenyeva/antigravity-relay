@@ -1786,15 +1786,42 @@ export function normalizeAccountChannels(cfg) {
         }
       }
 
-      const dedicatedGcpTok = (isGcp && pid) ? cfg.__meta__?.gcpOAuthTokensByEmail?.[email] : null;
-      const dedicatedPersTok = (!isGcp) ? cfg.__meta__?.oauthTokensByEmail?.[email] : null;
+      const isTargetGcp = Boolean(isGcp && pid);
+      const sameChannelBucketTok = isTargetGcp
+        ? cfg.__meta__?.gcpOAuthTokensByEmail?.[email]
+        : cfg.__meta__?.oauthTokensByEmail?.[email];
+      const sameChannelCandidates = [
+        item.storedToken,
+        cfg.__meta__?.channelTokensById?.[normKey],
+        sameChannelBucketTok
+      ].filter((cand) => {
+        if (!cand || !cand.token) return false;
+        if (!isTargetGcp && isGcpStoredTokenObj(cand)) return false;
+        return true;
+      });
+      const pickBestSameChannelToken = (candidates) => {
+        if (!candidates || candidates.length === 0) return null;
+        let best = candidates[0];
+        for (let i = 1; i < candidates.length; i += 1) {
+          const cand = candidates[i];
+          const bestHasRt = Boolean(best.token?.refresh_token);
+          const candHasRt = Boolean(cand.token?.refresh_token);
+          if (candHasRt && !bestHasRt) {
+            best = cand;
+            continue;
+          }
+          if (!candHasRt && bestHasRt) continue;
+          const bestExp = new Date(best.token?.expiry || 0).getTime() || 0;
+          const candExp = new Date(cand.token?.expiry || 0).getTime() || 0;
+          if (candExp > bestExp) {
+            best = cand;
+          }
+        }
+        return best;
+      };
       const rawChannelTok =
-        (isGcp && pid && dedicatedGcpTok?.token?.refresh_token
-          ? dedicatedGcpTok
-          : (!isGcp && dedicatedPersTok?.token?.refresh_token ? dedicatedPersTok : null)) ||
-        item.storedToken ||
-        cfg.__meta__?.channelTokensById?.[normKey] ||
-        findStoredTokenForEmail(cfg, email, Boolean(isGcp && pid));
+        pickBestSameChannelToken(sameChannelCandidates) ||
+        findStoredTokenForEmail(cfg, email, isTargetGcp);
       const isolatedChannelTok = rawChannelTok
         ? buildCleanChannelToken(
             JSON.parse(JSON.stringify(rawChannelTok)),
@@ -1911,7 +1938,10 @@ export function addOrUpdatePersonalChannelCard(email) {
   if (!cleanEmail) return null;
   const cfg = readRelayConfig();
   normalizeAccountChannels(cfg);
-  const baseToken = findStoredTokenForEmail(cfg, cleanEmail, false) || readWinCredToken(false);
+  const winCred = readWinCredToken(false);
+  const baseToken =
+    findStoredTokenForEmail(cfg, cleanEmail, false, { allowCrossChannel: true }) ||
+    (winCred && winCred.id_token_email === cleanEmail ? winCred : null);
   const personalKey = `${cleanEmail}#personal`;
   if (Array.isArray(cfg.__meta__?.deletedChannelIds)) {
     cfg.__meta__.deletedChannelIds = cfg.__meta__.deletedChannelIds.filter((id) => id !== personalKey);
@@ -1922,6 +1952,9 @@ export function addOrUpdatePersonalChannelCard(email) {
     existing?.cachedQuota?.probedVia ||
     existing?.cachedQuota?.quotaGroups?.length
   );
+  const nextPersonalTok = baseToken
+    ? buildCleanChannelToken(baseToken, "", "")
+    : (existing?.storedToken || null);
   cfg.accounts[personalKey] = {
     ...existing,
     id: personalKey,
@@ -1936,10 +1969,14 @@ export function addOrUpdatePersonalChannelCard(email) {
     gcpBillingMode: "",
     gcpLocation: "",
     savedAt: existing?.savedAt || new Date().toISOString(),
-    storedToken: baseToken
-      ? buildCleanChannelToken(baseToken, "", "")
-      : (existing?.storedToken || null)
+    storedToken: nextPersonalTok
   };
+  if (nextPersonalTok) {
+    if (!cfg.__meta__.channelTokensById || typeof cfg.__meta__.channelTokensById !== "object") {
+      cfg.__meta__.channelTokensById = {};
+    }
+    cfg.__meta__.channelTokensById[personalKey] = JSON.parse(JSON.stringify(nextPersonalTok));
+  }
   writeRelayConfig(cfg);
   return cfg.accounts[personalKey];
 }

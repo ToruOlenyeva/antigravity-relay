@@ -229,7 +229,12 @@ export async function addOrUpdateGcpChannelCard(email, projectId, opts = {}) {
 
   const cfg = readRelayConfig();
   normalizeAccountChannels(cfg);
-  const baseToken = findStoredTokenForEmail(cfg, cleanEmail, true) || readWinCredToken(false);
+  const baseToken =
+    findStoredTokenForEmail(cfg, cleanEmail, true, { allowCrossChannel: true }) ||
+    (() => {
+      const wc = readWinCredToken(false);
+      return wc?.id_token_email === cleanEmail ? wc : null;
+    })();
   if (!cfg.gcpProjects.includes(cleanPid)) {
     cfg.gcpProjects.push(cleanPid);
   }

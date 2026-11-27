@@ -26,24 +26,29 @@ antigravity-relay/
 ├── sidecars/
 │   └── panel/                   # 原生免构建前后端物理分离 Sidecar 面板
 │       ├── bridge/              # 后端高内聚业务子模块目录
-│       │   ├── channel-catalog.mjs   # 通道等级判定、API 错误解析、动态模型目录与凭据归一化
+│       │   ├── channel-catalog.mjs     # 通道等级判定、API 错误解析、动态模型目录与凭据归一化
 │       │   ├── cloudcode-discovery.mjs # CloudCode API 传输、GCP 项目多源发现与模型/配额解析
-│       │   ├── cloudcode-proxy.mjs   # 本地透明反向代理、请求改写与 429 故障转移
-│       │   ├── oauth-launcher.mjs    # 旁路 OAuth 登录、多开隔离实例与会话遥测
-│       │   ├── quota-probe.mjs       # 多通道配额探测编排、错误合并与 600s 路由退避控制
-│       │   ├── route-selector.mjs    # 模型家族映射与双层重置时间个人通道选路器
-│       │   ├── signature-scrub.mjs   # SQLite Protobuf 思维签名离线无损剥离器
-│       │   └── wincred-ls.mjs        # WinCred 凭据读写、多客户端刷新与 LS RPC
+│       │   ├── cloudcode-proxy.mjs     # 本地透明反向代理、请求改写与 429 故障转移
+│       │   ├── net-proxy.mjs           # 系统代理探测与 CONNECT 隧道 HTTPS 传输适配器
+│       │   ├── oauth-extract.mjs       # PE64 客户端二进制动态 OAuth 凭据提取器
+│       │   ├── oauth-launcher.mjs      # 旁路 OAuth 登录、多开隔离实例与会话遥测
+│       │   ├── plugin-updater.mjs      # Git/ZIP 独立插件自更新器与未提交改动保护
+│       │   ├── quota-probe.mjs         # 多通道配额探测编排、错误合并与 600s 路由退避控制
+│       │   ├── route-selector.mjs      # 模型家族映射与双层重置时间个人通道选路器
+│       │   ├── signature-scrub.mjs     # SQLite Protobuf 思维签名离线无损剥离器
+│       │   ├── token-vault.mjs         # Windows DPAPI 本地静态 Token 加解密引擎
+│       │   └── wincred-ls.mjs          # WinCred 凭据读写、多客户端刷新与 LS RPC
 │       ├── app.js               # 前端核心交互、自定义下拉与状态同步引擎
 │       ├── i18n.js              # 前端中英双语严格隔离词典
 │       ├── index.html           # 前端纯骨架页面
-│       ├── ls-bridge.mjs        # 后端主协调器与统一导出门面 (Barrel Facade)
+│       ├── ls-bridge.mjs        # 后端主协调器与统一导出门面
 │       ├── main.mjs             # 后端双端口 HTTP 路由与 SSE 实时广播入口
-│       ├── preload.js           # 宿主预加载脚本
 │       ├── sidecar.json         # Antigravity Sidecar 容器元数据契约
 │       ├── store.mjs            # 配置原子化落盘与脏模型自动清洗
-│       ├── styles.css           # 前端纯扁平自适应主题样式表
+│       ├── styles.css           # 前端自适应主题样式表
 │       ├── ui-channels-drawers.js # 通道列表、可展开报错抽屉、一键重登与操作视图模块
+│       ├── ui-prefs.js          # 外观风格、4 档比例字号、宿主字号同步与自更新偏好模块
+│       ├── ui-routing.js        # 模型算力路由与等级优先策略视图模块
 │       └── ui-session-quota.js  # 会话统计、项目汇总与配额环视图模块
 ├── agy-relay-config.example.json # 脱敏示例配置档案
 ├── hooks.json                   # Antigravity Hook 配置文件
@@ -89,8 +94,9 @@ antigravity-relay/
 ### 2.2 通道等级识别（含 Unknown 保底）、结构化错误抽屉与隔离多开
 `channel-catalog.mjs`、`cloudcode-discovery.mjs` 与 `quota-probe.mjs` 严格依据 Google 官方元数据判定通道等级、构建动态模型白名单并抽提结构化错误（零静态模板）：
 1. <b>原生列表严格对齐、`dynamicModelRegistry` 动态自学习与 `Unknown` 保底</b>：前台活跃账号直读宿主 `GetUserStatus`（`clientModelConfigs`）真实可用列表并过滤 `disabled` / `Unavailable`（保留 `tagTitle: "Notice"` 过渡期模型），仅从云端快照补充同家族变体与配额数据（不并入原生判定不可用的项）；后台多账号探测向 `/v1internal:fetchAvailableModels` 严格以 `agentModelSorts` 原生白名单为准（剔除内部 `\bsonar\b` 代码分析节点），并通过 `dynamicModelRegistry`（`placeholderToSlug`、`placeholderToFamily`、`labelToSlug`、`clientCatalog`）实时学习占位符与 `Orchestrator (Argon)`（`MODEL_PLACEHOLDER_M668` $\rightarrow$ `gemini-pro-orchestrator-g1-pro`）映射，同时在 `index.html` 与 `createChannelBadgeNode` 注入 `translate="no" class="notranslate"` 防止外部 DOM 汉化脚本篡改 `Free` / `Pro` / `Plus` / `Ultra` / `GCP` 徽章；未确认订阅源时保底标记为 `Unknown` 而非误标为 `Pro`。
-2. <b>多 OAuth Client 刷新隔离、结构化 `lastProbeError` 合并与 600s 路由冷却</b>：`wincred-ls.mjs` 按严格匹配的 `refresh_token` 分发刷新后的 `access_token`；`parseCloudCodeApiError` 与 `quota-probe.mjs` 从失败端点、刷新异常及 `loadCodeAssist` 返回的 `ineligibleTiers[].reasonMessage` 中联合提取 `status`、`apiStatus`、`reason`、`category`（识别 `license_3501`、`validation_required`）、`detailMessage`、`validationUrl` 与 `helpLinks` 并写入 `acc.lastProbeError`，命中 `#3501` 或 `VALIDATION_REQUIRED` 时自动写入 `600000ms` 的 `routeBlockedUntil` 路由退避冷却；前端顶部配额区保持简洁错误提示，账号卡片通过可点击紧凑徽章按需展开详情抽屉并支持经 `/api/open-external-url` 在系统浏览器打开 Google 验证/帮助外链或一键重登。
+2. <b>多 OAuth Client 刷新隔离、结构化 `lastProbeError` 合并与 600s 路由冷却</b>：`wincred-ls.mjs` 中的 `buildCleanChannelToken` 完整保留与 `refresh_token` 一致的 `refreshedForRt` 字段，消除每次请求或探测重复刷新 Token 的风暴；`quota-probe.mjs` 在遇到 `401` 或 `403` 时强制刷新一次同通道 Token 重试，且仅在接口探测确认成功后才持久化更新凭据；对于 `Trial Pro` 等账户在 `/v1internal:loadCodeAssist` 返回的 `ineligibleTiers`，仅当 `fetchAvailableModels` 与 `retrieveUserQuotaSummary` 均未拿到有效 `200` 配额或模型时才作为兜底错误上报，避免正常账户被合成 `403` 误标受限；`parseCloudCodeApiError` 统一合并主错误、刷新异常与 `validationUrl` / `helpLinks` 写入 `acc.lastProbeError`，命中 `#3501` 或 `VALIDATION_REQUIRED` 时自动写入 `600000ms` 的 `routeBlockedUntil` 路由退避冷却。
 3. <b>独立多开实例（`+ 多开实例`）免串扰架构</b>：`oauth-launcher.mjs` 通过等号拼接的 `--user-data-dir=<path>` 参数让 Chromium 在 `app.requestSingleInstanceLock()` 前切换独立用户目录锁，同步复制 `app_storage.json` 跳过首次向导直达 Hub，并在临时写入目标通道凭据时保留主窗口原本的 `writer_id`（防止主窗口 `cred_store.go` 1s 轮询被误触发切换），待新实例日志出现 `Auth succeeded` 后自动还原主实例凭据。
+4. <b>个人通道与 `GCP` 通道全链路凭据及探测硬隔离</b>：OAuth 登录（`oauth-launcher.mjs`）与删号归档（`main.mjs` 的 `/api/delete-account`）按通道物理分桶写入（个人仅写入 `oauthTokensByEmail` 与 `channelTokensById["<email>#personal"]`，`GCP` 仅写入 `gcpOAuthTokensByEmail` 与 `channelTokensById["<email>#gcp:<pid>"]`），互不覆写；`findStoredTokenForEmail()`（`channel-catalog.mjs`）、`normalizeAccountChannels()`、`quota-probe.mjs` 候选 Token 池与 `getValidPersonalAccessToken()`（`route-selector.mjs`）默认严格拦截跨通道读取与回写，仅在主动复用本地账号创建卡片或扫描未绑定 `GCP` 项目时通过 `{ allowCrossChannel: true }` 显式放行；`store.mjs` 在并发落盘合并时同步核验通道类型、`savedAt` 与 `refresh_token` 轮换状态，防止旧凭据或旧报错回滚覆盖刚重登的通道。
 
 ## 3. 双层通道架构：主通道重载切换 vs 个人通道免重载路由
 
@@ -160,3 +166,9 @@ antigravity-relay/
 ### 4.4 模型路由与国际化设置接口
 - <b>保存模型与子智能体算力路由规则</b>：`POST /api/save-routing`（请求体包含 `modelId`、`variantIds`、`targetSpec`、`routeScope`、`subagentDefaultTarget`、`autoRelayOnLowQuota`）
 - <b>动态切换中英文界面并持久化</b>：`POST /api/set-language`（请求体：`{ "lang": "zh" }` 或 `{ "lang": "en" }`）
+
+### 4.5 插件自更新管理接口
+- <b>读取版本与更新策略状态</b>：`GET /api/updater-status`
+- <b>触发远端版本检查</b>：`POST /api/updater-check`
+- <b>保存更新策略模式</b>：`POST /api/updater-config`（支持 `manual`、`auto`、`off`）
+- <b>执行插件自更新并优雅重启 Sidecar</b>：`POST /api/updater-apply`

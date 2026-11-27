@@ -305,7 +305,9 @@ export async function discoverGcpProjectsForAccount(targetEmail = "") {
   const email = (targetEmail || cred?.id_token_email || cfg.__meta__?.activeEmail || "").trim();
   if (!email) return { email: "", discovered: [], reason: "" };
 
-  const storedToken = findStoredTokenForEmail(cfg, email, true) || findStoredTokenForEmail(cfg, email) || cred;
+  const storedToken =
+    findStoredTokenForEmail(cfg, email, true, { allowCrossChannel: true }) ||
+    (cred?.id_token_email === email ? cred : null);
   if (!storedToken || !storedToken.token) return { email, discovered: [], reason: "" };
 
   let accessToken = storedToken.token.access_token || "";
