@@ -1248,35 +1248,69 @@ export function startIsolatedOAuthFlow(optionsOrCallback = {}, maybeCallback = n
         const storedToken = buildCleanChannelToken({
           token: {
             access_token: tokenResp.access_token, token_type: tokenResp.token_type || "Bearer",
-            refresh_token: tokenResp.refresh_token, expiry: expiryDate, expires_in: tokenResp.expires_in || 3599
+            refresh_token: tokenResp.refresh_token,
+            refreshedForRt: tokenResp.refresh_token || "",
+            expiry: expiryDate, expires_in: tokenResp.expires_in || 3599
           },
           id_token: tokenResp.id_token || "", id_token_email: email
         }, "", "");
 
         const cfg = readRelayConfig();
         normalizeAccountChannels(cfg);
-        if (!cfg.__meta__.oauthTokensByEmail || typeof cfg.__meta__.oauthTokensByEmail !== "object") cfg.__meta__.oauthTokensByEmail = {};
-        cfg.__meta__.oauthTokensByEmail[email] = storedToken;
-        if (targetChannelType === "gcp") {
-          if (!cfg.__meta__.gcpOAuthTokensByEmail || typeof cfg.__meta__.gcpOAuthTokensByEmail !== "object") cfg.__meta__.gcpOAuthTokensByEmail = {};
-          cfg.__meta__.gcpOAuthTokensByEmail[email] = storedToken;
+        if (!cfg.__meta__.channelTokensById || typeof cfg.__meta__.channelTokensById !== "object") {
+          cfg.__meta__.channelTokensById = {};
         }
+        if (targetChannelType === "gcp") {
+          if (!cfg.__meta__.gcpOAuthTokensByEmail || typeof cfg.__meta__.gcpOAuthTokensByEmail !== "object") {
+            cfg.__meta__.gcpOAuthTokensByEmail = {};
+          }
+          const gcpBucketToken = targetGcpProjectId
+            ? buildCleanChannelToken(
+                storedToken,
+                targetGcpProjectId,
+                targetGcpBillingMode === "agent_platform" ? targetGcpLocation : "",
+                false,
+                targetGcpBillingMode
+              )
+            : { ...JSON.parse(JSON.stringify(storedToken)), auth_method: "gcp" };
+          cfg.__meta__.gcpOAuthTokensByEmail[email] = gcpBucketToken;
 
-        for (const existingAcc of Object.values(cfg.accounts || {})) {
-          if (existingAcc.email === email) {
+          for (const existingAcc of Object.values(cfg.accounts || {})) {
+            if (existingAcc.email !== email) continue;
             const existingIsGcp = Boolean(existingAcc.gcpProjectId || existingAcc.channelType === "gcp");
-            if (targetChannelType === "personal" && existingIsGcp && existingAcc.storedToken?.token?.refresh_token && !existingAcc.authExpired) continue;
-            if (targetChannelType === "gcp" && !existingIsGcp && existingAcc.storedToken?.token?.refresh_token && !existingAcc.authExpired) continue;
+            if (!existingIsGcp) continue;
             existingAcc.authExpired = false;
-            existingAcc.storedToken = existingAcc.gcpProjectId
-              ? buildCleanChannelToken(
-                  storedToken,
-                  existingAcc.gcpProjectId,
-                  existingAcc.gcpBillingMode === "agent_platform" ? (existingAcc.gcpLocation || "global") : "",
-                  false,
-                  existingAcc.gcpBillingMode || "agent_platform"
-                )
-              : storedToken;
+            delete existingAcc.lastProbeError;
+            delete existingAcc.routeBlockedUntil;
+            delete existingAcc.routeBlockedReason;
+            delete existingAcc.lastTokenRefreshError;
+            const updatedGcpTok = buildCleanChannelToken(
+              storedToken,
+              existingAcc.gcpProjectId,
+              existingAcc.gcpBillingMode === "agent_platform" ? (existingAcc.gcpLocation || "global") : "",
+              false,
+              existingAcc.gcpBillingMode || "agent_platform"
+            );
+            existingAcc.storedToken = updatedGcpTok;
+            cfg.__meta__.channelTokensById[existingAcc.id] = JSON.parse(JSON.stringify(updatedGcpTok));
+          }
+        } else {
+          if (!cfg.__meta__.oauthTokensByEmail || typeof cfg.__meta__.oauthTokensByEmail !== "object") {
+            cfg.__meta__.oauthTokensByEmail = {};
+          }
+          cfg.__meta__.oauthTokensByEmail[email] = JSON.parse(JSON.stringify(storedToken));
+
+          for (const existingAcc of Object.values(cfg.accounts || {})) {
+            if (existingAcc.email !== email) continue;
+            const existingIsGcp = Boolean(existingAcc.gcpProjectId || existingAcc.channelType === "gcp");
+            if (existingIsGcp) continue;
+            existingAcc.authExpired = false;
+            delete existingAcc.lastProbeError;
+            delete existingAcc.routeBlockedUntil;
+            delete existingAcc.routeBlockedReason;
+            delete existingAcc.lastTokenRefreshError;
+            existingAcc.storedToken = JSON.parse(JSON.stringify(storedToken));
+            cfg.__meta__.channelTokensById[existingAcc.id] = JSON.parse(JSON.stringify(storedToken));
           }
         }
 
@@ -1288,22 +1322,24 @@ export function startIsolatedOAuthFlow(optionsOrCallback = {}, maybeCallback = n
             }
             const tierName = targetGcpBillingMode === "gemini_enterprise" ? "Gemini Enterprise" : "Agent Platform";
             if (!cfg.gcpProjects.includes(targetGcpProjectId)) cfg.gcpProjects.push(targetGcpProjectId);
+            const gcpCardTok = buildCleanChannelToken(
+              storedToken,
+              targetGcpProjectId,
+              targetGcpBillingMode === "agent_platform" ? targetGcpLocation : "",
+              true,
+              targetGcpBillingMode
+            );
             cfg.accounts[gcpKey] = {
               id: gcpKey, alias: `${email} (${targetGcpProjectId})`, email, channelType: "gcp", tierName,
               authExpired: false,
               gcpProjectId: targetGcpProjectId, gcpBillingMode: targetGcpBillingMode, gcpLocation: targetGcpLocation,
               projectName: targetGcpProjectId, savedAt: new Date().toISOString(),
-              storedToken: buildCleanChannelToken(
-                storedToken,
-                targetGcpProjectId,
-                targetGcpBillingMode === "agent_platform" ? targetGcpLocation : "",
-                true,
-                targetGcpBillingMode
-              ),
+              storedToken: gcpCardTok,
               cachedQuota: targetGcpBillingMode === "agent_platform"
                 ? { isGcpUnlimited: true, quotaGroups: [], availableModels: AGENT_PLATFORM_DEFAULT_MODELS.map((m) => ({ ...m, variantIds: [...m.variantIds] })), updatedAt: Date.now() }
                 : { isGcpUnlimited: true, quotaGroups: [], availableModels: [], updatedAt: Date.now() }
             };
+            cfg.__meta__.channelTokensById[gcpKey] = JSON.parse(JSON.stringify(gcpCardTok));
             writeRelayConfig(cfg);
             if (onCompleteCallback) onCompleteCallback({ success: true, email, channelType: "gcp", gcpProjectId: targetGcpProjectId, autoScanGcp: false });
           } else {
@@ -1331,6 +1367,7 @@ export function startIsolatedOAuthFlow(optionsOrCallback = {}, maybeCallback = n
         delete nextAcc.routeBlockedReason;
         delete nextAcc.lastTokenRefreshError;
         cfg.accounts[personalKey] = nextAcc;
+        cfg.__meta__.channelTokensById[personalKey] = JSON.parse(JSON.stringify(storedToken));
         writeRelayConfig(cfg);
 
         try {

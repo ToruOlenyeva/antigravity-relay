@@ -882,10 +882,13 @@ export function buildCleanChannelToken(
   const next = { ...baseToken };
   delete next.id_token;
   if (next.token && typeof next.token === "object") {
+    const cleanRt = String(next.token.refresh_token || "").trim();
+    const cleanRefreshedForRt = String(next.token.refreshedForRt || "").trim();
     next.token = {
       access_token: String(next.token.access_token || "").trim(),
       token_type: String(next.token.token_type || "Bearer").trim(),
-      refresh_token: String(next.token.refresh_token || "").trim(),
+      refresh_token: cleanRt,
+      ...(cleanRefreshedForRt && cleanRefreshedForRt === cleanRt ? { refreshedForRt: cleanRefreshedForRt } : {}),
       expiry: normalizeIsoExpiry(next.token.expiry),
       expires_in: Number(next.token.expires_in || 3599)
     };

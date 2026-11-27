@@ -1441,33 +1441,65 @@ export function sanitizeCachedQuotaModels(
   };
 }
 
-export function findStoredTokenForEmail(cfg, email, preferGcp = null) {
+export function isGcpStoredTokenObj(tok) {
+  return Boolean(tok && (tok.project_id || tok.auth_method === "gcp" || tok.auth_method === "adc"));
+}
+
+export function findStoredTokenForEmail(cfg, email, preferGcp = null, opts = {}) {
   if (!email) return null;
+  const allowCrossChannel = Boolean(opts?.allowCrossChannel);
   if (preferGcp === false) {
-    if (cfg?.__meta__?.oauthTokensByEmail?.[email]?.token?.refresh_token) {
-      return cfg.__meta__.oauthTokensByEmail[email];
+    const emailPersTok = cfg?.__meta__?.oauthTokensByEmail?.[email];
+    if (emailPersTok?.token && !isGcpStoredTokenObj(emailPersTok) && emailPersTok.token.refresh_token) {
+      return emailPersTok;
     }
-    for (const acc of Object.values(cfg.accounts || {})) {
+    const chPersTok = cfg?.__meta__?.channelTokensById?.[`${email}#personal`];
+    if (chPersTok?.token && !isGcpStoredTokenObj(chPersTok) && chPersTok.token.refresh_token) {
+      return chPersTok;
+    }
+    for (const acc of Object.values(cfg?.accounts || {})) {
       const accIsGcp = Boolean(acc.gcpProjectId || acc.channelType === "gcp");
-      if (acc.email === email && !accIsGcp && acc.storedToken?.token?.refresh_token) {
+      if (acc.email === email && !accIsGcp && acc.storedToken?.token?.refresh_token && !isGcpStoredTokenObj(acc.storedToken)) {
+        return acc.storedToken;
+      }
+    }
+    if (emailPersTok?.token && !isGcpStoredTokenObj(emailPersTok)) return emailPersTok;
+    if (chPersTok?.token && !isGcpStoredTokenObj(chPersTok)) return chPersTok;
+    for (const acc of Object.values(cfg?.accounts || {})) {
+      const accIsGcp = Boolean(acc.gcpProjectId || acc.channelType === "gcp");
+      if (acc.email === email && !accIsGcp && acc.storedToken?.token && !isGcpStoredTokenObj(acc.storedToken)) {
         return acc.storedToken;
       }
     }
     const winCred = readWinCredToken(false);
-    if (winCred && winCred.id_token_email === email && !winCred.project_id && winCred.auth_method !== "gcp" && winCred.auth_method !== "adc") {
+    if (winCred && winCred.id_token_email === email && !isGcpStoredTokenObj(winCred)) {
       return winCred;
     }
+    if (!allowCrossChannel) return null;
   }
-  if (preferGcp === true && cfg?.__meta__?.gcpOAuthTokensByEmail?.[email]?.token) {
-    return cfg.__meta__.gcpOAuthTokensByEmail[email];
-  }
-  if (preferGcp !== null) {
-    for (const acc of Object.values(cfg.accounts || {})) {
+  if (preferGcp === true) {
+    const emailGcpTok = cfg?.__meta__?.gcpOAuthTokensByEmail?.[email];
+    if (emailGcpTok?.token?.refresh_token) {
+      return emailGcpTok;
+    }
+    for (const acc of Object.values(cfg?.accounts || {})) {
       const accIsGcp = Boolean(acc.gcpProjectId || acc.channelType === "gcp");
-      if (acc.email === email && accIsGcp === Boolean(preferGcp) && acc.storedToken?.token) {
+      if (acc.email === email && accIsGcp && acc.storedToken?.token?.refresh_token) {
         return acc.storedToken;
       }
     }
+    if (emailGcpTok?.token) return emailGcpTok;
+    for (const acc of Object.values(cfg?.accounts || {})) {
+      const accIsGcp = Boolean(acc.gcpProjectId || acc.channelType === "gcp");
+      if (acc.email === email && accIsGcp && acc.storedToken?.token) {
+        return acc.storedToken;
+      }
+    }
+    const winCred = readWinCredToken(false);
+    if (winCred && winCred.id_token_email === email && isGcpStoredTokenObj(winCred)) {
+      return winCred;
+    }
+    if (!allowCrossChannel) return null;
   }
   if (cfg?.__meta__?.oauthTokensByEmail?.[email]?.token) {
     return cfg.__meta__.oauthTokensByEmail[email];
@@ -1475,7 +1507,7 @@ export function findStoredTokenForEmail(cfg, email, preferGcp = null) {
   if (cfg?.__meta__?.gcpOAuthTokensByEmail?.[email]?.token) {
     return cfg.__meta__.gcpOAuthTokensByEmail[email];
   }
-  for (const acc of Object.values(cfg.accounts || {})) {
+  for (const acc of Object.values(cfg?.accounts || {})) {
     if (acc.email === email && acc.storedToken?.token) {
       return acc.storedToken;
     }
